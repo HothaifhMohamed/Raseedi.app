@@ -20,6 +20,7 @@ import {
   isDateInLockedPeriod,
   toArabicNumerals,
 } from '../../services/calculations';
+import { normalizeApprovalStatus } from '../../services/entitlements';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { AdBanner } from '../common/AdBanner';
 import { MoneyText } from '../common/MoneyText';
@@ -30,6 +31,9 @@ export const TransactionsTab: React.FC = () => {
     activeOrganization,
     activeOrgRole,
     canOrgWrite,
+    isOrgReadOnly,
+    orgHasMoreTx,
+    loadMoreOrgTransactions,
     orgCostCenters,
     transactions,
     wallets,
@@ -59,6 +63,7 @@ export const TransactionsTab: React.FC = () => {
   const [moveModalOpen, setMoveModalOpen] = useState(false);
   const [showCategoryModal, setShowCategoryModal] = useState(false);
   const [visibleTxLimit, setVisibleTxLimit] = useState(60);
+  const [isLoadingMoreCloud, setIsLoadingMoreCloud] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
@@ -333,13 +338,14 @@ export const TransactionsTab: React.FC = () => {
                   const isLockedByPeriod =
                     isOrgWorkspace &&
                     isDateInLockedPeriod(tx.date, activeOrganization?.lockedUntilDate);
+                  const txStatus = normalizeApprovalStatus(tx.approvalStatus);
                   const isApprovedEmployeeLocked =
                     isOrgWorkspace &&
                     activeOrgRole === 'employee' &&
-                    tx.approvalStatus === 'approved';
+                    (txStatus === 'approved' || txStatus === 'paid');
                   const canMutateTx =
                     !isOrgWorkspace ||
-                    (canOrgWrite && !isLockedByPeriod && !isApprovedEmployeeLocked);
+                    (!isOrgReadOnly && canOrgWrite && !isLockedByPeriod && !isApprovedEmployeeLocked);
                   const costCenter = tx.costCenterId
                     ? orgCostCenters.find((cc) => cc.id === tx.costCenterId)
                     : null;
@@ -392,19 +398,29 @@ export const TransactionsTab: React.FC = () => {
                             </span>
 
                             {/* Approval Status Badge */}
-                            {isOrgWorkspace && tx.approvalStatus === 'pending_approval' && (
+                            {isOrgWorkspace && txStatus === 'pending' && (
                               <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-[var(--color-warning)]/15 text-[var(--color-warning-text)]">
                                 {t('pendingApprovalBadge')}
                               </span>
                             )}
-                            {isOrgWorkspace && tx.approvalStatus === 'rejected' && (
+                            {isOrgWorkspace && txStatus === 'rejected' && (
                               <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-[var(--color-expense)]/15 text-[var(--color-expense)]">
                                 {t('rejectedBadge')}
                               </span>
                             )}
-                            {isOrgWorkspace && tx.approvalStatus === 'approved' && tx.reviewedAt && (
+                            {isOrgWorkspace && txStatus === 'paid' && (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-[var(--color-income)]/15 text-[var(--color-income)]">
+                                {t('paidBadge')}
+                              </span>
+                            )}
+                            {isOrgWorkspace && txStatus === 'approved' && tx.reviewedAt && (
                               <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-[var(--color-income)]/15 text-[var(--color-income)]">
                                 {t('approvedBadge')}
+                              </span>
+                            )}
+                            {isOrgWorkspace && txStatus === 'draft' && (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-[var(--color-bg)] border border-[var(--color-line)] text-[var(--color-muted)]">
+                                {isRTL ? 'مسودة' : 'Draft'}
                               </span>
                             )}
 
@@ -434,7 +450,8 @@ export const TransactionsTab: React.FC = () => {
                               </span>
                             )}
 
-                            {tx.attachments && tx.attachments.length > 0 && (
+                            {((tx.attachments && tx.attachments.length > 0) ||
+                              (tx.attachmentPaths && tx.attachmentPaths.length > 0)) && (
                               <Paperclip className="w-3 h-3 text-[var(--color-muted)]" />
                             )}
                           </div>
@@ -585,6 +602,31 @@ export const TransactionsTab: React.FC = () => {
                 {isRTL
                   ? `عرض المزيد (${renderedCount} من ${filteredTransactions.length})`
                   : `Load more (${renderedCount} of ${filteredTransactions.length})`}
+              </button>
+            </div>
+          )}
+
+          {isOrgWorkspace && orgHasMoreTx && !hasMoreTransactions && (
+            <div className="pt-1">
+              <button
+                type="button"
+                disabled={isLoadingMoreCloud}
+                onClick={() => {
+                  setIsLoadingMoreCloud(true);
+                  void loadMoreOrgTransactions().finally(() => {
+                    setIsLoadingMoreCloud(false);
+                    setVisibleTxLimit((prev) => prev + 200);
+                  });
+                }}
+                className="w-full py-2.5 rounded-xl bg-[var(--color-surface)] border border-[var(--color-accent)]/40 text-xs font-semibold text-[var(--color-accent)] hover:border-[var(--color-accent)] transition-colors min-h-[44px] disabled:opacity-50"
+              >
+                {isLoadingMoreCloud
+                  ? isRTL
+                    ? 'جاري تحميل معاملات أقدم من السحابة...'
+                    : 'Loading older cloud transactions...'
+                  : isRTL
+                  ? 'تحميل معاملات أقدم من السحابة'
+                  : 'Load older transactions from Cloud'}
               </button>
             </div>
           )}

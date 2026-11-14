@@ -79,7 +79,7 @@ export const AdBanner: React.FC<AdBannerProps> = ({
     }
   }, [isPro, canTryAdSense, adSenseClient]);
 
-  if (isPro) return null;
+  if (isPro || !adSenseClient) return null;
 
   const titleText = isRTL
     ? fallbackTitleAr || 'رَصِيدِي برو — تحكم مالي أذكى بدون إعلانات'

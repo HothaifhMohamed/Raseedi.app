@@ -28,7 +28,7 @@ import { TransactionType, PriorityLevel, RecurrenceFrequency, Transaction } from
 import { CalculatorKeypad } from './CalculatorKeypad';
 import { CurrencyPickerModal } from './common/CurrencyPickerModal';
 import { IconRenderer } from './common/IconRenderer';
-import { convertCurrency } from '../services/currency';
+import { convertCurrency, toMinor } from '../services/currency';
 import {
   calculateVatBreakdown,
   evaluateCalculatorExpression,
@@ -37,6 +37,7 @@ import {
   parseLocalDate,
   roundCurrency,
 } from '../services/calculations';
+import { resolveOrgAttachmentUrl, uploadOrgReceiptAttachment } from '../services/firebase';
 import { parseDialectQuickEntry } from '../services/dialectParser';
 import { prepareReceiptImageDataUrl, ReceiptScanError, scanReceiptWithAI } from '../services/receiptScanner';
 
@@ -72,6 +73,10 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     setIsUpgradeModalOpen,
     isOrgWorkspace,
     activeOrganization,
+    activeOrgRole,
+    isOrgReadOnly,
+    canOrgWrite,
+    attachOrgReceiptPaths,
     orgMembers,
     orgCostCenters,
     orgParties,
@@ -95,6 +100,8 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
   const [group, setGroup] = useState('');
   const [contact, setContact] = useState('');
   const [attachments, setAttachments] = useState<string[]>([]);
+  const [attachmentPaths, setAttachmentPaths] = useState<string[]>([]);
+  const [resolvedPathUrls, setResolvedPathUrls] = useState<Record<string, string>>({});
   const [saveAsTmpl, setSaveAsTmpl] = useState(false);
   const [templateName, setTemplateName] = useState('');
 
@@ -240,6 +247,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       setGroup(editTransaction.group || '');
       setContact(editTransaction.contact || '');
       setAttachments(editTransaction.attachments || []);
+      setAttachmentPaths(editTransaction.attachmentPaths || []);
       setIsRecurring(!!editTransaction.isRecurring);
       if (editTransaction.recurrenceRule) {
         setFrequency(editTransaction.recurrenceRule.frequency);
@@ -250,7 +258,9 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       setQuickText('');
       setSaveAsTmpl(false);
       setShowKeypad(false);
-      setShowMoreDetails(Boolean(editTransaction.attachments?.length));
+      setShowMoreDetails(
+        Boolean(editTransaction.attachments?.length || editTransaction.attachmentPaths?.length)
+      );
       setCostCenterId(editTransaction.costCenterId || '');
       setPartyId(editTransaction.partyId || '');
       setInvoiceNumber(editTransaction.invoiceNumber || '');
@@ -292,6 +302,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       setGroup('');
       setContact('');
       setAttachments([]);
+      setAttachmentPaths([]);
       setIsRecurring(false);
       setQuickText('');
       setSaveAsTmpl(false);
@@ -318,6 +329,35 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     setReceiptAuthPrompt(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, editTransaction]);
+
+  // Resolve Firebase Storage download URLs for existing org attachment paths
+  useEffect(() => {
+    if (!isOpen || attachmentPaths.length === 0) {
+      setResolvedPathUrls({});
+      return;
+    }
+    let cancelled = false;
+    Promise.all(
+      attachmentPaths.map(async (p) => {
+        try {
+          const url = await resolveOrgAttachmentUrl(p);
+          return [p, url] as const;
+        } catch {
+          return [p, ''] as const;
+        }
+      })
+    ).then((entries) => {
+      if (cancelled) return;
+      const map: Record<string, string> = {};
+      for (const [k, v] of entries) {
+        if (v) map[k] = v;
+      }
+      setResolvedPathUrls(map);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, attachmentPaths]);
 
   const handleWalletChange = (wId: string) => {
     setWalletId(wId);
@@ -351,21 +391,35 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     setErrorMsg('');
 
     if (autoSave) {
+      if (isOrgWorkspace && (isOrgReadOnly || !canOrgWrite)) {
+        setErrorMsg(
+          isOrgReadOnly
+            ? t('orgReadOnlyBanner')
+            : isRTL
+            ? 'صلاحيتك الحالية لا تسمح بإضافة معاملات.'
+            : 'Your role cannot add transactions.'
+        );
+        return;
+      }
       const targetWalletId = walletId || wallets[0]?.id;
       if (!targetWalletId) return;
-      addTransaction({
-        type: parsedQuickEntry.type,
-        amount: parsedQuickEntry.amount,
-        currency,
-        date,
-        time,
-        categoryId: parsedQuickEntry.categoryId,
-        walletId: targetWalletId,
-        notes: parsedQuickEntry.notes,
-        priority: 'normal',
-        doesNotAffectBalance: false,
-      });
-      onClose();
+      try {
+        addTransaction({
+          type: parsedQuickEntry.type,
+          amount: parsedQuickEntry.amount,
+          currency,
+          date,
+          time,
+          categoryId: parsedQuickEntry.categoryId,
+          walletId: targetWalletId,
+          notes: parsedQuickEntry.notes,
+          priority: 'normal',
+          doesNotAffectBalance: false,
+        });
+        onClose();
+      } catch (err) {
+        setErrorMsg(err instanceof Error ? err.message : 'Failed to save transaction');
+      }
     }
   };
 
@@ -395,6 +449,56 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     if (!isOrgWorkspace || !activeOrganization?.lockedUntilDate || !date) return false;
     return isDateInLockedPeriod(date, activeOrganization.lockedUntilDate);
   }, [isOrgWorkspace, activeOrganization?.lockedUntilDate, date]);
+
+  const currentOrgMember = useMemo(() => {
+    if (!isOrgWorkspace || !user?.id) return null;
+    return orgMembers.find((m) => m.uid === user.id) || null;
+  }, [isOrgWorkspace, user?.id, orgMembers]);
+
+  const orgCompliancePreview = useMemo(() => {
+    if (!isOrgWorkspace || !activeOrganization) return null;
+    const rawAmount = vatPreview ? vatPreview.grossAmount : evaluatedAmount;
+    const convertedAmt =
+      rawAmount > 0
+        ? convertCurrency(
+            rawAmount,
+            currency,
+            activeOrganization.currency,
+            settings.customExchangeRates
+          )
+        : 0;
+    const limit = currentOrgMember?.spendingLimit;
+    const exceedsSpendingLimit =
+      activeOrgRole === 'employee' &&
+      typeof limit === 'number' &&
+      limit > 0 &&
+      convertedAmt > limit;
+    const willRequireApproval =
+      type !== 'transfer' &&
+      (activeOrgRole === 'employee' ||
+        isReimbursement ||
+        (type === 'expense' &&
+          activeOrganization.approvalThreshold > 0 &&
+          convertedAmt > activeOrganization.approvalThreshold));
+
+    return {
+      convertedAmt,
+      limit,
+      exceedsSpendingLimit,
+      willRequireApproval,
+    };
+  }, [
+    isOrgWorkspace,
+    activeOrganization,
+    vatPreview,
+    evaluatedAmount,
+    currency,
+    settings.customExchangeRates,
+    currentOrgMember,
+    activeOrgRole,
+    type,
+    isReimbursement,
+  ]);
 
   const parsedTransferFee = useMemo(() => {
     if (type !== 'transfer') return 0;
@@ -429,7 +533,13 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
 
     try {
       const { dataUrl, mimeType } = await prepareReceiptImageDataUrl(file);
-      const scanned = await scanReceiptWithAI(dataUrl, mimeType, categories, isRTL);
+      const scanned = await scanReceiptWithAI(
+        dataUrl,
+        mimeType,
+        categories,
+        isRTL,
+        isOrgWorkspace ? activeOrganization?.id : undefined
+      );
 
       setType('expense');
       if (scanned.amount > 0) {
@@ -581,6 +691,17 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isOrgWorkspace && (isOrgReadOnly || !canOrgWrite)) {
+      setErrorMsg(
+        isOrgReadOnly
+          ? t('orgReadOnlyBanner')
+          : isRTL
+          ? 'صلاحيتك الحالية لا تسمح بإضافة أو تعديل المعاملات.'
+          : 'Your role cannot create or edit transactions.'
+      );
+      return;
+    }
+
     const evaluated = evaluateCalculatorExpression(amountExpr);
 
     if (evaluated.error || evaluated.result <= 0) {
@@ -625,7 +746,21 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       return;
     }
 
+    if (orgCompliancePreview?.exceedsSpendingLimit) {
+      setErrorMsg(
+        isRTL
+          ? `المبلغ يتجاوز سقف الصرف المحدد لك (${orgCompliancePreview.limit} ${activeOrganization?.currency}).`
+          : `Amount exceeds your assigned spending limit (${orgCompliancePreview.limit} ${activeOrganization?.currency}).`
+      );
+      return;
+    }
+
     const finalAmount = vatPreview ? vatPreview.grossAmount : evaluated.result;
+    const orgId = isOrgWorkspace ? activeOrganization?.id : undefined;
+    const newDataUrls = orgId ? attachments.filter((src) => src.startsWith('data:')) : [];
+    const safeAttachmentsForPayload = orgId
+      ? attachments.filter((src) => !src.startsWith('data:'))
+      : attachments;
 
     const payload: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'> = {
       type,
@@ -643,7 +778,8 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       doesNotAffectBalance,
       group: group.trim() || undefined,
       contact: contact.trim() || undefined,
-      attachments,
+      attachments: safeAttachmentsForPayload,
+      ...(orgId && attachmentPaths.length > 0 ? { attachmentPaths } : {}),
       isRecurring,
       recurrenceRule: isRecurring
         ? {
@@ -667,32 +803,71 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
             taxAmount: vatPreview ? vatPreview.taxAmount : undefined,
             taxRate: vatPreview ? parsedVatRate : undefined,
             isTaxInclusive: vatPreview ? isTaxInclusive : undefined,
+            vat: vatPreview
+              ? {
+                  rate: parsedVatRate,
+                  amountMinor: toMinor(vatPreview.taxAmount, currency),
+                  inclusive: isTaxInclusive,
+                }
+              : undefined,
           }
         : {}),
     };
 
-    if (editTransaction) {
-      updateTransaction(editTransaction.id, payload);
-    } else {
-      addTransaction(payload);
+    let targetTx: Transaction | null = null;
+    try {
+      if (editTransaction) {
+        updateTransaction(editTransaction.id, payload);
+        targetTx = { ...editTransaction, ...payload, updatedAt: Date.now() };
+      } else {
+        targetTx = addTransaction(payload);
 
-      if (saveAsTmpl) {
-        addTemplate({
-          name: templateName.trim() || notes.trim() || (type === 'expense' ? 'قالب مصروف' : 'قالب دخل'),
-          type,
-          amount: evaluated.result,
-          currency,
-          categoryId: type === 'transfer' ? 'cat-withdraw' : categoryId,
-          walletId,
-          toWalletId: type === 'transfer' ? toWalletId : undefined,
-          transferFee: type === 'transfer' && parsedTransferFee > 0 ? parsedTransferFee : undefined,
-          notes: notes.trim(),
-          priority,
-          doesNotAffectBalance,
-          group: group.trim() || undefined,
-          contact: contact.trim() || undefined,
-        });
+        if (saveAsTmpl) {
+          addTemplate({
+            name: templateName.trim() || notes.trim() || (type === 'expense' ? 'قالب مصروف' : 'قالب دخل'),
+            type,
+            amount: evaluated.result,
+            currency,
+            categoryId: type === 'transfer' ? 'cat-withdraw' : categoryId,
+            walletId,
+            toWalletId: type === 'transfer' ? toWalletId : undefined,
+            transferFee: type === 'transfer' && parsedTransferFee > 0 ? parsedTransferFee : undefined,
+            notes: notes.trim(),
+            priority,
+            doesNotAffectBalance,
+            group: group.trim() || undefined,
+            contact: contact.trim() || undefined,
+          });
+        }
       }
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : isRTL
+          ? 'تعذر حفظ المعاملة.'
+          : 'Failed to save transaction.'
+      );
+      return;
+    }
+
+    if (orgId && targetTx && newDataUrls.length > 0) {
+      const savedTxSnapshot = targetTx;
+      const basePaths = [...attachmentPaths];
+      void Promise.all(
+        newDataUrls.map((dataUrl, i) =>
+          uploadOrgReceiptAttachment(orgId, savedTxSnapshot.id, dataUrl, `receipt_${i + 1}.jpg`, 'image/jpeg')
+        )
+      )
+        .then((results) => {
+          const uploadedPaths = results.map((r) => r.path).filter(Boolean);
+          if (uploadedPaths.length > 0) {
+            return attachOrgReceiptPaths(savedTxSnapshot.id, [...basePaths, ...uploadedPaths], savedTxSnapshot);
+          }
+        })
+        .catch((err) => {
+          console.warn('Org receipt storage upload deferred/failed:', err);
+        });
     }
 
     if (enableSplitBill && type === 'expense' && splitFriendName.trim() && computedSplitDebtAmount > 0) {
@@ -735,6 +910,22 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
 
         {/* Form Body */}
         <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-4 space-y-4">
+          {isOrgWorkspace && isOrgReadOnly && (
+            <div className="p-2.5 rounded-lg bg-amber-500/12 border border-amber-500/35 text-amber-800 dark:text-amber-300 text-xs flex items-center justify-between gap-2">
+              <span className="font-semibold">{t('orgReadOnlyBanner')}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  setIsUpgradeModalOpen(true);
+                }}
+                className="px-2.5 py-1 rounded bg-[var(--color-accent)] text-[var(--color-on-accent)] text-[10px] font-bold shrink-0"
+              >
+                {isRTL ? 'ترقية' : 'Upgrade'}
+              </button>
+            </div>
+          )}
+
           {errorMsg && (
             <div className="p-2.5 rounded-lg bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/30 text-[var(--color-expense)] text-xs flex items-center gap-2">
               <AlertCircle className="w-4 h-4 shrink-0" />
@@ -1425,6 +1616,26 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                     )}
                   </div>
                 )}
+                {orgCompliancePreview?.exceedsSpendingLimit && (
+                  <div className="p-2 rounded-lg bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/30 text-[11px] text-[var(--color-expense)] font-semibold flex items-center gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      {isRTL
+                        ? `يتجاوز سقف الصرف الخاص بك (${orgCompliancePreview.limit} ${activeOrganization?.currency})`
+                        : `Exceeds your spending limit (${orgCompliancePreview.limit} ${activeOrganization?.currency})`}
+                    </span>
+                  </div>
+                )}
+
+                {orgCompliancePreview &&
+                  !orgCompliancePreview.exceedsSpendingLimit &&
+                  orgCompliancePreview.willRequireApproval && (
+                    <div className="p-2 rounded-lg bg-[var(--color-warning)]/12 border border-[var(--color-warning)]/30 text-[11px] text-[var(--color-warning-text)] font-medium">
+                      {isRTL
+                        ? 'سيتم إرسال هذه المعاملة إلى قائمة الاعتمادات للمراجعة قبل الخصم من الخزينة.'
+                        : 'This transaction will be queued for approval before affecting treasury balances.'}
+                    </div>
+                  )}
               </div>
             </div>
           )}
@@ -1439,10 +1650,10 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
               <span className="flex items-center gap-1.5">
                 <span>{isRTL ? 'خيارات إضافية' : 'More Options'}</span>
                 <span className="text-[10px] text-[var(--color-muted)] font-normal">
-                  ({attachments.length > 0
+                  ({attachments.length + attachmentPaths.length > 0
                     ? isRTL
-                      ? `${attachments.length} مرفق • `
-                      : `${attachments.length} photo(s) • `
+                      ? `${attachments.length + attachmentPaths.length} مرفق • `
+                      : `${attachments.length + attachmentPaths.length} photo(s) • `
                     : ''}
                   {isRTL ? 'مرفقات، تقسيم، تكرار، وسم...' : 'attachments, split, repeat...'})
                 </span>
@@ -1585,11 +1796,60 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                     />
                   </div>
 
-                  {attachments.length > 0 && (
+                  {(attachments.length > 0 || attachmentPaths.length > 0) && (
                     <div className="flex items-center gap-2 overflow-x-auto py-1">
+                      {attachmentPaths.map((storagePath, idx) => {
+                        const resolved = resolvedPathUrls[storagePath];
+                        const isPendingOffline = storagePath.startsWith('pending://');
+                        return (
+                          <div
+                            key={`path-${idx}`}
+                            className="relative w-16 h-16 rounded-xl overflow-hidden shrink-0 border border-[var(--color-line)] bg-[var(--color-bg)] flex items-center justify-center"
+                          >
+                            {resolved ? (
+                              <button
+                                type="button"
+                                onClick={() => setLightboxImage(resolved)}
+                                className="w-full h-full block relative group cursor-zoom-in"
+                                aria-label={isRTL ? 'تكبير الصورة المرفقة' : 'Zoom attachment'}
+                              >
+                                <img
+                                  src={resolved}
+                                  alt={`cloud-attachment-${idx + 1}`}
+                                  className="w-full h-full object-cover"
+                                />
+                                <span className="absolute bottom-1 start-1 p-0.5 rounded bg-black/60 text-white opacity-80">
+                                  <ZoomIn className="w-2.5 h-2.5" />
+                                </span>
+                              </button>
+                            ) : (
+                              <span className="text-[9px] text-[var(--color-muted)] text-center px-1">
+                                {isPendingOffline
+                                  ? isRTL
+                                    ? 'بانتظار الرفع'
+                                    : 'Pending'
+                                  : isRTL
+                                  ? 'مرفق سحابي'
+                                  : 'Cloud'}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setAttachmentPaths((prev) => prev.filter((_, i) => i !== idx));
+                              }}
+                              aria-label={isRTL ? 'حذف المرفق' : 'Delete attachment'}
+                              className="absolute top-1 end-1 w-5 h-5 bg-black/75 text-white rounded-full flex items-center justify-center hover:bg-[var(--color-expense)] transition-colors"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        );
+                      })}
                       {attachments.map((imgSrc, idx) => (
                         <div
-                          key={idx}
+                          key={`local-${idx}`}
                           className="relative w-16 h-16 rounded-xl overflow-hidden shrink-0 border border-[var(--color-line)] bg-[var(--color-bg)]"
                         >
                           <button
@@ -1817,10 +2077,14 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
           <div className="pt-2">
             <button
               type="submit"
-              disabled={isLockedDate}
+              disabled={isLockedDate || (isOrgWorkspace && (isOrgReadOnly || !canOrgWrite))}
               className="w-full py-3 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] font-medium text-sm hover:opacity-95 transition-opacity shadow-sm min-h-[44px] disabled:opacity-50"
             >
-              {isLockedDate
+              {isOrgWorkspace && isOrgReadOnly
+                ? isRTL
+                  ? 'وضع القراءة فقط'
+                  : 'Read-Only Mode'
+                : isLockedDate
                 ? isRTL
                   ? 'الفترة المحاسبية مقفلة'
                   : 'Period Locked'

@@ -23,7 +23,6 @@ import { useApp } from '../../context/AppContext';
 import {
   mergeSettingsWithDefaults,
   persistData,
-  saveOrgWorkspaces,
   validateBackupSchema,
 } from '../../services/db';
 import {
@@ -54,8 +53,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     goals,
     templates,
     moneyCircles,
-    orgWorkspaces,
-    activeWorkspace,
+    queueLegacyOrgsForMigration,
     settings,
     user,
     isPro,
@@ -120,8 +118,6 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
       goals,
       templates,
       moneyCircles,
-      orgWorkspaces,
-      activeWorkspace,
       settings,
       hasCompletedOnboarding: true,
     };
@@ -262,25 +258,27 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
       hasCompletedOnboarding: true,
     });
 
+    let hasQueuedLegacyOrgs = false;
     if (
       parsed.orgWorkspaces &&
       typeof parsed.orgWorkspaces === 'object' &&
-      !Array.isArray(parsed.orgWorkspaces)
+      !Array.isArray(parsed.orgWorkspaces) &&
+      Object.keys(parsed.orgWorkspaces).length > 0
     ) {
-      const resolvedActiveWs =
-        typeof parsed.activeWorkspace === 'string' &&
-        parsed.orgWorkspaces[parsed.activeWorkspace]
-          ? parsed.activeWorkspace
-          : 'personal';
-      await saveOrgWorkspaces(resolvedActiveWs, parsed.orgWorkspaces);
+      queueLegacyOrgsForMigration(parsed.orgWorkspaces);
+      hasQueuedLegacyOrgs = true;
     }
 
     setPendingEncryptedPayload(null);
     setDecryptPassword('');
     setMessage({
-      text: isRTL
-        ? 'تمت استعادة البيانات بنجاح! سيتم تحديث الصفحة...'
-        : 'Data restored successfully! Refreshing...',
+      text: hasQueuedLegacyOrgs
+        ? isRTL
+          ? 'تمت استعادة البيانات الشخصية وتجهيز المؤسسات للترحيل السحابي! سيتم تحديث الصفحة...'
+          : 'Personal data restored & legacy organizations queued for Cloud migration! Refreshing...'
+        : isRTL
+        ? 'تمت استعادة البيانات الشخصية بنجاح! سيتم تحديث الصفحة...'
+        : 'Personal data restored successfully! Refreshing...',
     });
     setTimeout(() => {
       window.location.reload();
@@ -498,6 +496,12 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
         <div className="flex-1 overflow-y-auto space-y-3">
           {activeTab === 'json' ? (
             <>
+              <div className="p-2.5 rounded-xl bg-[var(--color-accent)]/8 border border-[var(--color-accent)]/25 text-[11px] text-[var(--color-ink)] leading-relaxed">
+                {isRTL
+                  ? 'يشمل النسخ الاحتياطي السحابي وملف JSON بيانات الحساب الشخصي والجمعيات المالية. مساحات عمل الشركات تتزامن لحظياً عبر السحابة.'
+                  : 'JSON and Google Cloud Backup cover your Personal Workspace & Money Circles. Enterprise organizations sync in real time via Cloud Teams.'}
+              </div>
+
               {/* Google Cloud Sync & PRO Account Binding */}
               <div className="p-3.5 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl space-y-2.5">
                 <div className="flex items-center justify-between gap-2">

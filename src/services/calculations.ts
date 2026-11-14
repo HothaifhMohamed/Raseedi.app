@@ -14,15 +14,19 @@ import {
   CostCenter,
   BusinessParty,
   MoneyCircle,
+  ApprovalStatus,
+  CanonicalApprovalStatus,
 } from '../types';
 import {
   convertCurrency,
   getCurrency,
   getCurrencyDecimals,
   roundCurrency,
+  fromMinor,
+  toMinor,
 } from './currency';
 
-export { roundCurrency };
+export { roundCurrency, fromMinor, toMinor };
 
 /**
  * Convert numbers to Eastern Arabic numerals (١٢٣)
@@ -226,15 +230,40 @@ export function evaluateCalculatorExpression(rawExpr: string): { result: number;
 }
 
 /**
+ * Normalizes legacy 'pending_approval' into canonical 'pending'.
+ */
+export function normalizeApprovalStatus(status?: ApprovalStatus): CanonicalApprovalStatus {
+  if (!status) return 'approved';
+  if (status === 'pending_approval') return 'pending';
+  return status;
+}
+
+/**
+ * Resolves effective decimal transaction amount, preferring integer amountMinor when present.
+ */
+export function getEffectiveTransactionAmount(
+  tx: Pick<Transaction, 'amount' | 'amountMinor' | 'currency'>
+): number {
+  if (typeof tx.amountMinor === 'number' && Number.isFinite(tx.amountMinor) && tx.currency) {
+    return fromMinor(tx.amountMinor, tx.currency);
+  }
+  return tx.amount;
+}
+
+/**
  * Critical Accounting Invariant:
- * Transactions marked `doesNotAffectBalance`, `pending_approval`, or `rejected`
+ * Soft-deleted transactions (`deletedAt != null`) and transactions marked
+ * `doesNotAffectBalance`, `draft`, `pending` / `pending_approval`, or `rejected`
  * MUST NEVER affect treasury balances, P&L, VAT totals, or budgets.
+ * Only `approved` (default) and `paid` transactions post to accounting.
  */
 export function doesTransactionAffectAccounting(
-  tx: Pick<Transaction, 'doesNotAffectBalance' | 'approvalStatus'>
+  tx: Pick<Transaction, 'doesNotAffectBalance' | 'approvalStatus' | 'deletedAt'>
 ): boolean {
+  if (tx.deletedAt) return false;
   if (tx.doesNotAffectBalance) return false;
-  if (tx.approvalStatus === 'pending_approval' || tx.approvalStatus === 'rejected') {
+  const normalized = normalizeApprovalStatus(tx.approvalStatus);
+  if (normalized === 'draft' || normalized === 'pending' || normalized === 'rejected') {
     return false;
   }
   return true;
@@ -385,33 +414,40 @@ export function formatLocalDate(date: Date = new Date()): string {
 
 /**
  * Pure calculation for source and destination wallet balance deltas of a transaction.
- * Respects approvalStatus (pending_approval / rejected return 0 delta).
+ * Respects approvalStatus (draft / pending / pending_approval / rejected / deleted return 0 delta).
  */
 export function getTransactionWalletDeltas(
   tx: Pick<
     Transaction,
     | 'type'
     | 'amount'
+    | 'amountMinor'
     | 'transferFee'
     | 'convertedAmount'
     | 'toWalletId'
     | 'doesNotAffectBalance'
     | 'approvalStatus'
-  >
+    | 'deletedAt'
+  > & { currency?: string }
 ): { sourceDelta: number; destDelta: number } {
   if (!doesTransactionAffectAccounting(tx)) {
     return { sourceDelta: 0, destDelta: 0 };
   }
+  const effectiveAmount = getEffectiveTransactionAmount({
+    amount: tx.amount,
+    amountMinor: tx.amountMinor,
+    currency: tx.currency || '',
+  });
   if (tx.type === 'expense') {
-    return { sourceDelta: -tx.amount, destDelta: 0 };
+    return { sourceDelta: -effectiveAmount, destDelta: 0 };
   }
   if (tx.type === 'income') {
-    return { sourceDelta: tx.amount, destDelta: 0 };
+    return { sourceDelta: effectiveAmount, destDelta: 0 };
   }
   if (tx.type === 'transfer' && tx.toWalletId) {
     const fee = tx.transferFee && tx.transferFee > 0 ? tx.transferFee : 0;
-    const netDest = tx.convertedAmount ?? tx.amount;
-    return { sourceDelta: -(tx.amount + fee), destDelta: netDest };
+    const netDest = tx.convertedAmount ?? effectiveAmount;
+    return { sourceDelta: -(effectiveAmount + fee), destDelta: netDest };
   }
   return { sourceDelta: 0, destDelta: 0 };
 }
@@ -1148,6 +1184,28 @@ export function calculateVatBreakdown(
   };
 }
 
+/**
+ * Integer minor-unit VAT calculator (zero floating-point rounding drift).
+ */
+export function calculateVatBreakdownMinor(
+  amountMinor: number,
+  vatRate: number,
+  isTaxInclusive: boolean
+): { netMinor: number; taxMinor: number; grossMinor: number } {
+  const cleanMinor = Math.max(0, Math.round(Number.isFinite(amountMinor) ? amountMinor : 0));
+  const rate = Math.max(0, Number.isFinite(vatRate) ? vatRate : 0);
+  if (rate <= 0 || cleanMinor <= 0) {
+    return { netMinor: cleanMinor, taxMinor: 0, grossMinor: cleanMinor };
+  }
+  if (isTaxInclusive) {
+    const netMinor = Math.round((cleanMinor * 100) / (100 + rate));
+    const taxMinor = cleanMinor - netMinor;
+    return { netMinor, taxMinor, grossMinor: cleanMinor };
+  }
+  const taxMinor = Math.round((cleanMinor * rate) / 100);
+  return { netMinor: cleanMinor, taxMinor, grossMinor: cleanMinor + taxMinor };
+}
+
 export interface EnterprisePnLResult {
   grossRevenue: number;
   netRevenueExTax: number;
@@ -1184,9 +1242,14 @@ export function calculateEnterprisePnL(
     if (startDate && tx.date < startDate) continue;
     if (endDate && tx.date > endDate) continue;
 
-    const grossInMain = convertCurrency(tx.amount, tx.currency, mainCurrency, customRates);
-    const taxInMain = tx.taxAmount
-      ? convertCurrency(tx.taxAmount, tx.currency, mainCurrency, customRates)
+    const effectiveAmount = getEffectiveTransactionAmount(tx);
+    const grossInMain = convertCurrency(effectiveAmount, tx.currency, mainCurrency, customRates);
+    const effectiveTax =
+      tx.vat && typeof tx.vat.amountMinor === 'number'
+        ? fromMinor(tx.vat.amountMinor, tx.currency)
+        : tx.taxAmount || 0;
+    const taxInMain = effectiveTax
+      ? convertCurrency(effectiveTax, tx.currency, mainCurrency, customRates)
       : 0;
     const netInMain = Math.max(0, grossInMain - taxInMain);
 
@@ -1273,7 +1336,7 @@ export function calculateCostCenterReport(
       if (startDate && tx.date < startDate) continue;
       if (endDate && tx.date > endDate) continue;
 
-      const val = convertCurrency(tx.amount, tx.currency, mainCurrency, customRates);
+      const val = convertCurrency(getEffectiveTransactionAmount(tx), tx.currency, mainCurrency, customRates);
       if (tx.type === 'expense') {
         spent += val;
         txCount++;

@@ -16,6 +16,7 @@ import { SavingsGoal } from '../../types';
 import { IconRenderer } from '../common/IconRenderer';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { MoneyText } from '../common/MoneyText';
+import { getCurrencyDecimals, roundCurrency } from '../../services/currency';
 
 const GOAL_ICONS = ['Target', 'Trophy', 'Car', 'Home', 'Plane', 'ShieldCheck', 'Smartphone', 'GraduationCap', 'Heart'];
 const GOAL_COLORS = [
@@ -474,11 +475,14 @@ export const GoalsPage: React.FC = () => {
                   className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[44px]"
                 >
                   <option value="">{isRTL ? 'بدون تعديل رصيد محفظة' : 'No wallet balance change'}</option>
-                  {wallets.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name} ({w.balance.toFixed(2)} {w.currency})
-                    </option>
-                  ))}
+                  {wallets.map((w) => {
+                    const dec = getCurrencyDecimals(w.currency, settings.decimalPlaces);
+                    return (
+                      <option key={w.id} value={w.id}>
+                        {w.name} ({roundCurrency(w.balance, dec).toFixed(dec)} {w.currency})
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
 

@@ -10,8 +10,6 @@ import {
   X,
   Building2,
   LockKeyhole,
-  Copy,
-  Check,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
@@ -30,9 +28,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   const {
     settings,
     user,
+    isPro,
     updateSettings,
     resetAllData,
     deleteAccountAndData,
+    reauthenticateGoogleAccount,
     isOrgWorkspace,
     activeOrganization,
     canOrgManage,
@@ -46,9 +46,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   const [confirmDeleteAccount, setConfirmDeleteAccount] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
   const [deleteAccountError, setDeleteAccountError] = useState<string | null>(null);
+  const [needsRecentReauth, setNeedsRecentReauth] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [showPinInput, setShowPinInput] = useState(false);
-  const [copiedInvite, setCopiedInvite] = useState(false);
   const [notifPerm, setNotifPerm] = useState<string>(() =>
     isWebNotificationSupported() ? Notification.permission : 'unsupported'
   );
@@ -414,6 +414,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                 </div>
               </div>
             )}
+
+            <p className="text-[10px] text-[var(--color-muted)] leading-relaxed">
+              {isRTL
+                ? 'تنويه: قفل التطبيق وقفل المحافظ يهدفان لخصوصية الواجهة محلياً فقط لمنع التصفح العابر ولا يشفّران ملفات التخزين المحلية؛ لتشفير ملفاتك استخدم خيار «النسخ الاحتياطي المشفر».'
+                : 'Note: App Lock and Wallet PIN are local UI convenience locks against casual access and do not encrypt browser storage. Use Encrypted JSON Backup for AES-GCM file encryption.'}
+            </p>
           </div>
 
           {/* 5. Notification Settings */}
@@ -486,18 +492,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                   <Building2 className="w-3.5 h-3.5 text-[var(--color-accent)]" />
                   <span>{isRTL ? 'إعدادات المؤسسة والضرائب' : 'Organization & Accounting'}</span>
                 </h4>
-                <button
-                  type="button"
-                  onClick={() => {
-                    navigator.clipboard?.writeText(activeOrganization.inviteCode);
-                    setCopiedInvite(true);
-                    setTimeout(() => setCopiedInvite(false), 2000);
-                  }}
-                  className="text-[10px] font-mono px-2 py-1 rounded bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-accent)] flex items-center gap-1"
-                >
-                  {copiedInvite ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                  <span>{activeOrganization.inviteCode}</span>
-                </button>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-accent)]">
+                  {activeOrganization.currency}
+                </span>
               </div>
 
               {canOrgManage && (
@@ -606,6 +603,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
               disabled={isDeletingAccount}
               onClick={() => {
                 setDeleteAccountError(null);
+                setNeedsRecentReauth(false);
                 setConfirmDeleteAccount(true);
               }}
               className="w-full py-2.5 px-3 bg-[var(--color-surface)] border border-[var(--color-expense)]/40 text-[var(--color-expense)] hover:bg-[var(--color-expense)]/10 font-semibold rounded-lg text-xs flex items-center justify-center gap-2 transition-colors min-h-[44px] disabled:opacity-50"
@@ -617,9 +615,46 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
             </button>
 
             {deleteAccountError && (
-              <p className="text-[11px] text-[var(--color-expense)] font-medium">
-                {deleteAccountError}
-              </p>
+              <div className="p-2.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-expense)]/40 space-y-2">
+                <p className="text-[11px] text-[var(--color-expense)] font-medium">
+                  {deleteAccountError}
+                </p>
+                {needsRecentReauth && (
+                  <button
+                    type="button"
+                    disabled={isDeletingAccount}
+                    onClick={async () => {
+                      setIsDeletingAccount(true);
+                      setDeleteAccountError(null);
+                      const reauthed = await reauthenticateGoogleAccount();
+                      if (!reauthed) {
+                        setIsDeletingAccount(false);
+                        setDeleteAccountError(
+                          isRTL
+                            ? 'تعذر تأكيد الهوية عبر جوجل. حاول مرة أخرى.'
+                            : 'Google re-authentication cancelled or failed.'
+                        );
+                        return;
+                      }
+                      const retry = await deleteAccountAndData();
+                      setIsDeletingAccount(false);
+                      if (retry.ok) {
+                        setNeedsRecentReauth(false);
+                        onClose();
+                      } else {
+                        setNeedsRecentReauth(retry.errorCode === 'RECENT_AUTH_REQUIRED');
+                        setDeleteAccountError(
+                          retry.errorMessage ||
+                            (isRTL ? 'تعذر حذف الحساب حالياً.' : 'Failed to delete account.')
+                        );
+                      }
+                    }}
+                    className="w-full py-2 px-3 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-semibold min-h-[38px] disabled:opacity-50"
+                  >
+                    {isRTL ? 'تأكيد الهوية عبر جوجل ثم الحذف النهائي' : 'Re-verify with Google & Delete'}
+                  </button>
+                )}
+              </div>
             )}
           </div>
         </div>
@@ -656,19 +691,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
         onConfirm={async () => {
           setIsDeletingAccount(true);
           setDeleteAccountError(null);
-          const ok = await deleteAccountAndData();
+          setNeedsRecentReauth(false);
+          const res = await deleteAccountAndData();
           setIsDeletingAccount(false);
-          if (ok) {
+          if (res.ok) {
             onClose();
           } else {
+            setNeedsRecentReauth(res.errorCode === 'RECENT_AUTH_REQUIRED');
             setDeleteAccountError(
-              user?.isLoggedIn
-                ? isRTL
-                  ? 'تعذر حذف البيانات السحابية. تحقق من اتصالك وأعد تسجيل الدخول ثم حاول مجدداً.'
-                  : 'Failed to delete cloud account data. Please check your connection and try again.'
-                : isRTL
-                ? 'تعذر مسح البيانات.'
-                : 'Failed to clear account data.'
+              res.errorMessage ||
+                (user?.isLoggedIn
+                  ? isRTL
+                    ? 'تعذر حذف البيانات السحابية. تحقق من اتصالك وأعد تسجيل الدخول ثم حاول مجدداً.'
+                    : 'Failed to delete cloud account data. Please check your connection and try again.'
+                  : isRTL
+                  ? 'تعذر مسح البيانات.'
+                  : 'Failed to clear account data.')
             );
           }
         }}
@@ -676,8 +714,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
         message={
           user?.isLoggedIn
             ? isRTL
-              ? 'سيتم حذف حسابك على الخادم وجميع نسخك الاحتياطية السحابية واشتراكك وبيانات هذا الجهاز نهائياً ولا يمكن التراجع عن ذلك.'
-              : 'This permanently deletes your cloud account, cloud backups, usage records, and all local data on this device. This cannot be undone.'
+              ? `سيتم حذف حسابك على الخادم وجميع نسخك الاحتياطية السحابية والمؤسسات الفردية وبيانات هذا الجهاز نهائياً ولا يمكن التراجع عن ذلك.${
+                  isPro
+                    ? ' تحذير مهم: سيؤدي حذف الحساب إلى فقدان اشتراك PRO المدفوع نهائياً.'
+                    : ''
+                } إذا كنت مالكاً لمؤسسة بها أعضاء آخرون، يجب نقل ملكيتها أولاً.`
+              : `This permanently deletes your cloud account, cloud backups, solo organizations, and all local data on this device.${
+                  isPro
+                    ? ' Warning: Deleting your account permanently forfeits your active paid PRO license.'
+                    : ''
+                } Multi-member organizations you own must be transferred first.`
             : isRTL
             ? 'سيتم مسح جميع البيانات المحلية والإعدادات من هذا الجهاز نهائياً.'
             : 'This permanently clears all local data and settings from this device.'

@@ -30,41 +30,58 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    // Master Gate RBAC helpers for Organizations
-    function isOrgOwner(orgId) {
-      return isSignedIn()
-        && exists(/databases/$(database)/documents/organizations/$(orgId))
-        && get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerUid == request.auth.uid;
+    // Single-read Organization RBAC & Subscription helpers
+    function memberDoc(orgId) {
+      return get(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid));
     }
 
-    function isOrgMember(orgId) {
-      return isSignedIn()
-        && (
-          isOrgOwner(orgId)
-          || (
-            exists(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid))
-            && get(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid)).data.status == 'active'
-          )
-        );
+    function orgDoc(orgId) {
+      return get(/databases/$(database)/documents/organizations/$(orgId));
     }
 
-    function orgRole(orgId) {
-      return get(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid)).data.role;
+    function isOrgMemberActive(orgId) {
+      let m = memberDoc(orgId);
+      return isSignedIn() && m != null && m.data.status == 'active';
     }
 
     function isOrgOwnerOrAdmin(orgId) {
-      return isOrgOwner(orgId)
-        || (isOrgMember(orgId) && orgRole(orgId) in ['owner', 'admin']);
+      let m = memberDoc(orgId);
+      return isSignedIn() && m != null && m.data.status == 'active' && m.data.role in ['owner', 'admin'];
     }
 
     function isOrgAccountantOrAbove(orgId) {
-      return isOrgOwner(orgId)
-        || (isOrgMember(orgId) && orgRole(orgId) in ['owner', 'admin', 'accountant']);
+      let m = memberDoc(orgId);
+      return isSignedIn() && m != null && m.data.status == 'active' && m.data.role in ['owner', 'admin', 'accountant'];
     }
 
     function isOrgContributorOrAbove(orgId) {
-      return isOrgOwner(orgId)
-        || (isOrgMember(orgId) && orgRole(orgId) in ['owner', 'admin', 'accountant', 'employee']);
+      let m = memberDoc(orgId);
+      return isSignedIn() && m != null && m.data.status == 'active' && m.data.role in ['owner', 'admin', 'accountant', 'employee'];
+    }
+
+    // 7-day grace window after subscription expiry; read-only afterward
+    function isOrgWritable(orgId) {
+      let o = orgDoc(orgId);
+      return o != null
+        && o.data.get('planTier', 'business_pro') != 'free'
+        && (!('expiresAt' in o.data) || o.data.expiresAt == null || request.time.toMillis() <= o.data.expiresAt + 7 * 86400000);
+    }
+
+    function isAfterPeriodLock(orgId, dateStr) {
+      let o = orgDoc(orgId);
+      return o != null
+        && (!('lockedUntilDate' in o.data) || o.data.lockedUntilDate == null || o.data.lockedUntilDate == '' || dateStr > o.data.lockedUntilDate);
+    }
+
+    function isWithinEmployeeSpendingLimit(orgId, data) {
+      let m = memberDoc(orgId);
+      return !('spendingLimit' in m.data)
+        || m.data.spendingLimit == null
+        || m.data.spendingLimit <= 0
+        || (
+          ('amountMinor' in data && 'spendingLimitMinor' in m.data && data.amountMinor <= m.data.spendingLimitMinor)
+          || ('payload' in data && 'amount' in data.payload && data.payload.amount is number && data.payload.amount <= m.data.spendingLimit)
+        );
     }
 
     function isValidUserProfileCreate(data, userId) {
@@ -234,50 +251,22 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    function isValidOrganization(data, orgId) {
-      return data.keys().hasAll([
-        'id', 'name', 'currency', 'vatRate', 'approvalThreshold',
-        'inviteCode', 'ownerUid', 'createdAt', 'updatedAt'
-      ])
-        && data.keys().hasOnly([
-          'id', 'name', 'currency', 'industry', 'vatRate', 'taxNumber', 'approvalThreshold',
-          'lockedUntilDate', 'inviteCode', 'ownerUid', 'extraSeats', 'createdAt', 'updatedAt'
-        ])
-        && data.id is string && data.id == orgId && isValidId(data.id)
-        && data.name is string && data.name.size() > 0 && data.name.size() <= 120
+    function isValidOrgSettingsUpdate(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() <= 120
         && data.currency is string && data.currency.size() > 0 && data.currency.size() <= 8
         && (!('industry' in data) || data.industry in ['retail', 'restaurant', 'tech', 'construction', 'medical', 'general'])
         && data.vatRate is number && data.vatRate >= 0 && data.vatRate <= 100
         && data.approvalThreshold is number && data.approvalThreshold >= 0 && data.approvalThreshold <= 1000000000
-        && (!('taxNumber' in data) || (data.taxNumber is string && data.taxNumber.size() <= 64))
-        && (!('lockedUntilDate' in data) || (data.lockedUntilDate is string && data.lockedUntilDate.size() <= 16))
-        && data.inviteCode is string && data.inviteCode.size() >= 4 && data.inviteCode.size() <= 32
-        && data.ownerUid is string && isValidId(data.ownerUid)
-        && (!('extraSeats' in data) || (data.extraSeats is int && data.extraSeats >= 0 && data.extraSeats <= 500))
-        && data.createdAt is timestamp
-        && data.updatedAt is timestamp;
-    }
-
-    function isValidOrgMember(data, orgId, memberUid) {
-      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'status', 'joinedAt', 'updatedAt'])
-        && data.keys().hasOnly([
-          'uid', 'email', 'displayName', 'role', 'department', 'spendingLimit', 'status', 'joinedAt', 'updatedAt'
-        ])
-        && data.uid is string && data.uid == memberUid && isValidId(data.uid)
-        && data.email is string && data.email.size() > 0 && data.email.size() <= 254
-        && data.displayName is string && data.displayName.size() > 0 && data.displayName.size() <= 120
-        && data.role in ['owner', 'admin', 'accountant', 'employee', 'viewer']
-        && (!('department' in data) || (data.department is string && data.department.size() <= 80))
-        && (!('spendingLimit' in data) || (data.spendingLimit is number && data.spendingLimit >= 0 && data.spendingLimit <= 1000000000))
-        && data.status in ['active', 'invited', 'suspended']
-        && data.joinedAt is number && data.joinedAt >= 0
-        && data.updatedAt is timestamp
-        && isValidId(orgId);
+        && (!('taxNumber' in data) || data.taxNumber == null || (data.taxNumber is string && data.taxNumber.size() <= 64))
+        && (!('lockedUntilDate' in data) || data.lockedUntilDate == null || (data.lockedUntilDate is string && data.lockedUntilDate.size() <= 16));
     }
 
     function isValidCostCenter(data, orgId, ccId) {
       return data.keys().hasAll(['id', 'orgId', 'code', 'nameAr', 'nameEn', 'budgetAllocated', 'isActive', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'orgId', 'code', 'name', 'nameAr', 'nameEn', 'type', 'budgetAllocated', 'isActive', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'orgId', 'code', 'name', 'nameAr', 'nameEn', 'type',
+          'budgetAllocated', 'budgetAllocatedMinor', 'isActive', 'createdAt', 'updatedAt'
+        ])
         && data.id is string && data.id == ccId && isValidId(data.id)
         && data.orgId is string && data.orgId == orgId
         && data.code is string && data.code.size() > 0 && data.code.size() <= 32
@@ -286,6 +275,7 @@ service cloud.firestore {
         && data.nameEn is string && data.nameEn.size() > 0 && data.nameEn.size() <= 120
         && (!('type' in data) || data.type in ['department', 'project', 'branch'])
         && data.budgetAllocated is number && data.budgetAllocated >= 0 && data.budgetAllocated <= 1000000000
+        && (!('budgetAllocatedMinor' in data) || (data.budgetAllocatedMinor is int && data.budgetAllocatedMinor >= 0))
         && data.isActive is bool
         && data.createdAt is number && data.createdAt >= 0
         && data.updatedAt is timestamp;
@@ -295,7 +285,7 @@ service cloud.firestore {
       return data.keys().hasAll(['id', 'orgId', 'type', 'name', 'currency', 'balance', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly([
           'id', 'orgId', 'type', 'name', 'phone', 'email', 'taxId', 'creditLimit',
-          'currency', 'balance', 'dueDate', 'notes', 'createdAt', 'updatedAt'
+          'currency', 'balance', 'balanceMinor', 'dueDate', 'notes', 'createdAt', 'updatedAt'
         ])
         && data.id is string && data.id == partyId && isValidId(data.id)
         && data.orgId is string && data.orgId == orgId
@@ -307,6 +297,7 @@ service cloud.firestore {
         && (!('creditLimit' in data) || (data.creditLimit is number && data.creditLimit >= 0 && data.creditLimit <= 1000000000))
         && data.currency is string && data.currency.size() > 0 && data.currency.size() <= 8
         && data.balance is number && data.balance >= -1000000000 && data.balance <= 1000000000
+        && (!('balanceMinor' in data) || data.balanceMinor is int)
         && (!('dueDate' in data) || (data.dueDate is string && data.dueDate.size() <= 16))
         && (!('notes' in data) || (data.notes is string && data.notes.size() <= 400))
         && data.createdAt is number && data.createdAt >= 0
@@ -315,21 +306,33 @@ service cloud.firestore {
 
     function isValidOrgLedgerRecord(data, orgId, docId) {
       return data.keys().hasAll(['id', 'orgId', 'payload', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'orgId', 'submittedBy', 'approvalStatus', 'payload', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'orgId', 'date', 'amountMinor', 'balanceMinor', 'submittedBy',
+          'approvedBy', 'approvalStatus', 'deletedAt', 'payload', 'updatedAt'
+        ])
         && data.id is string && data.id == docId && isValidId(data.id)
         && data.orgId is string && data.orgId == orgId
+        && (!('date' in data) || (data.date is string && data.date.size() <= 16))
+        && (!('amountMinor' in data) || (data.amountMinor is int && data.amountMinor >= 0))
+        && (!('balanceMinor' in data) || data.balanceMinor is int)
         && (!('submittedBy' in data) || (data.submittedBy is string && data.submittedBy.size() <= 128))
-        && (!('approvalStatus' in data) || data.approvalStatus in ['approved', 'pending_approval', 'rejected'])
-        && data.payload is map && data.payload.size() <= 40
+        && (!('approvedBy' in data) || data.approvedBy == null || (data.approvedBy is string && data.approvedBy.size() <= 128))
+        && (!('approvalStatus' in data) || data.approvalStatus in ['draft', 'pending', 'pending_approval', 'approved', 'rejected', 'paid'])
+        && (!('deletedAt' in data) || data.deletedAt == null || data.deletedAt is number)
+        && data.payload is map && data.payload.size() <= 55
         && data.updatedAt is timestamp;
     }
 
     function isValidAuditLogEntry(data, orgId, logId) {
       return data.keys().hasAll(['id', 'orgId', 'action', 'entityType', 'entityId', 'actorUid', 'actorName', 'summary', 'timestamp', 'createdAt'])
-        && data.keys().hasOnly(['id', 'orgId', 'action', 'entityType', 'entityId', 'actorUid', 'actorName', 'summary', 'timestamp', 'createdAt'])
+        && data.keys().hasOnly(['id', 'orgId', 'action', 'entityType', 'entityId', 'actorUid', 'actorName', 'summary', 'before', 'after', 'timestamp', 'createdAt'])
         && data.id is string && data.id == logId && isValidId(data.id)
         && data.orgId is string && data.orgId == orgId
-        && data.action in ['create', 'update', 'delete', 'approve', 'reject', 'lock_period', 'role_change']
+        && data.action in [
+          'create', 'update', 'delete', 'restore', 'approve', 'reject',
+          'lock_period', 'role_change', 'invite_create', 'invite_revoke',
+          'member_join', 'member_remove', 'transfer_ownership', 'recalculate'
+        ]
         && data.entityType is string && data.entityType.size() > 0 && data.entityType.size() <= 40
         && data.entityId is string && data.entityId.size() > 0 && data.entityId.size() <= 128
         && data.actorUid is string && data.actorUid == request.auth.uid
@@ -369,6 +372,12 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && incoming().isPro == existing().isPro
+        && incoming().get('proPlan', 'free') == existing().get('proPlan', 'free')
+        && incoming().get('planTier', 'free') == existing().get('planTier', 'free')
+        && incoming().get('billingCycle', 'free') == existing().get('billingCycle', 'free')
+        && incoming().get('expiresAt', null) == existing().get('expiresAt', null)
+        && incoming().get('proExpiresAt', null) == existing().get('proExpiresAt', null)
+        && incoming().get('hasUsedBusinessTrial', false) == existing().get('hasUsedBusinessTrial', false)
         && incoming().diff(existing()).affectedKeys().hasOnly([
           'email',
           'displayName',
@@ -383,7 +392,13 @@ service cloud.firestore {
         allow read, write: if false;
       }
 
-      // Chunked backup metadata (users/{uid}/backup/meta)
+      // Server-managed membership index (read-only for the user)
+      match /orgRefs/{orgId} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow write: if false;
+      }
+
+      // Chunked personal backup metadata (users/{uid}/backup/meta)
       match /backup/{docId} {
         allow get: if isValidId(userId)
           && isValidId(docId)
@@ -440,7 +455,7 @@ service cloud.firestore {
           && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
       }
 
-      // Chunked backup transaction slices (users/{uid}/backupChunks/chunk_0..N)
+      // Chunked personal backup transaction slices
       match /backupChunks/{chunkId} {
         allow get: if isValidId(userId)
           && isValidId(chunkId)
@@ -500,18 +515,15 @@ service cloud.firestore {
     // Enterprise Organizations & Multi-Role RBAC Subcollections
     // =========================================================================
     match /organizations/{orgId} {
-      allow get: if isValidId(orgId) && isOrgMember(orgId);
+      allow get: if isValidId(orgId) && isOrgMemberActive(orgId);
       allow list: if false;
-      allow create: if isValidId(orgId)
-        && isVerifiedUser()
-        && isValidOrganization(incoming(), orgId)
-        && incoming().ownerUid == request.auth.uid
-        && incoming().createdAt == request.time
-        && incoming().updatedAt == request.time;
+      // Organization lifecycle (create, billing, delete, ownership) is server-only
+      allow create, delete: if false;
       allow update: if isValidId(orgId)
         && isVerifiedUser()
-        && isValidOrganization(incoming(), orgId)
         && isOrgOwnerOrAdmin(orgId)
+        && isOrgWritable(orgId)
+        && isValidOrgSettingsUpdate(incoming())
         && incoming().id == existing().id
         && incoming().ownerUid == existing().ownerUid
         && incoming().createdAt == existing().createdAt
@@ -524,63 +536,37 @@ service cloud.firestore {
           'taxNumber',
           'approvalThreshold',
           'lockedUntilDate',
-          'inviteCode',
-          'extraSeats',
           'updatedAt'
         ]);
-      allow delete: if isValidId(orgId)
-        && isVerifiedUser()
-        && (isOrgOwner(orgId) || (isOrgMember(orgId) && orgRole(orgId) == 'owner'));
 
       match /members/{memberUid} {
-        allow get: if isValidId(orgId) && isValidId(memberUid) && isOrgMember(orgId);
-        allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
-        allow create: if isValidId(orgId)
-          && isValidId(memberUid)
-          && isVerifiedUser()
-          && isValidOrgMember(incoming(), orgId, memberUid)
-          && incoming().updatedAt == request.time
-          && (
-            (memberUid == request.auth.uid && incoming().role == 'owner' && getAfter(/databases/$(database)/documents/organizations/$(orgId)).data.ownerUid == request.auth.uid) ||
-            isOrgOwnerOrAdmin(orgId)
-          );
-        allow update: if isValidId(orgId)
-          && isValidId(memberUid)
-          && isVerifiedUser()
-          && isValidOrgMember(incoming(), orgId, memberUid)
-          && isOrgOwnerOrAdmin(orgId)
-          && incoming().uid == existing().uid
-          && incoming().joinedAt == existing().joinedAt
-          && incoming().updatedAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly([
-            'displayName',
-            'role',
-            'department',
-            'spendingLimit',
-            'status',
-            'updatedAt'
-          ]);
-        allow delete: if isValidId(orgId)
-          && isValidId(memberUid)
-          && isVerifiedUser()
-          && isOrgOwnerOrAdmin(orgId)
-          && memberUid != request.auth.uid
-          && existing().role != 'owner';
+        allow get, list: if isValidId(orgId) && isOrgMemberActive(orgId);
+        // All joins, role updates, suspends, and removals go through verified Admin SDK API
+        allow write: if false;
+      }
+
+      match /invites/{inviteId} {
+        allow read, write: if false;
+      }
+
+      match /scanQuotas/{monthKey} {
+        allow read, write: if false;
       }
 
       match /costCenters/{costCenterId} {
-        allow get: if isValidId(orgId) && isValidId(costCenterId) && isOrgMember(orgId);
-        allow list: if false;
+        allow get, list: if isValidId(orgId) && isOrgMemberActive(orgId);
         allow create: if isValidId(orgId)
           && isValidId(costCenterId)
           && isVerifiedUser()
           && isOrgAccountantOrAbove(orgId)
+          && isOrgWritable(orgId)
           && isValidCostCenter(incoming(), orgId, costCenterId)
           && incoming().updatedAt == request.time;
         allow update: if isValidId(orgId)
           && isValidId(costCenterId)
           && isVerifiedUser()
           && isOrgAccountantOrAbove(orgId)
+          && isOrgWritable(orgId)
           && isValidCostCenter(incoming(), orgId, costCenterId)
           && incoming().id == existing().id
           && incoming().orgId == existing().orgId
@@ -593,25 +579,31 @@ service cloud.firestore {
             'nameEn',
             'type',
             'budgetAllocated',
+            'budgetAllocatedMinor',
             'isActive',
             'updatedAt'
           ]);
-        allow delete: if isValidId(orgId) && isValidId(costCenterId) && isVerifiedUser() && isOrgOwnerOrAdmin(orgId);
+        allow delete: if isValidId(orgId)
+          && isValidId(costCenterId)
+          && isVerifiedUser()
+          && isOrgOwnerOrAdmin(orgId)
+          && isOrgWritable(orgId);
       }
 
       match /parties/{partyId} {
-        allow get: if isValidId(orgId) && isValidId(partyId) && isOrgMember(orgId);
-        allow list: if false;
+        allow get, list: if isValidId(orgId) && isOrgMemberActive(orgId);
         allow create: if isValidId(orgId)
           && isValidId(partyId)
           && isVerifiedUser()
           && isOrgAccountantOrAbove(orgId)
+          && isOrgWritable(orgId)
           && isValidBusinessParty(incoming(), orgId, partyId)
           && incoming().updatedAt == request.time;
         allow update: if isValidId(orgId)
           && isValidId(partyId)
           && isVerifiedUser()
           && isOrgAccountantOrAbove(orgId)
+          && isOrgWritable(orgId)
           && isValidBusinessParty(incoming(), orgId, partyId)
           && incoming().id == existing().id
           && incoming().orgId == existing().orgId
@@ -626,112 +618,152 @@ service cloud.firestore {
             'creditLimit',
             'currency',
             'balance',
+            'balanceMinor',
             'dueDate',
             'notes',
             'updatedAt'
           ]);
-        allow delete: if isValidId(orgId) && isValidId(partyId) && isVerifiedUser() && isOrgOwnerOrAdmin(orgId);
+        allow delete: if isValidId(orgId)
+          && isValidId(partyId)
+          && isVerifiedUser()
+          && isOrgOwnerOrAdmin(orgId)
+          && isOrgWritable(orgId);
       }
 
       match /transactions/{txId} {
-        allow get: if isValidId(orgId) && isValidId(txId) && isOrgMember(orgId);
-        allow list: if false;
+        allow get, list: if isValidId(orgId) && isOrgMemberActive(orgId);
         allow create: if isValidId(orgId)
           && isValidId(txId)
           && isVerifiedUser()
           && isOrgContributorOrAbove(orgId)
+          && isOrgWritable(orgId)
           && isValidOrgLedgerRecord(incoming(), orgId, txId)
           && incoming().updatedAt == request.time
+          && isAfterPeriodLock(orgId, incoming().get('date', incoming().payload.get('date', '')))
           && (
-            isOrgAccountantOrAbove(orgId) ||
-            (incoming().submittedBy == request.auth.uid && incoming().approvalStatus == 'pending_approval')
+            isOrgAccountantOrAbove(orgId)
+            || (
+              incoming().submittedBy == request.auth.uid
+              && incoming().approvalStatus in ['draft', 'pending']
+              && isWithinEmployeeSpendingLimit(orgId, incoming())
+            )
           );
         allow update: if isValidId(orgId)
           && isValidId(txId)
           && isVerifiedUser()
-          && isOrgAccountantOrAbove(orgId)
+          && isOrgContributorOrAbove(orgId)
+          && isOrgWritable(orgId)
           && isValidOrgLedgerRecord(incoming(), orgId, txId)
           && incoming().id == existing().id
           && incoming().orgId == existing().orgId
           && incoming().updatedAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly(['approvalStatus', 'payload', 'updatedAt']);
+          && isAfterPeriodLock(orgId, existing().get('date', existing().payload.get('date', '')))
+          && isAfterPeriodLock(orgId, incoming().get('date', incoming().payload.get('date', '')))
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'date', 'amountMinor', 'approvedBy', 'approvalStatus', 'deletedAt', 'payload', 'updatedAt'
+          ])
+          && (
+            isOrgAccountantOrAbove(orgId)
+            || (
+              existing().submittedBy == request.auth.uid
+              && existing().get('approvalStatus', 'pending') in ['draft', 'pending', 'rejected']
+              && incoming().get('approvalStatus', 'pending') in ['draft', 'pending']
+              && isWithinEmployeeSpendingLimit(orgId, incoming())
+            )
+          );
         allow delete: if isValidId(orgId)
           && isValidId(txId)
           && isVerifiedUser()
-          && isOrgOwnerOrAdmin(orgId);
+          && isOrgOwnerOrAdmin(orgId)
+          && isOrgWritable(orgId);
       }
 
       match /wallets/{walletId} {
-        allow get: if isValidId(orgId) && isValidId(walletId) && isOrgMember(orgId);
-        allow list: if false;
+        allow get, list: if isValidId(orgId) && isOrgMemberActive(orgId);
         allow create: if isValidId(orgId)
           && isValidId(walletId)
           && isVerifiedUser()
           && isOrgAccountantOrAbove(orgId)
+          && isOrgWritable(orgId)
           && isValidOrgLedgerRecord(incoming(), orgId, walletId)
           && incoming().updatedAt == request.time;
         allow update: if isValidId(orgId)
           && isValidId(walletId)
           && isVerifiedUser()
           && isOrgAccountantOrAbove(orgId)
+          && isOrgWritable(orgId)
           && isValidOrgLedgerRecord(incoming(), orgId, walletId)
           && incoming().id == existing().id
           && incoming().orgId == existing().orgId
           && incoming().updatedAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly(['payload', 'updatedAt']);
-        allow delete: if isValidId(orgId) && isValidId(walletId) && isVerifiedUser() && isOrgOwnerOrAdmin(orgId);
+          && incoming().diff(existing()).affectedKeys().hasOnly(['balanceMinor', 'payload', 'updatedAt']);
+        allow delete: if isValidId(orgId)
+          && isValidId(walletId)
+          && isVerifiedUser()
+          && isOrgOwnerOrAdmin(orgId)
+          && isOrgWritable(orgId);
       }
 
       match /categories/{categoryId} {
-        allow get: if isValidId(orgId) && isValidId(categoryId) && isOrgMember(orgId);
-        allow list: if false;
+        allow get, list: if isValidId(orgId) && isOrgMemberActive(orgId);
         allow create: if isValidId(orgId)
           && isValidId(categoryId)
           && isVerifiedUser()
           && isOrgAccountantOrAbove(orgId)
+          && isOrgWritable(orgId)
           && isValidOrgLedgerRecord(incoming(), orgId, categoryId)
           && incoming().updatedAt == request.time;
         allow update: if isValidId(orgId)
           && isValidId(categoryId)
           && isVerifiedUser()
           && isOrgAccountantOrAbove(orgId)
+          && isOrgWritable(orgId)
           && isValidOrgLedgerRecord(incoming(), orgId, categoryId)
           && incoming().id == existing().id
           && incoming().orgId == existing().orgId
           && incoming().updatedAt == request.time
           && incoming().diff(existing()).affectedKeys().hasOnly(['payload', 'updatedAt']);
-        allow delete: if isValidId(orgId) && isValidId(categoryId) && isVerifiedUser() && isOrgOwnerOrAdmin(orgId);
+        allow delete: if isValidId(orgId)
+          && isValidId(categoryId)
+          && isVerifiedUser()
+          && isOrgOwnerOrAdmin(orgId)
+          && isOrgWritable(orgId);
       }
 
       match /budgets/{budgetId} {
-        allow get: if isValidId(orgId) && isValidId(budgetId) && isOrgMember(orgId);
-        allow list: if false;
+        allow get, list: if isValidId(orgId) && isOrgMemberActive(orgId);
         allow create: if isValidId(orgId)
           && isValidId(budgetId)
           && isVerifiedUser()
           && isOrgAccountantOrAbove(orgId)
+          && isOrgWritable(orgId)
           && isValidOrgLedgerRecord(incoming(), orgId, budgetId)
           && incoming().updatedAt == request.time;
         allow update: if isValidId(orgId)
           && isValidId(budgetId)
           && isVerifiedUser()
           && isOrgAccountantOrAbove(orgId)
+          && isOrgWritable(orgId)
           && isValidOrgLedgerRecord(incoming(), orgId, budgetId)
           && incoming().id == existing().id
           && incoming().orgId == existing().orgId
           && incoming().updatedAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly(['payload', 'updatedAt']);
-        allow delete: if isValidId(orgId) && isValidId(budgetId) && isVerifiedUser() && isOrgOwnerOrAdmin(orgId);
+          && incoming().diff(existing()).affectedKeys().hasOnly(['amountMinor', 'payload', 'updatedAt']);
+        allow delete: if isValidId(orgId)
+          && isValidId(budgetId)
+          && isVerifiedUser()
+          && isOrgOwnerOrAdmin(orgId)
+          && isOrgWritable(orgId);
       }
 
       // Immutable append-only audit log
       match /auditLogs/{logId} {
-        allow get: if isValidId(orgId) && isValidId(logId) && isOrgAccountantOrAbove(orgId);
-        allow list: if false;
+        allow get, list: if isValidId(orgId) && isOrgAccountantOrAbove(orgId);
         allow create: if isValidId(orgId)
           && isValidId(logId)
           && isVerifiedUser()
           && isOrgContributorOrAbove(orgId)
+          && isOrgWritable(orgId)
           && isValidAuditLogEntry(incoming(), orgId, logId)
           && incoming().createdAt == request.time;
         allow update, delete: if false;

@@ -29,6 +29,10 @@ export const UpgradeModal: React.FC = () => {
     planTier,
     proEntitlement,
     user,
+    orgRefs,
+    isOrgWorkspace,
+    activeOrganization,
+    activeOrgSubscriptionState,
     redeemProCode,
     startBusinessTrial,
     devActivateProPreview,
@@ -39,9 +43,15 @@ export const UpgradeModal: React.FC = () => {
     t,
   } = useApp();
 
-  const [tierTab, setTierTab] = useState<'personal_pro' | 'business_pro'>(
-    isBusinessPro ? 'business_pro' : 'personal_pro'
+  const eligibleOrgs = React.useMemo(
+    () => orgRefs.filter((r) => r.role === 'owner' || r.role === 'admin'),
+    [orgRefs]
   );
+
+  const [tierTab, setTierTab] = useState<'personal_pro' | 'business_pro'>(
+    isOrgWorkspace || isBusinessPro ? 'business_pro' : 'personal_pro'
+  );
+  const [selectedOrgId, setSelectedOrgId] = useState<string>('');
   const [personalCycle, setPersonalCycle] = useState<'monthly' | 'yearly' | 'lifetime'>('yearly');
   const [businessCycle, setBusinessCycle] = useState<'monthly' | 'yearly'>('yearly');
   const [currencyMode, setCurrencyMode] = useState<PricingCurrency>('EGP');
@@ -57,9 +67,25 @@ export const UpgradeModal: React.FC = () => {
   const [isRestoring, setIsRestoring] = useState(false);
   const isDev = import.meta.env.DEV;
 
+  React.useEffect(() => {
+    if (!isUpgradeModalOpen) return;
+    if (isOrgWorkspace || isBusinessPro) {
+      setTierTab('business_pro');
+    }
+    const defaultOrgId =
+      (activeOrganization && eligibleOrgs.some((o) => o.orgId === activeOrganization.id)
+        ? activeOrganization.id
+        : eligibleOrgs[0]?.orgId) || '';
+    setSelectedOrgId((prev) =>
+      prev && eligibleOrgs.some((o) => o.orgId === prev) ? prev : defaultOrgId
+    );
+  }, [isUpgradeModalOpen, isOrgWorkspace, isBusinessPro, activeOrganization, eligibleOrgs]);
+
   if (!isUpgradeModalOpen) return null;
 
   const lang = isRTL ? 'ar' : 'en';
+  const targetBusinessOrgId =
+    tierTab === 'business_pro' && selectedOrgId ? selectedOrgId : undefined;
 
   const handleDevActivate = () => {
     if (isDev) {
@@ -84,13 +110,13 @@ export const UpgradeModal: React.FC = () => {
 
     setIsStartingTrial(true);
     try {
-      const res = await startBusinessTrial();
+      const res = await startBusinessTrial(targetBusinessOrgId);
       if (res.ok) {
         setTrialMessage({
           type: 'ok',
           text: isRTL
-            ? 'تم تفعيل الفترة التجريبية المجانية لباقة Business PRO لمدة 14 يوماً!'
-            : '14-day Business PRO free trial activated!',
+            ? `تم تفعيل الفترة التجريبية المجانية لباقة Business PRO لمدة ${PRICING_CONFIG.trialDays} يوماً!`
+            : `${PRICING_CONFIG.trialDays}-day Business PRO free trial activated!`,
         });
       } else {
         setTrialMessage({
@@ -124,7 +150,7 @@ export const UpgradeModal: React.FC = () => {
 
     setIsRedeeming(true);
     try {
-      const result = await redeemProCode(trimmed);
+      const result = await redeemProCode(trimmed, targetBusinessOrgId);
       if (!result.ok) {
         setCodeError(
           result.error ||
@@ -480,8 +506,52 @@ export const UpgradeModal: React.FC = () => {
                 })}
               </div>
 
+              {/* Target Cloud Organization selector for Business PRO */}
+              {eligibleOrgs.length > 0 && (
+                <div className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-1.5">
+                  <label className="text-[11px] font-semibold text-[var(--color-muted)] block">
+                    {isRTL ? 'المؤسسة المستهدفة للترقية / التجديد:' : 'Target Organization:'}
+                  </label>
+                  <select
+                    value={selectedOrgId}
+                    onChange={(e) => setSelectedOrgId(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-xs text-[var(--color-ink)] min-h-[40px]"
+                  >
+                    {eligibleOrgs.map((orgRef) => (
+                      <option key={orgRef.orgId} value={orgRef.orgId}>
+                        {orgRef.orgName} ({orgRef.currency})
+                      </option>
+                    ))}
+                  </select>
+                  {activeOrganization?.id === selectedOrgId && activeOrgSubscriptionState && (
+                    <div className="flex items-center justify-between text-[11px] text-[var(--color-muted)] pt-0.5">
+                      <span>
+                        {activeOrgSubscriptionState.isReadOnly
+                          ? isRTL
+                            ? 'الحالة: منتهي (للقراءة فقط)'
+                            : 'Status: Expired (Read-Only)'
+                          : activeOrgSubscriptionState.isGracePeriod
+                          ? isRTL
+                            ? `فترة السماح (${activeOrgSubscriptionState.graceDaysRemaining} أيام متبقية)`
+                            : `Grace Period (${activeOrgSubscriptionState.graceDaysRemaining}d left)`
+                          : activeOrgSubscriptionState.daysRemaining !== null
+                          ? isRTL
+                            ? `الحالة: نشط (${activeOrgSubscriptionState.daysRemaining} يوم متبقي)`
+                            : `Status: Active (${activeOrgSubscriptionState.daysRemaining}d left)`
+                          : isRTL
+                          ? 'الحالة: نشط'
+                          : 'Status: Active'}
+                      </span>
+                      <span className="num-tabular" dir="ltr">
+                        {activeOrgSubscriptionState.seatLimit} {isRTL ? 'مقاعد' : 'seats'}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* 14-Day Free Business Trial CTA */}
-              {!isBusinessPro && (
+              {(!isBusinessPro || activeOrgSubscriptionState?.isReadOnly) && (
                 <div className="p-3 rounded-xl bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30 flex items-center justify-between gap-2">
                   <div className="flex items-start gap-2">
                     <Clock className="w-4 h-4 text-[var(--color-accent)] shrink-0 mt-0.5" />
@@ -491,8 +561,8 @@ export const UpgradeModal: React.FC = () => {
                       </div>
                       <div className="text-[11px] text-[var(--color-muted)]">
                         {isRTL
-                          ? 'جرب كامل ميزات الشركات وفريق العمل لمدة 14 يوماً مجاناً.'
-                          : 'Try full Enterprise accounting & 5 team seats free for 14 days.'}
+                          ? `جرب كامل ميزات الشركات وفريق العمل لمدة ${PRICING_CONFIG.trialDays} يوماً مجاناً.`
+                          : `Try full Enterprise accounting & ${PRICING_CONFIG.businessPro.includedSeats} team seats free for ${PRICING_CONFIG.trialDays} days.`}
                       </div>
                     </div>
                   </div>
@@ -596,57 +666,63 @@ export const UpgradeModal: React.FC = () => {
             </ul>
           </div>
 
-          {/* Server-Verified Activation Code Redemption */}
-          {!isBusinessPro && (
-            <form
-              onSubmit={handleRedeemCode}
-              className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-2.5"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-ink)]">
-                  <KeyRound className="w-3.5 h-3.5 text-[var(--color-accent)] shrink-0" />
-                  <span>{isRTL ? 'تفعيل بالكود الخاص بك' : 'Activate with License Code'}</span>
-                </div>
-                {!user?.isLoggedIn && (
-                  <button
-                    type="button"
-                    onClick={() => void signInWithGoogleAccount()}
-                    className="text-[11px] font-semibold text-[var(--color-accent)] hover:underline shrink-0"
-                  >
-                    {isRTL ? 'تسجيل دخول جوجل' : 'Sign in with Google'}
-                  </button>
-                )}
+          {/* Server-Verified Activation Code Redemption (always accessible for initial activation, renewals & extra seats) */}
+          <form
+            onSubmit={handleRedeemCode}
+            className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-2.5"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-ink)]">
+                <KeyRound className="w-3.5 h-3.5 text-[var(--color-accent)] shrink-0" />
+                <span>
+                  {isPro
+                    ? isRTL
+                      ? 'تجديد الاشتراك أو تفعيل كود جديد'
+                      : 'Renew Subscription or Redeem New Code'
+                    : isRTL
+                    ? 'تفعيل بالكود الخاص بك'
+                    : 'Activate with License Code'}
+                </span>
               </div>
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  value={activationCode}
-                  onChange={(e) => {
-                    setActivationCode(e.target.value);
-                    setCodeError(null);
-                  }}
-                  placeholder="XXXX-XXXX-XXXX"
-                  dir="ltr"
-                  disabled={isRedeeming}
-                  className="flex-1 px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs font-mono text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px] disabled:opacity-60"
-                />
+              {!user?.isLoggedIn && (
                 <button
-                  type="submit"
-                  disabled={isRedeeming || !activationCode.trim()}
-                  className="px-3.5 py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-semibold hover:opacity-95 transition-opacity min-h-[44px] disabled:opacity-50 shrink-0 flex items-center gap-1.5"
+                  type="button"
+                  onClick={() => void signInWithGoogleAccount()}
+                  className="text-[11px] font-semibold text-[var(--color-accent)] hover:underline shrink-0"
                 >
-                  {isRedeeming && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                  <span>{isRTL ? 'تفعيل' : 'Activate'}</span>
+                  {isRTL ? 'تسجيل دخول جوجل' : 'Sign in with Google'}
                 </button>
-              </div>
-              {codeError && (
-                <p className="text-[11px] text-[var(--color-expense)] font-medium">{codeError}</p>
               )}
-              {codeSuccess && (
-                <p className="text-[11px] text-[var(--color-income)] font-medium">{codeSuccess}</p>
-              )}
-            </form>
-          )}
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={activationCode}
+                onChange={(e) => {
+                  setActivationCode(e.target.value);
+                  setCodeError(null);
+                }}
+                placeholder="RASEEDI-XXXX-XXXX-XXXX"
+                dir="ltr"
+                disabled={isRedeeming}
+                className="flex-1 px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs font-mono text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px] disabled:opacity-60"
+              />
+              <button
+                type="submit"
+                disabled={isRedeeming || !activationCode.trim()}
+                className="px-3.5 py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-semibold hover:opacity-95 transition-opacity min-h-[44px] disabled:opacity-50 shrink-0 flex items-center gap-1.5"
+              >
+                {isRedeeming && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{isRTL ? 'تفعيل' : 'Activate'}</span>
+              </button>
+            </div>
+            {codeError && (
+              <p className="text-[11px] text-[var(--color-expense)] font-medium">{codeError}</p>
+            )}
+            {codeSuccess && (
+              <p className="text-[11px] text-[var(--color-income)] font-medium">{codeSuccess}</p>
+            )}
+          </form>
 
           {/* Follow Us on Social Media */}
           <div className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-2" data-testid="upgrade-follow-us">

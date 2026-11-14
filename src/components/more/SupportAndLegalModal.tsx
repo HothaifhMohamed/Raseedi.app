@@ -340,25 +340,25 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
                 {isRTL ? (
                   <div className="space-y-1.5 text-[var(--color-muted)]">
                     <p>
-                      يحترم تطبيق <strong className="text-[var(--color-ink)]">رَصِيدِي</strong> خصوصيتك المالية بالكامل. تُحفظ جميع معاملاتك، محافظك، ميزانياتك، ديونك، وأهدافك محلياً على جهازك عبر <bdi dir="ltr">IndexedDB</bdi> و<bdi dir="ltr">localStorage</bdi> للعمل دون اتصال.
+                      يحترم تطبيق <strong className="text-[var(--color-ink)]">رَصِيدِي</strong> خصوصيتك المالية بالكامل. تُحفظ بياناتك الشخصية من معاملات، محافظ، ميزانيات، ديون، وأهداف محلياً على جهازك عبر <bdi dir="ltr">IndexedDB</bdi> و<bdi dir="ltr">localStorage</bdi> للعمل دون اتصال.
                     </p>
                     <p>
-                      عند تفعيلك اختيارياً لميزة «النسخ الاحتياطي السحابي عبر حساب جوجل»، تُستخدم خدمات <bdi dir="ltr">Firebase Authentication</bdi> و<bdi dir="ltr">Cloud Firestore</bdi> لحفظ نسخة خاصة بك من بياناتك وسجل باقة <bdi dir="ltr">PRO</bdi> تحت معرّف حسابك فقط، ويمكنك حذف حسابك وبياناتك السحابية نهائياً من الإعدادات في أي وقت.
+                      عند تفعيلك اختيارياً للنسخ الاحتياطي السحابي أو باقات <bdi dir="ltr">PRO</bdi>، تُستخدم خدمات <bdi dir="ltr">Firebase Authentication</bdi> و<bdi dir="ltr">Cloud Firestore</bdi> لحفظ بياناتك الخاصة وتفعيل اشتراكك. وعند الانضمام إلى <strong className="text-[var(--color-ink)]">مساحة عمل مؤسسة</strong> (<bdi dir="ltr">Enterprise</bdi>)، تكون قيود المؤسسة ومرفقات الفواتير المحفوظة على <bdi dir="ltr">Firebase Storage</bdi> وسجل التدقيق (<bdi dir="ltr">Audit Log</bdi>) مرئية لأعضاء الفريق المخوّلين داخل نفس المؤسسة وفق الصلاحيات المعتمدة.
                     </p>
                     <p>
-                      عند استخدامك لميزة «مسح الفاتورة بالذكاء الاصطناعي» اختيارياً، تُرسل الصورة المختارة حصراً إلى <bdi dir="ltr">Google Gemini API</bdi> عبر خادم التطبيق الآمن لاستخراج المبلغ والتاريخ والتصنيف، ولا تُخزَّن الصورة على خوادمنا.
+                      عند استخدام ميزة «مسح الفاتورة بالذكاء الاصطناعي» اختيارياً، تُرسل الصورة حصراً عبر خادم التطبيق الموثق إلى <bdi dir="ltr">Google Gemini API</bdi> لاستخراج الحقول المالية دون الاحتفاظ بالصورة على خادم المسح، ويمكنك حذف حسابك وبياناتك السحابية نهائياً من الإعدادات في أي وقت.
                     </p>
                   </div>
                 ) : (
                   <div className="space-y-1.5 text-[var(--color-muted)]">
                     <p>
-                      <strong className="text-[var(--color-ink)]">Raseedi</strong> respects your financial privacy. Your transactions, wallets, budgets, debts, and goals are stored locally on your device via IndexedDB and localStorage for offline use.
+                      <strong className="text-[var(--color-ink)]">Raseedi</strong> respects your financial privacy. Personal transactions, wallets, budgets, debts, and goals are stored locally on your device via IndexedDB and localStorage for offline use.
                     </p>
                     <p>
-                      When you optionally enable Cloud Sync or redeem a PRO code, <strong>Firebase Authentication</strong> and <strong>Cloud Firestore</strong> store your private account backup and PRO status under your user ID. You can permanently delete your account and cloud data anytime from Settings.
+                      When you enable Cloud Sync or activate PRO, <strong>Firebase Authentication</strong> and <strong>Cloud Firestore</strong> store your private account backup and entitlement state. When you create or join a cloud <strong>Enterprise Organization</strong>, that organization&apos;s ledger, receipt attachments stored in <strong>Firebase Storage</strong>, and immutable <strong>Audit Log</strong> entries are shared with authorized active members of that same organization according to RBAC roles.
                     </p>
                     <p>
-                      When you optionally trigger AI Receipt Scanning, the selected receipt image is transmitted over HTTPS to <strong>Google Gemini API</strong> via our authenticated server proxy solely to extract receipt fields and is not retained on our servers.
+                      When you trigger AI Receipt Scanning, the selected receipt image is transmitted over HTTPS through our authenticated server proxy to <strong>Google Gemini API</strong> solely for field extraction and is not retained by the scanner endpoint. You may permanently delete your account and cloud data anytime from Settings.
                     </p>
                   </div>
                 )}

@@ -78,7 +78,8 @@ export async function scanReceiptWithAI(
   imageBase64: string,
   mimeType: string,
   categories: Category[],
-  isRTL = true
+  isRTL = true,
+  orgId?: string
 ): Promise<ScannedReceiptResult> {
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     throw new ReceiptScanError(
@@ -122,6 +123,7 @@ export async function scanReceiptWithAI(
       body: JSON.stringify({
         imageBase64,
         mimeType,
+        ...(orgId ? { orgId } : {}),
         categories: categories
           .filter((c) => !c.isHidden)
           .map((c) => ({

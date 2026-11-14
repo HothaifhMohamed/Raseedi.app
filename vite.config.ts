@@ -1,21 +1,43 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
+import fs from 'node:fs';
 import path from 'path';
-import {defineConfig} from 'vite';
+import { defineConfig, Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
+
+function conditionalAdsTxtPlugin(): Plugin {
+  return {
+    name: 'conditional-ads-txt',
+    closeBundle() {
+      const client = process.env.VITE_ADSENSE_CLIENT_ID?.trim();
+      const outAdsPath = path.resolve(__dirname, 'dist', 'ads.txt');
+      if (!fs.existsSync(outAdsPath)) return;
+      if (!client) {
+        fs.unlinkSync(outAdsPath);
+        return;
+      }
+      const pubId = client.replace(/^ca-/, '');
+      const content = `# Google AdSense Authorized Digital Sellers (ads.txt) for Raseedi\ngoogle.com, ${pubId}, DIRECT, f08c47fec0942fa0\n`;
+      fs.writeFileSync(outAdsPath, content, 'utf8');
+    },
+  };
+}
 
 export default defineConfig(() => {
   return {
     plugins: [
       react(),
       tailwindcss(),
+      conditionalAdsTxtPlugin(),
       VitePWA({
         registerType: 'autoUpdate',
         manifest: {
           id: '/',
-          name: 'رَصِيدِي - متتبع المصاريف والميزانية',
-          short_name: 'رَصِيدِي',
-          description: 'تطبيق عربي شامل لإدارة وتتبع المصاريف، الميزانيات، المحافظ، والديون بدون إنترنت.',
+          name: 'Raseedi - رَصِيدِي',
+          short_name: 'Raseedi',
+          description: 'تطبيق عربي شامل لإدارة وتتبع المصاريف، الميزانيات، المحافظ، والديون وحسابات المؤسسات.',
+          lang: 'ar',
+          dir: 'rtl',
           theme_color: '#F5EFE3',
           background_color: '#F5EFE3',
           display: 'standalone',
@@ -35,7 +57,7 @@ export default defineConfig(() => {
               purpose: 'any'
             },
             {
-              src: '/pwa-512x512.png',
+              src: '/pwa-maskable-512x512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'maskable'

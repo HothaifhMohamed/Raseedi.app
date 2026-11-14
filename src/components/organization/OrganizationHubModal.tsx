@@ -27,6 +27,18 @@ import {
   ShieldCheck,
   Briefcase,
   Receipt,
+  Link2,
+  Share2,
+  Loader2,
+  AlertTriangle,
+  UserMinus,
+  UserCheck,
+  ArrowRightLeft,
+  Crown,
+  BadgeCheck,
+  RotateCcw,
+  RefreshCw,
+  Paperclip,
 } from 'lucide-react';
 import { useApp, OrgHubTab } from '../../context/AppContext';
 import {
@@ -35,11 +47,16 @@ import {
   calculateEnterprisePnL,
   formatCurrencyAmount,
   formatLocalDate,
+  roundCurrency,
 } from '../../services/calculations';
+import { normalizeApprovalStatus } from '../../services/entitlements';
+import { resolveOrgAttachmentUrl } from '../../services/firebase';
 import { MoneyText } from '../common/MoneyText';
 import {
+  AuditLogAction,
   BusinessParty,
   CostCenter,
+  OrganizationInvite,
   OrganizationRole,
   Transaction,
 } from '../../types';
@@ -69,33 +86,50 @@ export const OrganizationHubModal: React.FC = () => {
     wallets,
     categories,
     activeOrgRole,
+    canOrgWrite,
     canOrgApprove,
     canOrgManage,
+    isOrgReadOnly,
+    activeOrgSubscriptionState,
+    orgActionError,
+    clearOrgActionError,
+    orgTrashTransactions,
     pendingApprovalsCount,
     approveOrgTransaction,
     rejectOrgTransaction,
+    markOrgTransactionPaid,
+    restoreOrgTransaction,
+    recalculateOrgBalances,
     addCostCenter,
     updateCostCenter,
     deleteCostCenter,
     addBusinessParty,
     updateBusinessParty,
     deleteBusinessParty,
-    addOrUpdateOrgMember,
-    removeOrgMember,
+    createOrgInvite,
+    listOrgInvites,
+    revokeOrgInvite,
+    manageOrgMember,
+    transferOrgOwnership,
+    deleteOrganization,
     addWallet,
     updateWallet,
     addTransaction,
     updateOrganizationSettings,
     lockAccountingPeriod,
+    setIsUpgradeModalOpen,
+    user,
     settings,
     t,
     isRTL,
   } = useApp();
 
-  // Tab 1: Approvals state
-  const [approvalFilter, setApprovalFilter] = useState<'pending' | 'rejected' | 'approved'>('pending');
+  // Tab 1: Approvals & Trash state
+  const [approvalFilter, setApprovalFilter] = useState<'pending' | 'rejected' | 'approved' | 'trash'>('pending');
   const [rejectTargetId, setRejectTargetId] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState('');
+  const [attachmentPreviewUrl, setAttachmentPreviewUrl] = useState<string | null>(null);
+  const [loadingAttachmentId, setLoadingAttachmentId] = useState<string | null>(null);
 
   // Tab 2: Cost Centers state
   const [ccFormOpen, setCcFormOpen] = useState(false);
@@ -120,14 +154,30 @@ export const OrganizationHubModal: React.FC = () => {
   const [settleAmount, setSettleAmount] = useState('');
   const [settleWalletId, setSettleWalletId] = useState('');
 
-  // Tab 4: Team & Petty Cash Custody state
-  const [copiedInvite, setCopiedInvite] = useState(false);
-  const [memberFormOpen, setMemberFormOpen] = useState(false);
-  const [memberName, setMemberName] = useState('');
-  const [memberEmail, setMemberEmail] = useState('');
-  const [memberRole, setMemberRole] = useState<OrganizationRole>('employee');
-  const [memberDept, setMemberDept] = useState('');
-  const [memberLimit, setMemberLimit] = useState('');
+  // Tab 4: Cloud Team, Secure Invites & Petty Cash Custody state
+  const [inviteRole, setInviteRole] = useState<Exclude<OrganizationRole, 'owner'>>('employee');
+  const [inviteExpiryDays, setInviteExpiryDays] = useState<number>(7);
+  const [inviteMaxUses, setInviteMaxUses] = useState<number>(5);
+  const [isGeneratingInvite, setIsGeneratingInvite] = useState(false);
+  const [generatedInvite, setGeneratedInvite] = useState<{ code: string; role: string } | null>(null);
+  const [copiedInviteMode, setCopiedInviteMode] = useState<'code' | 'link' | null>(null);
+  const [invitesList, setInvitesList] = useState<OrganizationInvite[]>([]);
+  const [isLoadingInvites, setIsLoadingInvites] = useState(false);
+  const [revokingInviteId, setRevokingInviteId] = useState<string | null>(null);
+  const [memberActionBusyUid, setMemberActionBusyUid] = useState<string | null>(null);
+  const [editingMemberLimit, setEditingMemberLimit] = useState<{
+    uid: string;
+    limit: string;
+    department: string;
+  } | null>(null);
+  const [confirmRemoveUid, setConfirmRemoveUid] = useState<string | null>(null);
+  const [transferTargetUid, setTransferTargetUid] = useState('');
+  const [confirmTransferOpen, setConfirmTransferOpen] = useState(false);
+  const [isTransferringOwner, setIsTransferringOwner] = useState(false);
+  const [deleteOrgConfirmName, setDeleteOrgConfirmName] = useState('');
+  const [isDeletingOrg, setIsDeletingOrg] = useState(false);
+  const [teamFeedback, setTeamFeedback] = useState<{ text: string; error?: boolean } | null>(null);
+
   const [pettyFormOpen, setPettyFormOpen] = useState(false);
   const [pettyName, setPettyName] = useState('');
   const [pettyCustodianUid, setPettyCustodianUid] = useState('');
@@ -139,6 +189,10 @@ export const OrganizationHubModal: React.FC = () => {
   const [endDate, setEndDate] = useState('');
   const [selectedVoucherTxId, setSelectedVoucherTxId] = useState<string>('');
   const [auditFilter, setAuditFilter] = useState('');
+  const [auditActorFilter, setAuditActorFilter] = useState('');
+  const [auditActionFilter, setAuditActionFilter] = useState<AuditLogAction | ''>('');
+  const [auditStartDate, setAuditStartDate] = useState('');
+  const [auditEndDate, setAuditEndDate] = useState('');
   const [orgVatInput, setOrgVatInput] = useState(
     activeOrganization ? String(activeOrganization.vatRate) : '14'
   );
@@ -150,6 +204,9 @@ export const OrganizationHubModal: React.FC = () => {
     activeOrganization?.lockedUntilDate || ''
   );
   const [settingsSavedBanner, setSettingsSavedBanner] = useState(false);
+  const [confirmRecalc, setConfirmRecalc] = useState(false);
+  const [isRecalculating, setIsRecalculating] = useState(false);
+  const [recalcMessage, setRecalcMessage] = useState<string | null>(null);
 
   // Keep org inputs in sync when switching org
   React.useEffect(() => {
@@ -158,17 +215,41 @@ export const OrganizationHubModal: React.FC = () => {
     setOrgTaxNumInput(activeOrganization.taxNumber || '');
     setOrgThresholdInput(String(activeOrganization.approvalThreshold ?? 1000));
     setOrgLockDateInput(activeOrganization.lockedUntilDate || '');
+    setGeneratedInvite(null);
+    setTeamFeedback(null);
   }, [activeOrganization?.id]);
+
+  // Load invites when Team tab is active for owner/admin
+  React.useEffect(() => {
+    if (!isOrgHubOpen || orgHubTab !== 'team' || !canOrgManage || !activeOrganization) return;
+    let cancelled = false;
+    setIsLoadingInvites(true);
+    listOrgInvites()
+      .then((list) => {
+        if (!cancelled) setInvitesList(list);
+      })
+      .catch(() => {
+        if (!cancelled) setInvitesList([]);
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingInvites(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOrgHubOpen, orgHubTab, canOrgManage, activeOrganization?.id, listOrgInvites]);
 
   const currency = activeOrganization?.currency || settings.mainCurrency;
 
   const approvalItems = useMemo(() => {
+    if (approvalFilter === 'trash') return orgTrashTransactions;
     return transactions.filter((tx) => {
-      if (approvalFilter === 'pending') return tx.approvalStatus === 'pending_approval';
-      if (approvalFilter === 'rejected') return tx.approvalStatus === 'rejected';
-      return tx.approvalStatus === 'approved';
+      const s = normalizeApprovalStatus(tx.approvalStatus);
+      if (approvalFilter === 'pending') return s === 'pending';
+      if (approvalFilter === 'rejected') return s === 'rejected';
+      return s === 'approved' || s === 'paid';
     });
-  }, [transactions, approvalFilter]);
+  }, [transactions, orgTrashTransactions, approvalFilter]);
 
   const costCenterSummaries = useMemo(() => {
     return calculateCostCenterReport(
@@ -211,16 +292,56 @@ export const OrganizationHubModal: React.FC = () => {
 
   const filteredAuditLogs = useMemo(() => {
     const q = auditFilter.trim().toLowerCase();
-    if (!q) return orgAuditLogs.slice(0, 80);
+    const startMs = auditStartDate ? new Date(`${auditStartDate}T00:00:00`).getTime() : null;
+    const endMs = auditEndDate ? new Date(`${auditEndDate}T23:59:59.999`).getTime() : null;
     return orgAuditLogs
-      .filter(
-        (e) =>
-          e.summary.toLowerCase().includes(q) ||
-          e.actorName.toLowerCase().includes(q) ||
-          e.action.toLowerCase().includes(q)
-      )
+      .filter((e) => {
+        if (auditActorFilter && e.actorUid !== auditActorFilter) return false;
+        if (auditActionFilter && e.action !== auditActionFilter) return false;
+        if (startMs && e.timestamp < startMs) return false;
+        if (endMs && e.timestamp > endMs) return false;
+        if (
+          q &&
+          !e.summary.toLowerCase().includes(q) &&
+          !e.actorName.toLowerCase().includes(q) &&
+          !e.action.toLowerCase().includes(q)
+        ) {
+          return false;
+        }
+        return true;
+      })
       .slice(0, 80);
-  }, [orgAuditLogs, auditFilter]);
+  }, [orgAuditLogs, auditFilter, auditActorFilter, auditActionFilter, auditStartDate, auditEndDate]);
+
+  const handleOpenTxAttachment = async (tx: Transaction) => {
+    const firstPath = tx.attachmentPaths?.[0];
+    const firstRaw = tx.attachments?.[0];
+    if (!firstPath && !firstRaw) return;
+    if (firstRaw) {
+      setAttachmentPreviewUrl(firstRaw);
+      return;
+    }
+    if (firstPath) {
+      setLoadingAttachmentId(tx.id);
+      try {
+        const url = await resolveOrgAttachmentUrl(firstPath);
+        if (url) {
+          setAttachmentPreviewUrl(url);
+        } else {
+          setTeamFeedback({
+            text: isRTL ? 'المرفق بانتظار الرفع عند عودة الاتصال بالإنترنت.' : 'Attachment upload pending reconnection.',
+          });
+        }
+      } catch {
+        setTeamFeedback({
+          text: isRTL ? 'تعذر فتح المرفق من التخزين السحابي.' : 'Failed to open cloud attachment.',
+          error: true,
+        });
+      } finally {
+        setLoadingAttachmentId(null);
+      }
+    }
+  };
 
   if (!isOrgHubOpen || !activeOrganization) return null;
 
@@ -276,7 +397,7 @@ export const OrganizationHubModal: React.FC = () => {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `raseedi-org-${activeOrganization.inviteCode}-${formatLocalDate()}.csv`;
+    link.download = `raseedi-org-${activeOrganization.id}-${formatLocalDate()}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -372,11 +493,14 @@ export const OrganizationHubModal: React.FC = () => {
 
   const handleConfirmPartySettlement = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!settleParty) return;
+    if (!settleParty || isOrgReadOnly) return;
     const amt = Number(settleAmount);
     if (!Number.isFinite(amt) || amt <= 0) return;
 
-    const remaining = Math.max(0, Number((settleParty.balance - amt).toFixed(2)));
+    const remaining = Math.max(
+      0,
+      roundCurrency(settleParty.balance - amt, settleParty.currency || currency)
+    );
     updateBusinessParty(settleParty.id, { balance: remaining });
 
     if (settleWalletId) {
@@ -414,24 +538,118 @@ export const OrganizationHubModal: React.FC = () => {
     setSettleWalletId('');
   };
 
-  // Team & Petty Cash Handlers
-  const handleAddMember = (e: React.FormEvent) => {
+  // Cloud Team & Invite Handlers
+  const handleGenerateInvite = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!memberName.trim() || !memberEmail.trim()) return;
-    addOrUpdateOrgMember({
-      uid: `member-${Date.now()}`,
-      email: memberEmail.trim().toLowerCase(),
-      displayName: memberName.trim(),
-      role: memberRole,
-      department: memberDept.trim() || undefined,
-      spendingLimit: memberLimit ? Number(memberLimit) : undefined,
-      status: 'active',
-    });
-    setMemberName('');
-    setMemberEmail('');
-    setMemberDept('');
-    setMemberLimit('');
-    setMemberFormOpen(false);
+    if (isOrgReadOnly || !canOrgManage) return;
+    setIsGeneratingInvite(true);
+    setTeamFeedback(null);
+    try {
+      const res = await createOrgInvite(inviteRole, inviteExpiryDays, inviteMaxUses);
+      setGeneratedInvite({ code: res.code, role: inviteRole });
+      setInvitesList((prev) => [res.invite, ...prev]);
+      setTeamFeedback({
+        text: isRTL
+          ? 'تم إنشاء كود الدعوة الآمن بنجاح — انسخه الآن لأنه لا يظهر مرة أخرى.'
+          : 'Secure invite created — copy it now as plaintext codes are shown once.',
+      });
+    } catch (err: any) {
+      setTeamFeedback({
+        text: err?.message || (isRTL ? 'تعذر إنشاء الدعوة.' : 'Failed to create invite.'),
+        error: true,
+      });
+    } finally {
+      setIsGeneratingInvite(false);
+    }
+  };
+
+  const handleRevokeInvite = async (inviteId: string) => {
+    setRevokingInviteId(inviteId);
+    setTeamFeedback(null);
+    try {
+      await revokeOrgInvite(inviteId);
+      setInvitesList((prev) =>
+        prev.map((inv) => (inv.id === inviteId ? { ...inv, status: 'revoked' } : inv))
+      );
+    } catch (err: any) {
+      setTeamFeedback({
+        text: err?.message || (isRTL ? 'تعذر إلغاء الدعوة.' : 'Failed to revoke invite.'),
+        error: true,
+      });
+    } finally {
+      setRevokingInviteId(null);
+    }
+  };
+
+  const handleMemberManage = async (
+    targetUid: string,
+    action: 'change_role' | 'suspend' | 'reactivate' | 'remove' | 'set_spending_limit',
+    extra?: {
+      role?: Exclude<OrganizationRole, 'owner'>;
+      spendingLimit?: number | null;
+      department?: string;
+    }
+  ) => {
+    setMemberActionBusyUid(targetUid);
+    setTeamFeedback(null);
+    try {
+      await manageOrgMember({ targetUid, action, ...extra });
+      if (action === 'set_spending_limit') setEditingMemberLimit(null);
+      if (action === 'remove') setConfirmRemoveUid(null);
+    } catch (err: any) {
+      setTeamFeedback({
+        text: err?.message || (isRTL ? 'تعذر تحديث بيانات العضو.' : 'Failed to update member.'),
+        error: true,
+      });
+    } finally {
+      setMemberActionBusyUid(null);
+    }
+  };
+
+  const handleTransferOwnership = async () => {
+    if (!transferTargetUid) return;
+    setIsTransferringOwner(true);
+    setTeamFeedback(null);
+    try {
+      await transferOrgOwnership(transferTargetUid);
+      setConfirmTransferOpen(false);
+      setTransferTargetUid('');
+      setTeamFeedback({
+        text: isRTL ? 'تم نقل ملكية المؤسسة بنجاح.' : 'Organization ownership transferred.',
+      });
+    } catch (err: any) {
+      setTeamFeedback({
+        text: err?.message || (isRTL ? 'تعذر نقل الملكية.' : 'Failed to transfer ownership.'),
+        error: true,
+      });
+    } finally {
+      setIsTransferringOwner(false);
+    }
+  };
+
+  const handleDeleteOrganization = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeOrganization || deleteOrgConfirmName.trim() !== activeOrganization.name.trim()) {
+      setTeamFeedback({
+        text: isRTL ? 'اكتب اسم المؤسسة بدقة للتأكيد.' : 'Type exact organization name to confirm.',
+        error: true,
+      });
+      return;
+    }
+    setIsDeletingOrg(true);
+    setTeamFeedback(null);
+    try {
+      await deleteOrganization(deleteOrgConfirmName.trim());
+      setDeleteOrgConfirmName('');
+      setIsOrgHubOpen(false);
+    } catch (err: any) {
+      setTeamFeedback({
+        text: err?.message || (isRTL ? 'تعذر حذف المؤسسة.' : 'Failed to delete organization.'),
+        error: true,
+      });
+    } finally {
+      setIsDeletingOrg(false);
+    }
   };
 
   const handleIssuePettyCash = (e: React.FormEvent) => {
@@ -468,6 +686,7 @@ export const OrganizationHubModal: React.FC = () => {
   // Org Settings & Lock Handler
   const handleSaveOrgSettings = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isOrgReadOnly || !canOrgManage) return;
     updateOrganizationSettings({
       vatRate: Math.max(0, Math.min(50, Number(orgVatInput) || 0)),
       taxNumber: orgTaxNumInput.trim() || undefined,
@@ -476,6 +695,31 @@ export const OrganizationHubModal: React.FC = () => {
     lockAccountingPeriod(orgLockDateInput.trim() || undefined);
     setSettingsSavedBanner(true);
     setTimeout(() => setSettingsSavedBanner(false), 2500);
+  };
+
+  const handleRecalculateBalances = async () => {
+    if (isOrgReadOnly || !canOrgManage) return;
+    setIsRecalculating(true);
+    setRecalcMessage(null);
+    try {
+      await recalculateOrgBalances();
+      setConfirmRecalc(false);
+      setRecalcMessage(
+        isRTL
+          ? 'تمت إعادة احتساب أرصدة جميع المحافظ من المعاملات المعتمدة بنجاح.'
+          : 'All wallet balances were recalculated from approved ledger entries.'
+      );
+    } catch (err) {
+      setRecalcMessage(
+        err instanceof Error
+          ? err.message
+          : isRTL
+          ? 'تعذر إعادة احتساب الأرصدة.'
+          : 'Failed to recalculate balances.'
+      );
+    } finally {
+      setIsRecalculating(false);
+    }
   };
 
   const tabs: Array<{ id: OrgHubTab; icon: typeof ClipboardCheck; label: string; badge?: number }> = [
@@ -599,17 +843,53 @@ export const OrganizationHubModal: React.FC = () => {
 
         {/* Tab Body */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {orgActionError && (
+            <div className="p-3 rounded-xl bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/30 text-xs text-[var(--color-expense)] flex items-center justify-between gap-2 no-print">
+              <div className="flex items-center gap-2 min-w-0">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span className="font-semibold">{orgActionError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={clearOrgActionError}
+                className="p-1 rounded hover:bg-[var(--color-expense)]/15 shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          {isOrgReadOnly && (
+            <div className="p-3 rounded-xl bg-amber-500/12 border border-amber-500/35 text-xs text-amber-800 dark:text-amber-300 flex items-center justify-between gap-2 no-print">
+              <span className="font-semibold">{t('orgReadOnlyBanner')}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsOrgHubOpen(false);
+                  setIsUpgradeModalOpen(true);
+                }}
+                className="px-3 py-1.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-[11px] font-bold shrink-0"
+              >
+                {isRTL ? 'ترقية الباقة' : 'Upgrade'}
+              </button>
+            </div>
+          )}
+
           {/* ============================================================== */}
           {/* TAB 1: APPROVALS QUEUE                                         */}
           {/* ============================================================== */}
           {orgHubTab === 'approvals' && (
             <div className="space-y-3">
-              <div className="grid grid-cols-3 gap-1.5">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
                 {(
                   [
                     { id: 'pending', label: t('pendingApprovalBadge') },
                     { id: 'approved', label: t('approvedBadge') },
                     { id: 'rejected', label: t('rejectedBadge') },
+                    {
+                      id: 'trash',
+                      label: `${t('trashBin')}${orgTrashTransactions.length > 0 ? ` (${orgTrashTransactions.length})` : ''}`,
+                    },
                   ] as const
                 ).map((item) => (
                   <button
@@ -631,7 +911,11 @@ export const OrganizationHubModal: React.FC = () => {
                 <div className="py-12 text-center text-xs text-[var(--color-muted)] space-y-2 bg-[var(--color-bg)] rounded-xl border border-[var(--color-line)]">
                   <Clock className="w-8 h-8 mx-auto text-[var(--color-muted)]/60" />
                   <p>
-                    {approvalFilter === 'pending'
+                    {approvalFilter === 'trash'
+                      ? isRTL
+                        ? 'سلة المحذوفات فارغة.'
+                        : 'Trash bin is empty.'
+                      : approvalFilter === 'pending'
                       ? isRTL
                         ? 'لا توجد مصروفات أو عُهد معلقة بانتظار الاعتماد.'
                         : 'No pending approvals right now.'
@@ -734,37 +1018,91 @@ export const OrganizationHubModal: React.FC = () => {
                       )}
 
                       <div className="flex items-center gap-2 pt-1 flex-wrap">
-                        {tx.approvalStatus === 'pending_approval' && canOrgApprove && (
-                          <>
+                        {approvalFilter === 'trash' ? (
+                          canOrgWrite &&
+                          !isOrgReadOnly && (
                             <button
                               type="button"
-                              onClick={() => approveOrgTransaction(tx.id)}
-                              className="flex-1 py-2 px-3 rounded-lg bg-[var(--color-income)] text-white text-xs font-bold flex items-center justify-center gap-1.5 min-h-[44px]"
+                              onClick={() => restoreOrgTransaction(tx.id)}
+                              className="py-2 px-3 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center justify-center gap-1.5 min-h-[44px]"
                             >
-                              <CheckCircle2 className="w-4 h-4" />
-                              <span>{isRTL ? 'اعتماد' : 'Approve'}</span>
+                              <RotateCcw className="w-4 h-4" />
+                              <span>{t('restoreItem')}</span>
                             </button>
+                          )
+                        ) : (
+                          <>
+                            {normalizeApprovalStatus(tx.approvalStatus) === 'pending' &&
+                              canOrgApprove &&
+                              !isOrgReadOnly && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => approveOrgTransaction(tx.id)}
+                                    className="flex-1 py-2 px-3 rounded-lg bg-[var(--color-income)] text-white text-xs font-bold flex items-center justify-center gap-1.5 min-h-[44px]"
+                                  >
+                                    <CheckCircle2 className="w-4 h-4" />
+                                    <span>{isRTL ? 'اعتماد' : 'Approve'}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setRejectTargetId(tx.id);
+                                      setRejectReason('');
+                                    }}
+                                    className="flex-1 py-2 px-3 rounded-lg bg-[var(--color-expense)]/12 border border-[var(--color-expense)]/30 text-[var(--color-expense)] text-xs font-bold flex items-center justify-center gap-1.5 min-h-[44px]"
+                                  >
+                                    <XCircle className="w-4 h-4" />
+                                    <span>{isRTL ? 'رفض' : 'Reject'}</span>
+                                  </button>
+                                </>
+                              )}
+                            {normalizeApprovalStatus(tx.approvalStatus) === 'approved' &&
+                              canOrgApprove &&
+                              !isOrgReadOnly && (
+                                <button
+                                  type="button"
+                                  onClick={() => markOrgTransactionPaid(tx.id)}
+                                  className="py-2 px-3 rounded-lg bg-[var(--color-accent)]/12 border border-[var(--color-accent)]/35 text-[var(--color-accent)] text-xs font-bold flex items-center justify-center gap-1.5 min-h-[44px]"
+                                >
+                                  <BadgeCheck className="w-4 h-4" />
+                                  <span>{t('markAsPaid')}</span>
+                                </button>
+                              )}
+                            {normalizeApprovalStatus(tx.approvalStatus) === 'paid' && (
+                              <span className="px-2.5 py-1.5 rounded-lg bg-[var(--color-income)]/15 text-[var(--color-income)] text-[11px] font-bold flex items-center gap-1">
+                                <BadgeCheck className="w-3.5 h-3.5" />
+                                <span>{t('paidBadge')}</span>
+                              </span>
+                            )}
+                            {((tx.attachmentPaths && tx.attachmentPaths.length > 0) ||
+                              (tx.attachments && tx.attachments.length > 0)) && (
+                              <button
+                                type="button"
+                                disabled={loadingAttachmentId === tx.id}
+                                onClick={() => void handleOpenTxAttachment(tx)}
+                                className="px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-xs font-semibold text-[var(--color-ink)] flex items-center gap-1.5 min-h-[44px]"
+                              >
+                                <Paperclip className="w-3.5 h-3.5 text-[var(--color-accent)]" />
+                                <span>
+                                  {loadingAttachmentId === tx.id
+                                    ? '...'
+                                    : isRTL
+                                    ? 'معاينة الإيصال'
+                                    : 'Receipt'}
+                                </span>
+                              </button>
+                            )}
                             <button
                               type="button"
-                              onClick={() => {
-                                setRejectTargetId(tx.id);
-                                setRejectReason('');
-                              }}
-                              className="flex-1 py-2 px-3 rounded-lg bg-[var(--color-expense)]/12 border border-[var(--color-expense)]/30 text-[var(--color-expense)] text-xs font-bold flex items-center justify-center gap-1.5 min-h-[44px]"
+                              onClick={() => handleOpenVoucherForTx(tx.id)}
+                              className="px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-xs font-semibold text-[var(--color-ink)] flex items-center gap-1.5 min-h-[44px]"
                             >
-                              <XCircle className="w-4 h-4" />
-                              <span>{isRTL ? 'رفض' : 'Reject'}</span>
+                              <FileText className="w-3.5 h-3.5 text-[var(--color-accent)]" />
+                              <span>{t('officialVoucher')}</span>
                             </button>
                           </>
                         )}
-                        <button
-                          type="button"
-                          onClick={() => handleOpenVoucherForTx(tx.id)}
-                          className="px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-xs font-semibold text-[var(--color-ink)] flex items-center gap-1.5 min-h-[44px]"
-                        >
-                          <FileText className="w-3.5 h-3.5 text-[var(--color-accent)]" />
-                          <span>{t('officialVoucher')}</span>
-                        </button>
                       </div>
                     </div>
                   );
@@ -784,7 +1122,7 @@ export const OrganizationHubModal: React.FC = () => {
                     ? 'متابعة الموازنات والمنصرف والإيرادات لكل قسم أو مشروع أو فرع.'
                     : 'Track budgets, spend, and revenue by department, project, or branch.'}
                 </p>
-                {canOrgApprove && (
+                {canOrgApprove && !isOrgReadOnly && (
                   <button
                     type="button"
                     data-testid="org-hub-new-cc-btn"
@@ -908,7 +1246,7 @@ export const OrganizationHubModal: React.FC = () => {
                           </div>
                         </div>
 
-                        {canOrgManage && (
+                        {canOrgManage && !isOrgReadOnly && (
                           <div className="flex items-center gap-1 shrink-0">
                             <button
                               type="button"
@@ -1071,7 +1409,7 @@ export const OrganizationHubModal: React.FC = () => {
                 <h3 className="text-xs font-bold text-[var(--color-ink)]">
                   {isRTL ? `سجل الموردين والعملاء (${orgParties.length})` : `Vendors & Clients (${orgParties.length})`}
                 </h3>
-                {canOrgApprove && (
+                {canOrgApprove && !isOrgReadOnly && (
                   <button
                     type="button"
                     data-testid="org-hub-new-party-btn"
@@ -1290,7 +1628,7 @@ export const OrganizationHubModal: React.FC = () => {
                           colorByType={true}
                           className="text-sm font-bold"
                         />
-                        {canOrgApprove && party.balance > 0 && (
+                        {canOrgApprove && !isOrgReadOnly && party.balance > 0 && (
                           <button
                             type="button"
                             onClick={() => {
@@ -1309,7 +1647,7 @@ export const OrganizationHubModal: React.FC = () => {
                               : 'Collect'}
                           </button>
                         )}
-                        {canOrgApprove && (
+                        {canOrgApprove && !isOrgReadOnly && (
                           <button
                             type="button"
                             onClick={() => openEditParty(party)}
@@ -1318,7 +1656,7 @@ export const OrganizationHubModal: React.FC = () => {
                             <Edit2 className="w-3.5 h-3.5" />
                           </button>
                         )}
-                        {canOrgManage && (
+                        {canOrgManage && !isOrgReadOnly && (
                           <button
                             type="button"
                             onClick={() => deleteBusinessParty(party.id)}
@@ -1336,35 +1674,239 @@ export const OrganizationHubModal: React.FC = () => {
           )}
 
           {/* ============================================================== */}
-          {/* TAB 4: TEAM, RBAC & EMPLOYEE PETTY CASH CUSTODY                */}
+          {/* TAB 4: TEAM, CLOUD INVITES, RBAC & PETTY CASH CUSTODY          */}
           {/* ============================================================== */}
           {orgHubTab === 'team' && (
             <div className="space-y-4">
-              {/* Invite Code Card */}
-              <div className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] flex items-center justify-between gap-2">
-                <div>
-                  <div className="text-[11px] text-[var(--color-muted)]">{t('inviteCode')}</div>
-                  <div className="text-sm font-mono font-bold text-[var(--color-accent)]" dir="ltr">
-                    {activeOrganization.inviteCode}
+              {teamFeedback && (
+                <div
+                  className={`p-3 rounded-xl text-xs flex items-center gap-2 ${
+                    teamFeedback.error
+                      ? 'bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/30 text-[var(--color-expense)]'
+                      : 'bg-[var(--color-income)]/10 border border-[var(--color-income)]/30 text-[var(--color-income)]'
+                  }`}
+                >
+                  <span>{teamFeedback.text}</span>
+                </div>
+              )}
+
+              {/* Subscription & Seat Usage Header Card */}
+              <div className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] flex items-center justify-between gap-3 flex-wrap">
+                <div className="space-y-0.5">
+                  <div className="text-xs font-bold text-[var(--color-ink)] flex items-center gap-1.5">
+                    <Crown className="w-4 h-4 text-[var(--color-accent)]" />
+                    <span>
+                      {isRTL ? 'المقاعد وخطة المؤسسة' : 'Seats & Organization Plan'}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-[var(--color-muted)]">
+                    {isRTL
+                      ? `المستخدم: ${orgMembers.filter((m) => m.status !== 'suspended').length} من أصل ${activeOrgSubscriptionState?.seatLimit ?? activeOrganization.seatLimit ?? 5} مقاعد`
+                      : `${orgMembers.filter((m) => m.status !== 'suspended').length} of ${activeOrgSubscriptionState?.seatLimit ?? activeOrganization.seatLimit ?? 5} seats used`}
+                    {activeOrgSubscriptionState &&
+                      ` • ${activeOrgSubscriptionState.status === 'trial' ? (isRTL ? 'فترة تجريبية' : 'Trial') : activeOrgSubscriptionState.status === 'active' ? (isRTL ? 'نشط' : 'Active') : activeOrgSubscriptionState.status === 'grace' ? (isRTL ? 'فترة سماح' : 'Grace') : isRTL ? 'قراءة فقط' : 'Read-Only'} (${activeOrgSubscriptionState.daysRemaining}d)`}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    navigator.clipboard?.writeText(activeOrganization.inviteCode);
-                    setCopiedInvite(true);
-                    setTimeout(() => setCopiedInvite(false), 2000);
-                  }}
-                  className="px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-xs font-semibold flex items-center gap-1.5 min-h-[44px]"
-                >
-                  {copiedInvite ? (
-                    <Check className="w-4 h-4 text-[var(--color-income)]" />
-                  ) : (
-                    <Copy className="w-4 h-4" />
-                  )}
-                  <span>{copiedInvite ? (isRTL ? 'تم النسخ' : 'Copied') : isRTL ? 'نسخ' : 'Copy'}</span>
-                </button>
+                {canOrgManage && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsOrgHubOpen(false);
+                      setIsUpgradeModalOpen(true);
+                    }}
+                    className="px-3 py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[38px]"
+                  >
+                    {isRTL ? 'إدارة الاشتراك' : 'Manage Plan'}
+                  </button>
+                )}
               </div>
+
+              {/* Secure Cloud Invites Generator & Active Invites (Owner / Admin) */}
+              {canOrgManage && (
+                <div className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="text-xs font-bold text-[var(--color-ink)] flex items-center gap-1.5">
+                      <Link2 className="w-4 h-4 text-[var(--color-accent)]" />
+                      <span>{t('generateInviteBtn')}</span>
+                    </h3>
+                  </div>
+
+                  <form onSubmit={handleGenerateInvite} className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                    <select
+                      disabled={isOrgReadOnly || isGeneratingInvite}
+                      value={inviteRole}
+                      onChange={(e) => setInviteRole(e.target.value as Exclude<OrganizationRole, 'owner'>)}
+                      aria-label={isRTL ? 'دور المدعو' : 'Invite role'}
+                      className="px-2.5 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[42px]"
+                    >
+                      {ROLES.filter((r) => r.id !== 'owner').map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {isRTL ? r.labelAr : r.labelEn}
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
+                      disabled={isOrgReadOnly || isGeneratingInvite}
+                      value={inviteExpiryDays}
+                      onChange={(e) => setInviteExpiryDays(Number(e.target.value))}
+                      aria-label={isRTL ? 'صلاحية الدعوة' : 'Expiry days'}
+                      className="px-2.5 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[42px]"
+                    >
+                      <option value={1}>{isRTL ? 'تنتهي خلال يوم' : '1 day'}</option>
+                      <option value={3}>{isRTL ? 'تنتهي خلال 3 أيام' : '3 days'}</option>
+                      <option value={7}>{isRTL ? 'تنتهي خلال 7 أيام' : '7 days'}</option>
+                      <option value={14}>{isRTL ? 'تنتهي خلال 14 يوماً' : '14 days'}</option>
+                      <option value={30}>{isRTL ? 'تنتهي خلال 30 يوماً' : '30 days'}</option>
+                    </select>
+
+                    <select
+                      disabled={isOrgReadOnly || isGeneratingInvite}
+                      value={inviteMaxUses}
+                      onChange={(e) => setInviteMaxUses(Number(e.target.value))}
+                      aria-label={isRTL ? 'الحد الأقصى للاستخدام' : 'Max uses'}
+                      className="px-2.5 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[42px]"
+                    >
+                      <option value={1}>{isRTL ? 'استخدام واحد' : '1 use'}</option>
+                      <option value={3}>{isRTL ? '3 استخدامات' : '3 uses'}</option>
+                      <option value={5}>{isRTL ? '5 استخدامات' : '5 uses'}</option>
+                      <option value={10}>{isRTL ? '10 استخدامات' : '10 uses'}</option>
+                      <option value={25}>{isRTL ? '25 استخداماً' : '25 uses'}</option>
+                    </select>
+
+                    <button
+                      type="submit"
+                      disabled={isOrgReadOnly || isGeneratingInvite}
+                      className="px-3 py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center justify-center gap-1.5 min-h-[42px] disabled:opacity-50"
+                    >
+                      {isGeneratingInvite ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Plus className="w-4 h-4" />
+                      )}
+                      <span>{isRTL ? 'إصدار دعوة' : 'Create Invite'}</span>
+                    </button>
+                  </form>
+
+                  {/* Newly Generated One-Time Plaintext Invite Code */}
+                  {generatedInvite && (
+                    <div className="p-3 rounded-xl bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/40 space-y-2.5">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div>
+                          <div className="text-[10px] font-semibold text-[var(--color-accent)]">
+                            {isRTL ? 'كود الدعوة (يظهر مرة واحدة فقط):' : 'One-Time Invite Code:'}
+                          </div>
+                          <div className="text-base font-mono font-bold text-[var(--color-ink)]" dir="ltr">
+                            {generatedInvite.code}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard?.writeText(generatedInvite.code);
+                              setCopiedInviteMode('code');
+                              setTimeout(() => setCopiedInviteMode(null), 2000);
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-[11px] font-semibold flex items-center gap-1 min-h-[36px]"
+                          >
+                            {copiedInviteMode === 'code' ? (
+                              <Check className="w-3.5 h-3.5 text-[var(--color-income)]" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                            <span>{copiedInviteMode === 'code' ? (isRTL ? 'تم' : 'Copied') : isRTL ? 'نسخ الكود' : 'Code'}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const link = `${window.location.origin}/?join=${encodeURIComponent(generatedInvite.code)}`;
+                              navigator.clipboard?.writeText(link);
+                              setCopiedInviteMode('link');
+                              setTimeout(() => setCopiedInviteMode(null), 2000);
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-[11px] font-semibold flex items-center gap-1 min-h-[36px]"
+                          >
+                            {copiedInviteMode === 'link' ? (
+                              <Check className="w-3.5 h-3.5 text-[var(--color-income)]" />
+                            ) : (
+                              <Link2 className="w-3.5 h-3.5" />
+                            )}
+                            <span>{copiedInviteMode === 'link' ? (isRTL ? 'تم النسخ' : 'Link Copied') : t('copyInviteLink')}</span>
+                          </button>
+
+                          <a
+                            href={`https://wa.me/?text=${encodeURIComponent(
+                              isRTL
+                                ? `انضم إلى فريق "${activeOrganization.name}" في تطبيق رَصِيدِي عبر الرابط التالي:\n${window.location.origin}/?join=${generatedInvite.code}\nأو استخدم الكود: ${generatedInvite.code}`
+                                : `Join "${activeOrganization.name}" on Raseedi:\n${window.location.origin}/?join=${generatedInvite.code}\nOr use code: ${generatedInvite.code}`
+                            )}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="px-2.5 py-1.5 rounded-lg bg-[#25D366]/15 border border-[#25D366]/40 text-[#128C7E] dark:text-[#25D366] text-[11px] font-semibold flex items-center gap-1 min-h-[36px]"
+                          >
+                            <Share2 className="w-3.5 h-3.5" />
+                            <span>WhatsApp</span>
+                          </a>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Active Invites List */}
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] font-semibold text-[var(--color-muted)] flex items-center justify-between">
+                      <span>{isRTL ? 'الدعوات الصادرة' : 'Issued Invites'}</span>
+                      {isLoadingInvites && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                    </div>
+                    {invitesList.length === 0 ? (
+                      <div className="text-[11px] text-[var(--color-muted)] py-2">
+                        {isRTL ? 'لا توجد دعوات مصدرة بعد.' : 'No invites generated yet.'}
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5 max-h-44 overflow-y-auto">
+                        {invitesList.map((inv) => (
+                          <div
+                            key={inv.id}
+                            className="px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] flex items-center justify-between gap-2 text-[11px]"
+                          >
+                            <div className="min-w-0">
+                              <div className="font-semibold text-[var(--color-ink)] flex items-center gap-1.5 flex-wrap">
+                                <span>{roleLabel(inv.role)}</span>
+                                <span
+                                  className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                    inv.status === 'active'
+                                      ? 'bg-[var(--color-income)]/15 text-[var(--color-income)]'
+                                      : 'bg-[var(--color-line)] text-[var(--color-muted)]'
+                                  }`}
+                                >
+                                  {inv.status}
+                                </span>
+                              </div>
+                              <div className="text-[10px] text-[var(--color-muted)]">
+                                {isRTL
+                                  ? `الاستخدام: ${inv.usedCount}/${inv.maxUses} • ينتهي: ${new Date(inv.expiresAt).toLocaleDateString('ar-EG')}`
+                                  : `Uses: ${inv.usedCount}/${inv.maxUses} • Exp: ${new Date(inv.expiresAt).toLocaleDateString('en-US')}`}
+                              </div>
+                            </div>
+                            {inv.status === 'active' && !isOrgReadOnly && (
+                              <button
+                                type="button"
+                                disabled={revokingInviteId === inv.id}
+                                onClick={() => void handleRevokeInvite(inv.id)}
+                                className="px-2.5 py-1 rounded border border-[var(--color-expense)]/40 text-[var(--color-expense)] text-[10px] font-bold shrink-0 disabled:opacity-50"
+                              >
+                                {revokingInviteId === inv.id ? '...' : t('revokeInvite')}
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Team Members Section */}
               <div className="space-y-2.5">
@@ -1372,151 +1914,200 @@ export const OrganizationHubModal: React.FC = () => {
                   <h3 className="text-xs font-bold text-[var(--color-ink)]">
                     {isRTL ? `أعضاء الفريق والصلاحيات (${orgMembers.length})` : `Team & Roles (${orgMembers.length})`}
                   </h3>
-                  {canOrgManage && (
-                    <button
-                      type="button"
-                      data-testid="org-hub-add-member-btn"
-                      onClick={() => setMemberFormOpen((v) => !v)}
-                      className="px-3 py-2 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center gap-1.5 min-h-[44px]"
-                    >
-                      <Plus className="w-4 h-4" />
-                      <span>{isRTL ? 'إضافة موظف / عضو' : 'Add Member'}</span>
-                    </button>
-                  )}
                 </div>
 
-                {memberFormOpen && canOrgManage && (
-                  <form
-                    onSubmit={handleAddMember}
-                    className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-accent)]/40 space-y-2.5"
-                  >
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <input
-                        type="text"
-                        required
-                        value={memberName}
-                        onChange={(e) => setMemberName(e.target.value)}
-                        placeholder={isRTL ? 'الاسم الكامل' : 'Full Name'}
-                        className="px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px]"
-                      />
-                      <input
-                        type="email"
-                        required
-                        dir="ltr"
-                        value={memberEmail}
-                        onChange={(e) => setMemberEmail(e.target.value)}
-                        placeholder="name@company.com"
-                        className="px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px]"
-                      />
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                      <select
-                        value={memberRole}
-                        onChange={(e) => setMemberRole(e.target.value as OrganizationRole)}
-                        className="px-2.5 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px]"
-                      >
-                        {ROLES.filter((r) => r.id !== 'owner').map((r) => (
-                          <option key={r.id} value={r.id}>
-                            {isRTL ? r.labelAr : r.labelEn}
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        type="text"
-                        value={memberDept}
-                        onChange={(e) => setMemberDept(e.target.value)}
-                        placeholder={isRTL ? 'القسم' : 'Department'}
-                        className="px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px]"
-                      />
-                      <input
-                        type="number"
-                        min="0"
-                        value={memberLimit}
-                        onChange={(e) => setMemberLimit(e.target.value)}
-                        placeholder={isRTL ? 'سقف الصرف' : 'Spending Limit'}
-                        className="px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px]"
-                      />
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setMemberFormOpen(false)}
-                        className="px-4 py-2 rounded-lg border border-[var(--color-line)] text-xs text-[var(--color-muted)] min-h-[44px]"
-                      >
-                        {t('cancel')}
-                      </button>
-                      <button
-                        type="submit"
-                        className="flex-1 py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[44px]"
-                      >
-                        {t('save')}
-                      </button>
-                    </div>
-                  </form>
-                )}
-
                 <div className="space-y-2">
-                  {orgMembers.map((member) => (
-                    <div
-                      key={member.uid}
-                      className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] flex items-center justify-between gap-2 flex-wrap"
-                    >
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <Shield className="w-3.5 h-3.5 text-[var(--color-accent)] shrink-0" />
-                          <span className="text-xs font-bold text-[var(--color-ink)] truncate">
-                            {member.displayName}
-                          </span>
+                  {orgMembers.map((member) => {
+                    const isSelf = member.uid === user?.id;
+                    const isBusy = memberActionBusyUid === member.uid;
+                    const isSuspended = member.status === 'suspended';
+                    return (
+                      <div
+                        key={member.uid}
+                        className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-2"
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <Shield className="w-3.5 h-3.5 text-[var(--color-accent)] shrink-0" />
+                              <span className="text-xs font-bold text-[var(--color-ink)] truncate">
+                                {member.displayName}
+                              </span>
+                              {isSelf && (
+                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--color-accent)]/12 text-[var(--color-accent)] font-bold">
+                                  {isRTL ? 'أنت' : 'You'}
+                                </span>
+                              )}
+                              {isSuspended && (
+                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--color-expense)]/15 text-[var(--color-expense)] font-bold">
+                                  {isRTL ? 'موقوف' : 'Suspended'}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-[var(--color-muted)] truncate" dir="ltr">
+                              {member.email}
+                            </div>
+                            {(member.department || typeof member.spendingLimit === 'number') && (
+                              <div className="text-[10px] text-[var(--color-muted)] mt-0.5">
+                                {member.department ? `${member.department} ` : ''}
+                                {typeof member.spendingLimit === 'number'
+                                  ? `• ${isRTL ? 'سقف الصرف:' : 'Limit:'} ${member.spendingLimit} ${currency}`
+                                  : ''}
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                            {canOrgManage && member.role !== 'owner' && !isOrgReadOnly ? (
+                              <>
+                                <select
+                                  disabled={isBusy}
+                                  value={member.role}
+                                  onChange={(e) =>
+                                    void handleMemberManage(member.uid, 'change_role', {
+                                      role: e.target.value as Exclude<OrganizationRole, 'owner'>,
+                                    })
+                                  }
+                                  className="px-2 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-[11px] font-semibold min-h-[38px] disabled:opacity-50"
+                                >
+                                  {ROLES.filter((r) => r.id !== 'owner').map((r) => (
+                                    <option key={r.id} value={r.id}>
+                                      {isRTL ? r.labelAr : r.labelEn}
+                                    </option>
+                                  ))}
+                                </select>
+
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() =>
+                                    setEditingMemberLimit(
+                                      editingMemberLimit?.uid === member.uid
+                                        ? null
+                                        : {
+                                            uid: member.uid,
+                                            limit:
+                                              typeof member.spendingLimit === 'number'
+                                                ? String(member.spendingLimit)
+                                                : '',
+                                            department: member.department || '',
+                                          }
+                                    )
+                                  }
+                                  title={isRTL ? 'تعديل القسم وسقف الصرف' : 'Edit dept & limit'}
+                                  className="p-2 text-[var(--color-muted)] hover:text-[var(--color-accent)] rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] min-h-[38px]"
+                                >
+                                  <Edit2 className="w-3.5 h-3.5" />
+                                </button>
+
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() =>
+                                    void handleMemberManage(
+                                      member.uid,
+                                      isSuspended ? 'reactivate' : 'suspend'
+                                    )
+                                  }
+                                  title={isSuspended ? (isRTL ? 'إعادة تفعيل' : 'Reactivate') : isRTL ? 'إيقاف مؤقت' : 'Suspend'}
+                                  className="p-2 text-[var(--color-muted)] hover:text-amber-600 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] min-h-[38px]"
+                                >
+                                  {isSuspended ? (
+                                    <UserCheck className="w-3.5 h-3.5 text-[var(--color-income)]" />
+                                  ) : (
+                                    <UserMinus className="w-3.5 h-3.5" />
+                                  )}
+                                </button>
+
+                                {confirmRemoveUid === member.uid ? (
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      disabled={isBusy}
+                                      onClick={() => void handleMemberManage(member.uid, 'remove')}
+                                      className="px-2 py-1.5 rounded-lg bg-[var(--color-expense)] text-white text-[10px] font-bold min-h-[36px]"
+                                    >
+                                      {isRTL ? 'تأكيد الطرد' : 'Confirm'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setConfirmRemoveUid(null)}
+                                      className="px-2 py-1.5 rounded-lg border border-[var(--color-line)] text-[10px] min-h-[36px]"
+                                    >
+                                      {t('cancel')}
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={() => setConfirmRemoveUid(member.uid)}
+                                    aria-label={isRTL ? 'إزالة العضو' : 'Remove member'}
+                                    className="p-2 text-[var(--color-muted)] hover:text-[var(--color-expense)] rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] min-h-[38px]"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </>
+                            ) : (
+                              <span className="px-2.5 py-1 rounded-lg bg-[var(--color-accent)]/12 text-[var(--color-accent)] text-[11px] font-bold">
+                                {roleLabel(member.role)}
+                              </span>
+                            )}
+                          </div>
                         </div>
-                        <div className="text-[11px] text-[var(--color-muted)] truncate" dir="ltr">
-                          {member.email}
-                        </div>
-                        {(member.department || member.spendingLimit) && (
-                          <div className="text-[10px] text-[var(--color-muted)] mt-0.5">
-                            {member.department ? `${member.department} ` : ''}
-                            {member.spendingLimit
-                              ? `• ${isRTL ? 'سقف الصرف:' : 'Limit:'} ${member.spendingLimit} ${currency}`
-                              : ''}
+
+                        {/* Inline Dept & Spending Limit Editor */}
+                        {editingMemberLimit?.uid === member.uid && (
+                          <div className="pt-2 border-t border-[var(--color-line)] grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            <input
+                              type="text"
+                              value={editingMemberLimit.department}
+                              onChange={(e) =>
+                                setEditingMemberLimit({ ...editingMemberLimit, department: e.target.value })
+                              }
+                              placeholder={isRTL ? 'القسم' : 'Department'}
+                              className="px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[38px]"
+                            />
+                            <input
+                              type="number"
+                              min="0"
+                              value={editingMemberLimit.limit}
+                              onChange={(e) =>
+                                setEditingMemberLimit({ ...editingMemberLimit, limit: e.target.value })
+                              }
+                              placeholder={isRTL ? 'سقف الصرف (فارغ = بلا سقف)' : 'Spending limit'}
+                              className="px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[38px]"
+                            />
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                disabled={isBusy}
+                                onClick={() =>
+                                  void handleMemberManage(member.uid, 'set_spending_limit', {
+                                    spendingLimit: editingMemberLimit.limit.trim()
+                                      ? Number(editingMemberLimit.limit)
+                                      : null,
+                                    department: editingMemberLimit.department.trim(),
+                                  })
+                                }
+                                className="flex-1 py-1.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[38px]"
+                              >
+                                {t('save')}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditingMemberLimit(null)}
+                                className="px-2.5 py-1.5 rounded-lg border border-[var(--color-line)] text-xs min-h-[38px]"
+                              >
+                                {t('cancel')}
+                              </button>
+                            </div>
                           </div>
                         )}
                       </div>
-
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        {canOrgManage && member.role !== 'owner' ? (
-                          <>
-                            <select
-                              value={member.role}
-                              onChange={(e) =>
-                                addOrUpdateOrgMember({
-                                  ...member,
-                                  role: e.target.value as OrganizationRole,
-                                })
-                              }
-                              className="px-2 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-[11px] font-semibold min-h-[38px]"
-                            >
-                              {ROLES.map((r) => (
-                                <option key={r.id} value={r.id}>
-                                  {isRTL ? r.labelAr : r.labelEn}
-                                </option>
-                              ))}
-                            </select>
-                            <button
-                              type="button"
-                              onClick={() => removeOrgMember(member.uid)}
-                              aria-label={isRTL ? 'إزالة العضو' : 'Remove member'}
-                              className="p-2 text-[var(--color-muted)] hover:text-[var(--color-expense)] rounded-lg min-h-[38px]"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </>
-                        ) : (
-                          <span className="px-2.5 py-1 rounded-lg bg-[var(--color-accent)]/12 text-[var(--color-accent)] text-[11px] font-bold">
-                            {roleLabel(member.role)}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
 
@@ -1534,7 +2125,7 @@ export const OrganizationHubModal: React.FC = () => {
                         : 'Issue and assign petty cash custody wallets to employees.'}
                     </p>
                   </div>
-                  {canOrgManage && (
+                  {canOrgManage && !isOrgReadOnly && (
                     <button
                       type="button"
                       data-testid="org-hub-issue-petty-btn"
@@ -1660,6 +2251,107 @@ export const OrganizationHubModal: React.FC = () => {
                   </div>
                 )}
               </div>
+
+              {/* Owner Danger Zone: Ownership Transfer & Organization Deletion */}
+              {activeOrgRole === 'owner' && (
+                <div className="pt-3 border-t border-[var(--color-expense)]/30 space-y-3">
+                  <h3 className="text-xs font-bold text-[var(--color-expense)] flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4" />
+                    <span>{isRTL ? 'منطقة المالك الحساسة' : 'Owner Danger Zone'}</span>
+                  </h3>
+
+                  {/* Transfer Ownership */}
+                  <div className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-2.5">
+                    <div className="text-xs font-bold text-[var(--color-ink)] flex items-center gap-1.5">
+                      <ArrowRightLeft className="w-4 h-4 text-[var(--color-accent)]" />
+                      <span>{t('transferOwnership')}</span>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <select
+                        value={transferTargetUid}
+                        onChange={(e) => {
+                          setTransferTargetUid(e.target.value);
+                          setConfirmTransferOpen(false);
+                        }}
+                        className="flex-1 min-w-[180px] px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[40px]"
+                      >
+                        <option value="">
+                          {isRTL ? 'اختر العضو المستلم للملكية...' : 'Select new owner...'}
+                        </option>
+                        {orgMembers
+                          .filter((m) => m.role !== 'owner' && m.status !== 'suspended')
+                          .map((m) => (
+                            <option key={m.uid} value={m.uid}>
+                              {m.displayName} ({m.email})
+                            </option>
+                          ))}
+                      </select>
+                      {!confirmTransferOpen ? (
+                        <button
+                          type="button"
+                          disabled={!transferTargetUid || isTransferringOwner}
+                          onClick={() => setConfirmTransferOpen(true)}
+                          className="px-3 py-2 rounded-lg border border-[var(--color-accent)]/40 text-[var(--color-accent)] text-xs font-bold min-h-[40px] disabled:opacity-40"
+                        >
+                          {t('transferOwnership')}
+                        </button>
+                      ) : (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            disabled={isTransferringOwner}
+                            onClick={() => void handleTransferOwnership()}
+                            className="px-3 py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[40px]"
+                          >
+                            {isTransferringOwner ? '...' : isRTL ? 'تأكيد النقل' : 'Confirm'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmTransferOpen(false)}
+                            className="px-2.5 py-2 rounded-lg border border-[var(--color-line)] text-xs min-h-[40px]"
+                          >
+                            {t('cancel')}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Delete Organization */}
+                  <form
+                    onSubmit={handleDeleteOrganization}
+                    className="p-3.5 rounded-xl bg-[var(--color-expense)]/8 border border-[var(--color-expense)]/30 space-y-2.5"
+                  >
+                    <div className="text-xs font-bold text-[var(--color-expense)]">
+                      {t('deleteOrganization')}
+                    </div>
+                    <p className="text-[11px] text-[var(--color-muted)] leading-relaxed">
+                      {isRTL
+                        ? `سيتم حذف المؤسسة وكافة معاملاتها وأعضائها ومرفقاتها نهائياً. للتأكيد، اكتب اسم المؤسسة: "${activeOrganization.name}"`
+                        : `Permanently deletes this organization, all ledger records, members, and attachments. Type "${activeOrganization.name}" to confirm:`}
+                    </p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <input
+                        type="text"
+                        value={deleteOrgConfirmName}
+                        onChange={(e) => setDeleteOrgConfirmName(e.target.value)}
+                        placeholder={activeOrganization.name}
+                        className="flex-1 min-w-[180px] px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-expense)]/40 rounded-lg text-xs min-h-[40px]"
+                      />
+                      <button
+                        type="submit"
+                        disabled={
+                          isDeletingOrg ||
+                          deleteOrgConfirmName.trim() !== activeOrganization.name.trim()
+                        }
+                        className="px-4 py-2 rounded-lg bg-[var(--color-expense)] text-white text-xs font-bold min-h-[40px] disabled:opacity-40"
+                      >
+                        {isDeletingOrg ? '...' : t('deleteOrganization')}
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              )}
             </div>
           )}
 
@@ -2060,7 +2752,7 @@ export const OrganizationHubModal: React.FC = () => {
                     </div>
                   </div>
 
-                  {canOrgManage && (
+                  {canOrgManage && !isOrgReadOnly && (
                     <button
                       type="submit"
                       data-testid="save-org-policy-btn"
@@ -2069,19 +2761,125 @@ export const OrganizationHubModal: React.FC = () => {
                       {isRTL ? 'حفظ سياسة الضريبة وإقفال الفترة' : 'Save Tax Policy & Period Lock'}
                     </button>
                   )}
+
+                  {canOrgManage && !isOrgReadOnly && (
+                    <div className="pt-3 mt-3 border-t border-[var(--color-line)] space-y-2">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div>
+                          <div className="text-xs font-bold text-[var(--color-ink)]">
+                            {t('recalculateBalances')}
+                          </div>
+                          <div className="text-[11px] text-[var(--color-muted)]">
+                            {isRTL
+                              ? 'يعيد حساب رصيد كل محفظة بناءً على الرصيد الافتتاحي والمعاملات المعتمدة فقط.'
+                              : 'Recomputes every wallet balance from initial balance + approved/paid transactions.'}
+                          </div>
+                        </div>
+                        {!confirmRecalc ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setConfirmRecalc(true);
+                              setRecalcMessage(null);
+                            }}
+                            className="px-3 py-2 rounded-xl border border-[var(--color-accent)]/40 text-[var(--color-accent)] text-xs font-bold flex items-center gap-1.5 min-h-[40px]"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            <span>{t('recalculateBalances')}</span>
+                          </button>
+                        ) : (
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              disabled={isRecalculating}
+                              onClick={() => void handleRecalculateBalances()}
+                              className="px-3 py-2 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center gap-1.5 min-h-[40px] disabled:opacity-50"
+                            >
+                              {isRecalculating && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                              <span>{isRTL ? 'تأكيد إعادة الاحتساب' : 'Confirm Recalculate'}</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isRecalculating}
+                              onClick={() => setConfirmRecalc(false)}
+                              className="px-2.5 py-2 rounded-xl border border-[var(--color-line)] text-xs min-h-[40px]"
+                            >
+                              {t('cancel')}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      {recalcMessage && (
+                        <div className="text-[11px] font-semibold text-[var(--color-income)]">
+                          {recalcMessage}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </form>
               )}
 
               {/* 5D: Immutable Audit Log */}
               {reportSubTab === 'audit' && (
                 <div className="space-y-2.5">
-                  <input
-                    type="text"
-                    value={auditFilter}
-                    onChange={(e) => setAuditFilter(e.target.value)}
-                    placeholder={isRTL ? 'بحث في سجل التدقيق...' : 'Search audit log...'}
-                    className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-xs min-h-[44px]"
-                  />
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      value={auditFilter}
+                      onChange={(e) => setAuditFilter(e.target.value)}
+                      placeholder={isRTL ? 'بحث في سجل التدقيق...' : 'Search audit log...'}
+                      className="px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-xs min-h-[40px]"
+                    />
+                    <div className="grid grid-cols-2 gap-2">
+                      <select
+                        value={auditActorFilter}
+                        onChange={(e) => setAuditActorFilter(e.target.value)}
+                        aria-label={isRTL ? 'تصفية حسب العضو' : 'Filter by member'}
+                        className="px-2.5 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-xs min-h-[40px]"
+                      >
+                        <option value="">{isRTL ? 'كل الأعضاء' : 'All members'}</option>
+                        {orgMembers.map((m) => (
+                          <option key={m.uid} value={m.uid}>
+                            {m.displayName}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        value={auditActionFilter}
+                        onChange={(e) => setAuditActionFilter(e.target.value as AuditLogAction | '')}
+                        aria-label={isRTL ? 'تصفية حسب الإجراء' : 'Filter by action'}
+                        className="px-2.5 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-xs min-h-[40px]"
+                      >
+                        <option value="">{isRTL ? 'كل الإجراءات' : 'All actions'}</option>
+                        <option value="create">{isRTL ? 'إنشاء (create)' : 'create'}</option>
+                        <option value="update">{isRTL ? 'تعديل (update)' : 'update'}</option>
+                        <option value="delete">{isRTL ? 'حذف (delete)' : 'delete'}</option>
+                        <option value="restore">{isRTL ? 'استعادة (restore)' : 'restore'}</option>
+                        <option value="approve">{isRTL ? 'اعتماد (approve)' : 'approve'}</option>
+                        <option value="reject">{isRTL ? 'رفض (reject)' : 'reject'}</option>
+                        <option value="lock_period">{isRTL ? 'إقفال فترة (lock_period)' : 'lock_period'}</option>
+                        <option value="recalculate">{isRTL ? 'احتساب أرصدة (recalculate)' : 'recalculate'}</option>
+                        <option value="role_change">{isRTL ? 'تغيير دور (role_change)' : 'role_change'}</option>
+                        <option value="invite_create">{isRTL ? 'دعوة (invite_create)' : 'invite_create'}</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      type="date"
+                      value={auditStartDate}
+                      onChange={(e) => setAuditStartDate(e.target.value)}
+                      aria-label={isRTL ? 'من تاريخ' : 'From date'}
+                      className="px-2.5 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-xs min-h-[38px]"
+                    />
+                    <input
+                      type="date"
+                      value={auditEndDate}
+                      onChange={(e) => setAuditEndDate(e.target.value)}
+                      aria-label={isRTL ? 'إلى تاريخ' : 'To date'}
+                      className="px-2.5 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-xs min-h-[38px]"
+                    />
+                  </div>
                   {filteredAuditLogs.length === 0 ? (
                     <div className="py-8 text-center text-xs text-[var(--color-muted)] bg-[var(--color-bg)] rounded-xl border border-[var(--color-line)]">
                       {isRTL ? 'لا توجد قيود تدقيق مطابقة.' : 'No matching audit log entries.'}
@@ -2155,6 +2953,29 @@ export const OrganizationHubModal: React.FC = () => {
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Storage / Receipt Attachment Lightbox */}
+      {attachmentPreviewUrl && (
+        <div
+          className="fixed inset-0 z-[70] bg-black/85 flex items-center justify-center p-4"
+          onClick={() => setAttachmentPreviewUrl(null)}
+        >
+          <button
+            type="button"
+            onClick={() => setAttachmentPreviewUrl(null)}
+            aria-label={t('close')}
+            className="absolute top-4 end-4 w-11 h-11 rounded-full bg-white/15 text-white hover:bg-white/25 flex items-center justify-center"
+          >
+            <X className="w-5 h-5" />
+          </button>
+          <img
+            src={attachmentPreviewUrl}
+            alt="receipt preview"
+            className="max-w-full max-h-[85vh] rounded-xl object-contain shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
         </div>
       )}
     </div>

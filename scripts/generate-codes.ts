@@ -2,17 +2,21 @@
  * Generate N random Raseedi PRO activation codes and SHA-256 hashes.
  *
  * Usage:
- *   npx tsx scripts/generate-codes.ts --count 10 --plan lifetime
- *   npx tsx scripts/generate-codes.ts --count 10 --plan yearly --seed
+ *   npx tsx scripts/generate-codes.ts --tier personal --cycle lifetime --count 10
+ *   npx tsx scripts/generate-codes.ts --tier business --cycle yearly --seats 10 --count 5 --seed
+ *   npx tsx scripts/generate-codes.ts --count 10 --plan business_yearly --seed
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
+import { PRICING_CONFIG } from '../src/config/pricing';
 
 const ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 
+type AllowedTier = 'personal' | 'business';
+type AllowedCycle = 'monthly' | 'yearly' | 'lifetime';
 type AllowedPlan =
   | 'monthly'
   | 'yearly'
@@ -21,18 +25,53 @@ type AllowedPlan =
   | 'business_yearly'
   | 'code';
 
-function parseArgs(argv: string[]) {
+interface ParsedCliOptions {
+  count: number;
+  plan: AllowedPlan;
+  tier: AllowedTier;
+  cycle: AllowedCycle;
+  seats: number;
+  extraSeats: number;
+  seed: boolean;
+}
+
+function parseArgs(argv: string[]): ParsedCliOptions {
   let count = 10;
-  let plan: AllowedPlan = 'lifetime';
+  let explicitPlan: AllowedPlan | null = null;
+  let explicitTier: AllowedTier | null = null;
+  let explicitCycle: AllowedCycle | null = null;
+  let explicitSeats: number | null = null;
   let seed = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--count' && argv[i + 1]) {
       const parsed = parseInt(argv[i + 1], 10);
-      if (Number.isFinite(parsed) && parsed > 0 && parsed <= 500) {
-        count = parsed;
+      if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 500) {
+        throw new Error('--count must be an integer between 1 and 500');
       }
+      count = parsed;
+      i++;
+    } else if (arg === '--tier' && argv[i + 1]) {
+      const val = argv[i + 1].toLowerCase();
+      if (val !== 'personal' && val !== 'business') {
+        throw new Error('--tier must be "personal" or "business"');
+      }
+      explicitTier = val;
+      i++;
+    } else if (arg === '--cycle' && argv[i + 1]) {
+      const val = argv[i + 1].toLowerCase();
+      if (val !== 'monthly' && val !== 'yearly' && val !== 'lifetime') {
+        throw new Error('--cycle must be "monthly", "yearly", or "lifetime"');
+      }
+      explicitCycle = val;
+      i++;
+    } else if (arg === '--seats' && argv[i + 1]) {
+      const parsed = parseInt(argv[i + 1], 10);
+      if (!Number.isFinite(parsed) || parsed < 1 || parsed > 500) {
+        throw new Error('--seats must be an integer between 1 and 500');
+      }
+      explicitSeats = parsed;
       i++;
     } else if (arg === '--plan' && argv[i + 1]) {
       const val = argv[i + 1];
@@ -44,7 +83,9 @@ function parseArgs(argv: string[]) {
         val === 'business_yearly' ||
         val === 'code'
       ) {
-        plan = val;
+        explicitPlan = val;
+      } else {
+        throw new Error(`Unsupported --plan "${val}"`);
       }
       i++;
     } else if (arg === '--seed') {
@@ -52,7 +93,46 @@ function parseArgs(argv: string[]) {
     }
   }
 
-  return { count, plan, seed };
+  let tier: AllowedTier;
+  let cycle: AllowedCycle;
+  let plan: AllowedPlan;
+
+  if (explicitPlan && !explicitTier && !explicitCycle) {
+    plan = explicitPlan;
+    if (explicitPlan === 'business_monthly') {
+      tier = 'business';
+      cycle = 'monthly';
+    } else if (explicitPlan === 'business_yearly') {
+      tier = 'business';
+      cycle = 'yearly';
+    } else {
+      tier = 'personal';
+      cycle = explicitPlan === 'monthly' ? 'monthly' : explicitPlan === 'yearly' ? 'yearly' : 'lifetime';
+    }
+  } else {
+    tier = explicitTier ?? 'personal';
+    cycle = explicitCycle ?? (tier === 'business' ? 'yearly' : 'lifetime');
+    if (tier === 'business' && cycle === 'lifetime') {
+      throw new Error('Business PRO only supports --cycle monthly or --cycle yearly.');
+    }
+    plan =
+      tier === 'business'
+        ? cycle === 'yearly'
+          ? 'business_yearly'
+          : 'business_monthly'
+        : cycle;
+  }
+
+  const minSeats = tier === 'business' ? PRICING_CONFIG.businessPro.includedSeats : 1;
+  const seats = explicitSeats ?? minSeats;
+  if (tier === 'business' && seats < PRICING_CONFIG.businessPro.includedSeats) {
+    throw new Error(
+      `Business PRO includes ${PRICING_CONFIG.businessPro.includedSeats} seats; --seats must be >= ${PRICING_CONFIG.businessPro.includedSeats}.`
+    );
+  }
+  const extraSeats = tier === 'business' ? Math.max(0, seats - PRICING_CONFIG.businessPro.includedSeats) : 0;
+
+  return { count, plan, tier, cycle, seats, extraSeats, seed };
 }
 
 function randomGroup(length: number): string {
@@ -77,8 +157,16 @@ export function hashActivationCode(rawCode: string): string {
 }
 
 async function main() {
-  const { count, plan, seed } = parseArgs(process.argv.slice(2));
-  const generated: Array<{ code: string; hash: string; plan: string }> = [];
+  const { count, plan, tier, cycle, seats, extraSeats, seed } = parseArgs(process.argv.slice(2));
+  const generated: Array<{
+    code: string;
+    hash: string;
+    plan: AllowedPlan;
+    tier: AllowedTier;
+    cycle: AllowedCycle;
+    seats: number;
+    extraSeats: number;
+  }> = [];
   const seen = new Set<string>();
 
   while (generated.length < count) {
@@ -89,6 +177,10 @@ async function main() {
       code,
       hash: hashActivationCode(code),
       plan,
+      tier,
+      cycle,
+      seats,
+      extraSeats,
     });
   }
 
@@ -117,6 +209,10 @@ async function main() {
       const ref = db.collection('activationCodes').doc(item.hash);
       batch.set(ref, {
         plan: item.plan,
+        tier: item.tier,
+        cycle: item.cycle,
+        seats: item.seats,
+        extraSeats: item.extraSeats,
         usedBy: null,
         usedAt: null,
         createdAt: FieldValue.serverTimestamp(),

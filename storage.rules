@@ -1,0 +1,21 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Organization receipt attachments: max 2MB, image/pdf only, active contributor+ members only
+    match /orgs/{orgId}/receipts/{txId}/{fileName} {
+      allow read: if request.auth != null
+        && firestore.get(/databases/ai-studio-1004f7e6-37de-49ad-89bd-ff8628597eea/documents/organizations/$(orgId)/members/$(request.auth.uid)).data.status == 'active';
+
+      allow write: if request.auth != null
+        && request.auth.token.email_verified == true
+        && request.resource.size <= 2 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)|application/pdf')
+        && firestore.get(/databases/ai-studio-1004f7e6-37de-49ad-89bd-ff8628597eea/documents/organizations/$(orgId)/members/$(request.auth.uid)).data.status == 'active'
+        && firestore.get(/databases/ai-studio-1004f7e6-37de-49ad-89bd-ff8628597eea/documents/organizations/$(orgId)/members/$(request.auth.uid)).data.role in ['owner', 'admin', 'accountant', 'employee'];
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

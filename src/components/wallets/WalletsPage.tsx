@@ -548,10 +548,15 @@ export const WalletsPage: React.FC = () => {
                 'Set PIN for Wallet'
               )}
             </h3>
-            <p className="text-xs text-[var(--color-muted)] mb-4">
+            <p className="text-xs text-[var(--color-muted)] mb-2">
               {isRTL
                 ? `أدخل 4 أرقام لقفل محفظة "${settingPinForWallet.name}"`
                 : `Enter 4 digits to lock "${settingPinForWallet.name}"`}
+            </p>
+            <p className="text-[10px] text-[var(--color-muted)] mb-4 leading-relaxed">
+              {isRTL
+                ? 'قفل محلي للواجهة فقط لمنع التصفح العابر ولا يشفر بيانات التخزين.'
+                : 'Local UI privacy lock only; does not encrypt device storage.'}
             </p>
             <input
               type="password"

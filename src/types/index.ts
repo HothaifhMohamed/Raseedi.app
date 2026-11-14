@@ -29,7 +29,8 @@ export type OrganizationIndustry =
   | 'general';
 export type WalletType = 'standard' | 'petty_cash' | 'bank_account';
 export type OrganizationRole = 'owner' | 'admin' | 'accountant' | 'employee' | 'viewer';
-export type ApprovalStatus = 'approved' | 'pending_approval' | 'rejected';
+export type CanonicalApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'paid';
+export type ApprovalStatus = CanonicalApprovalStatus | 'pending_approval';
 
 export interface Currency {
   code: string;
@@ -45,7 +46,9 @@ export interface Wallet {
   name: string;
   currency: string; // Currency code, e.g. EGP, USD, SAR
   initialBalance: number;
+  initialBalanceMinor?: number;
   balance: number;
+  balanceMinor?: number;
   color: string; // Gradient class or hex
   icon: string;
   isArchived: boolean;
@@ -55,6 +58,7 @@ export interface Wallet {
   order: number;
   walletType?: WalletType;
   custodianMemberUid?: string;
+  updatedAt?: number;
 }
 
 export interface Category {
@@ -80,10 +84,17 @@ export interface RecurrenceRule {
   nextDueDate: string;
 }
 
+export interface TransactionVatInfo {
+  rate: number;
+  amountMinor: number;
+  inclusive: boolean;
+}
+
 export interface Transaction {
   id: string;
   type: TransactionType;
   amount: number;
+  amountMinor?: number;
   currency: string;
   date: string; // YYYY-MM-DD
   time: string; // HH:mm
@@ -91,10 +102,13 @@ export interface Transaction {
   walletId: string;
   toWalletId?: string; // For transfers
   convertedAmount?: number; // Destination amount for transfers
+  convertedAmountMinor?: number;
   transferFee?: number; // Optional transfer / withdrawal fee deducted from source wallet
+  transferFeeMinor?: number;
   exchangeRate?: number;
   notes?: string;
-  attachments?: string[]; // Base64 data URLs
+  attachments?: string[]; // Legacy Base64 data URLs or Storage download URLs
+  attachmentPaths?: string[]; // Firebase Storage object paths (orgs/{orgId}/receipts/{txId}/...)
   group?: string; // Custom tag e.g. "رحلة الصيف"
   contact?: string; // Contact person name
   priority: PriorityLevel;
@@ -109,6 +123,8 @@ export interface Transaction {
   approvalStatus?: ApprovalStatus;
   submittedBy?: string;
   submittedByName?: string;
+  approvedBy?: string;
+  approvedAt?: number;
   reviewedBy?: string;
   reviewedAt?: number;
   rejectionReason?: string;
@@ -117,9 +133,12 @@ export interface Transaction {
   taxAmount?: number;
   taxRate?: number;
   isTaxInclusive?: boolean;
+  vat?: TransactionVatInfo;
   invoiceNumber?: string;
   voucherNumber?: string;
   isReimbursement?: boolean;
+  deletedAt?: number | null;
+  deletedBy?: string | null;
 }
 
 export interface Template {
@@ -143,6 +162,7 @@ export interface Budget {
   id: string;
   name: string;
   amount: number;
+  amountMinor?: number;
   month: string; // YYYY-MM
   categoryId?: string; // If null, applies to overall
   walletId?: string; // If null, applies to all wallets
@@ -212,14 +232,19 @@ export interface Organization {
   taxNumber?: string;
   approvalThreshold: number; // Expenses above threshold require approval
   lockedUntilDate?: string; // YYYY-MM-DD accounting lock
-  inviteCode: string;
+  inviteCode?: string; // Deprecated plaintext code kept optional only for legacy backup compatibility
   ownerUid: string;
   ownerId?: string;
+  planTier?: PlanTier;
+  billingCycle?: BillingCycle;
+  expiresAt?: number | null;
   plan?: 'trial' | 'business_monthly' | 'business_yearly';
   trialEndsAt?: number;
   subscriptionEndsAt?: number;
+  seatLimit?: number;
   maxSeats?: number;
   aiScansUsed?: number;
+  aiScansMonth?: string;
   aiScansLimit?: number;
   extraSeats?: number;
   createdAt: number;
@@ -233,7 +258,30 @@ export interface OrganizationMember {
   role: OrganizationRole;
   department?: string;
   spendingLimit?: number;
+  spendingLimitMinor?: number;
   status: 'active' | 'invited' | 'suspended';
+  joinedAt: number;
+  updatedAt?: number;
+}
+
+export interface OrganizationInvite {
+  id: string;
+  orgId: string;
+  role: Exclude<OrganizationRole, 'owner'>;
+  createdBy: string;
+  createdAt: number;
+  expiresAt: number;
+  maxUses: number;
+  usedCount: number;
+  status: 'active' | 'revoked' | 'exhausted';
+}
+
+export interface OrgRef {
+  orgId: string;
+  orgName: string;
+  role: OrganizationRole;
+  status: 'active' | 'suspended';
+  currency: string;
   joinedAt: number;
 }
 
@@ -246,6 +294,7 @@ export interface CostCenter {
   nameEn: string;
   type?: 'department' | 'project' | 'branch';
   budgetAllocated: number;
+  budgetAllocatedMinor?: number;
   isActive: boolean;
   createdAt: number;
 }
@@ -261,6 +310,7 @@ export interface BusinessParty {
   creditLimit?: number;
   currency: string;
   balance: number; // Positive = open balance (Payable if vendor, Receivable if client)
+  balanceMinor?: number;
   dueDate?: string; // YYYY-MM-DD
   notes?: string;
   createdAt: number;
@@ -270,16 +320,23 @@ export type AuditLogAction =
   | 'create'
   | 'update'
   | 'delete'
+  | 'restore'
   | 'approve'
   | 'reject'
   | 'lock_period'
-  | 'role_change';
+  | 'role_change'
+  | 'invite_create'
+  | 'invite_revoke'
+  | 'member_join'
+  | 'member_remove'
+  | 'transfer_ownership'
+  | 'recalculate';
 
 export interface AuditLogEntry {
   id: string;
   orgId: string;
   action: AuditLogAction;
-  entityType: 'transaction' | 'wallet' | 'budget' | 'cost_center' | 'party' | 'member' | 'organization' | 'category';
+  entityType: 'transaction' | 'wallet' | 'budget' | 'cost_center' | 'party' | 'member' | 'organization' | 'category' | 'invite';
   entityId: string;
   actorUid: string;
   actorName: string;
@@ -306,7 +363,16 @@ export interface OrgWorkspaceData {
 
 export interface AppNotificationItem {
   id: string;
-  type: 'budget_warning' | 'budget_exceeded' | 'debt_due' | 'debt_overdue' | 'daily_reminder' | 'pending_approval';
+  type:
+    | 'budget_warning'
+    | 'budget_exceeded'
+    | 'debt_due'
+    | 'debt_overdue'
+    | 'daily_reminder'
+    | 'pending_approval'
+    | 'org_subscription_expiring'
+    | 'org_subscription_grace'
+    | 'org_subscription_readonly';
   titleAr: string;
   titleEn: string;
   messageAr: string;

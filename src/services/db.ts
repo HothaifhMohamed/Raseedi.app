@@ -450,6 +450,81 @@ export async function loadVerifiedProCache(): Promise<VerifiedProEntitlement | n
   });
 }
 
+export interface PendingAttachmentUpload {
+  id: string;
+  orgId: string;
+  txId: string;
+  fileName: string;
+  mimeType: string;
+  dataUrl: string;
+  createdAt: number;
+}
+
+export async function loadPendingAttachmentUploads(): Promise<PendingAttachmentUpload[]> {
+  const db = await openDB();
+  if (!db) return [];
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction('app_data', 'readonly');
+      const req = tx.objectStore('app_data').get('pending_attachment_uploads_v1');
+      req.onsuccess = () => {
+        const list = req.result?.data;
+        resolve(Array.isArray(list) ? list : []);
+      };
+      req.onerror = () => resolve([]);
+    } catch {
+      resolve([]);
+    }
+  });
+}
+
+export async function savePendingAttachmentUploads(items: PendingAttachmentUpload[]): Promise<void> {
+  const db = await openDB();
+  if (!db) return;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction('app_data', 'readwrite');
+      tx.objectStore('app_data').put({
+        key: 'pending_attachment_uploads_v1',
+        data: items,
+        updatedAt: Date.now(),
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
+export async function enqueuePendingAttachmentUpload(item: PendingAttachmentUpload): Promise<void> {
+  const existing = await loadPendingAttachmentUploads();
+  const filtered = existing.filter((x) => x.id !== item.id);
+  filtered.push(item);
+  await savePendingAttachmentUploads(filtered);
+}
+
+export async function removePendingAttachmentUpload(id: string): Promise<void> {
+  const existing = await loadPendingAttachmentUploads();
+  await savePendingAttachmentUploads(existing.filter((x) => x.id !== id));
+}
+
+export function loadActiveWorkspacePref(): string {
+  try {
+    return localStorage.getItem('raseedi_active_workspace_v1') || 'personal';
+  } catch {
+    return 'personal';
+  }
+}
+
+export function saveActiveWorkspacePref(workspaceId: string): void {
+  try {
+    localStorage.setItem('raseedi_active_workspace_v1', workspaceId || 'personal');
+  } catch {
+    // ignore
+  }
+}
+
 export async function loadOrgWorkspaces(): Promise<{
   activeWorkspace: string;
   workspaces: Record<string, OrgWorkspaceData>;

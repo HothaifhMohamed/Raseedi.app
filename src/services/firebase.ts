@@ -1,31 +1,93 @@
 import { initializeApp } from 'firebase/app';
+import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check';
 import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  reauthenticateWithPopup,
   signOut,
   onAuthStateChanged,
   User,
 } from 'firebase/auth';
 import {
   getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
   doc,
   getDoc,
   setDoc,
   updateDoc,
   writeBatch,
   serverTimestamp,
+  Firestore,
 } from 'firebase/firestore';
+import {
+  getStorage,
+  ref as storageRef,
+  uploadBytes,
+  getDownloadURL,
+} from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { AppDatabaseData } from './db';
+import {
+  AppDatabaseData,
+  enqueuePendingAttachmentUpload,
+  loadPendingAttachmentUploads,
+  PendingAttachmentUpload,
+  removePendingAttachmentUpload,
+} from './db';
 import { chunkTransactionsForBackup } from './calculations';
-import { BillingCycle, OrgWorkspaceData, PlanTier, ProPlanCode, VerifiedProEntitlement } from '../types';
+import {
+  BillingCycle,
+  Organization,
+  OrganizationIndustry,
+  OrganizationInvite,
+  OrganizationRole,
+  OrgWorkspaceData,
+  PlanTier,
+  ProPlanCode,
+  VerifiedProEntitlement,
+} from '../types';
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+
+function createFirestoreInstance(): Firestore {
+  try {
+    return initializeFirestore(
+      app,
+      {
+        localCache: persistentLocalCache({
+          tabManager: persistentMultipleTabManager(),
+        }),
+      },
+      firebaseConfig.firestoreDatabaseId
+    );
+  } catch {
+    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  }
+}
+
+export const db = createFirestoreInstance();
+export const storage = getStorage(app);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
+
+// Optional Firebase App Check initialization (when configured in environment)
+const appCheckSiteKey =
+  typeof import.meta !== 'undefined' &&
+  (import.meta as unknown as { env?: Record<string, string | undefined> }).env
+    ?.VITE_FIREBASE_APPCHECK_SITE_KEY?.trim();
+if (appCheckSiteKey && typeof window !== 'undefined') {
+  try {
+    initializeAppCheck(app, {
+      provider: new ReCaptchaV3Provider(appCheckSiteKey),
+      isTokenAutoRefreshEnabled: true,
+    });
+  } catch (err) {
+    console.warn('App Check initialization skipped:', err);
+  }
+}
 
 export enum OperationType {
   CREATE = 'create',
@@ -323,6 +385,15 @@ export async function signInWithGoogle(): Promise<{
   return { firebaseUser, profile };
 }
 
+export async function reauthenticateWithGoogle(): Promise<User> {
+  if (!auth.currentUser) {
+    const result = await signInWithPopup(auth, googleProvider);
+    return result.user;
+  }
+  const result = await reauthenticateWithPopup(auth.currentUser, googleProvider);
+  return result.user;
+}
+
 export async function signOutGoogle(): Promise<void> {
   await signOut(auth);
 }
@@ -360,10 +431,7 @@ export async function fetchCloudBackupMeta(
 
 export async function saveCloudBackup(
   uid: string,
-  data: Omit<AppDatabaseData, 'user'> & {
-    orgWorkspaces?: Record<string, OrgWorkspaceData>;
-    activeWorkspace?: string;
-  }
+  data: Omit<AppDatabaseData, 'user'>
 ): Promise<{ syncedAt: number; updatedAtMs: number; skippedAttachmentsCount: number }> {
   const metaPath = `users/${uid}/backup/meta`;
   const metaRef = doc(db, 'users', uid, 'backup', 'meta');
@@ -380,32 +448,8 @@ export async function saveCloudBackup(
     };
   });
 
-  const sanitizedOrgWorkspaces: Record<string, OrgWorkspaceData> = {};
-  if (data.orgWorkspaces && typeof data.orgWorkspaces === 'object') {
-    for (const [orgId, ws] of Object.entries(data.orgWorkspaces).slice(0, 50)) {
-      if (!ws || typeof ws !== 'object' || !ws.organization) continue;
-      const sanitizedOrgTx = (ws.transactions || []).slice(0, 5000).map((tx) => {
-        if (!tx.attachments || tx.attachments.length === 0) return tx;
-        const kept = tx.attachments.filter((att) => att.length <= 24_000);
-        skippedAttachmentsCount += tx.attachments.length - kept.length;
-        return {
-          ...tx,
-          attachments: kept.length > 0 ? kept : undefined,
-        };
-      });
-      sanitizedOrgWorkspaces[orgId] = {
-        ...ws,
-        transactions: sanitizedOrgTx,
-        auditLogs: (ws.auditLogs || []).slice(0, 500),
-      };
-    }
-  }
-  const resolvedActiveWorkspace =
-    data.activeWorkspace && sanitizedOrgWorkspaces[data.activeWorkspace]
-      ? data.activeWorkspace
-      : 'personal';
-
-  // Measure actual UTF-8 byte lengths so every chunk and meta document stays well under 800KB
+  // Measure actual UTF-8 byte lengths so every chunk and meta document stays well under 800KB.
+  // Personal Cloud Backup stores strictly Personal Workspace data; Cloud Organizations live in /organizations/{orgId}.
   const chunks = buildSafeSizeChunks(sanitizedTransactions, 780_000).slice(0, 99);
   const updatedAtMs = Date.now();
 
@@ -421,8 +465,6 @@ export async function saveCloudBackup(
     goals: (data.goals || []).slice(0, 200),
     templates: (data.templates || []).slice(0, 300),
     moneyCircles: (data.moneyCircles || []).slice(0, 200),
-    orgWorkspaces: sanitizedOrgWorkspaces,
-    activeWorkspace: resolvedActiveWorkspace,
     settings: { ...data.settings, isPro: false },
     hasCompletedOnboarding: Boolean(data.hasCompletedOnboarding),
     updatedAtMs,
@@ -470,8 +512,6 @@ export async function saveCloudBackup(
         goals: metaFields.goals,
         templates: metaFields.templates,
         moneyCircles: metaFields.moneyCircles,
-        orgWorkspaces: metaFields.orgWorkspaces,
-        activeWorkspace: metaFields.activeWorkspace,
         settings: metaFields.settings,
         hasCompletedOnboarding: metaFields.hasCompletedOnboarding,
         updatedAtMs: metaFields.updatedAtMs,
@@ -571,80 +611,32 @@ export async function fetchCloudBackup(uid: string): Promise<CloudBackupPayload 
   }
 }
 
-export async function syncOrganizationMetaToCloud(orgData: OrgWorkspaceData): Promise<void> {
+async function getRequiredIdToken(): Promise<string> {
   const currentUser = auth.currentUser;
-  if (!currentUser) return;
-  const org = orgData.organization;
-  const orgRef = doc(db, 'organizations', org.id);
-  const memberRef = doc(db, 'organizations', org.id, 'members', currentUser.uid);
-
-  try {
-    const snap = await getDoc(orgRef);
-    const batch = writeBatch(db);
-    if (!snap.exists()) {
-      batch.set(orgRef, {
-        id: org.id,
-        name: org.name.slice(0, 120),
-        currency: org.currency.slice(0, 8),
-        ...(org.industry ? { industry: org.industry } : {}),
-        vatRate: org.vatRate,
-        ...(org.taxNumber ? { taxNumber: org.taxNumber.slice(0, 64) } : {}),
-        approvalThreshold: org.approvalThreshold,
-        ...(org.lockedUntilDate ? { lockedUntilDate: org.lockedUntilDate } : {}),
-        inviteCode: org.inviteCode,
-        ownerUid: currentUser.uid,
-        extraSeats: org.extraSeats || 0,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      batch.set(memberRef, {
-        uid: currentUser.uid,
-        email: (currentUser.email || `${currentUser.uid}@firebase.local`).slice(0, 254),
-        displayName: (currentUser.displayName || 'Owner').slice(0, 120),
-        role: 'owner',
-        status: 'active',
-        joinedAt: Date.now(),
-        updatedAt: serverTimestamp(),
-      });
-    } else {
-      batch.update(orgRef, {
-        name: org.name.slice(0, 120),
-        currency: org.currency.slice(0, 8),
-        ...(org.industry ? { industry: org.industry } : {}),
-        vatRate: org.vatRate,
-        ...(org.taxNumber ? { taxNumber: org.taxNumber.slice(0, 64) } : {}),
-        approvalThreshold: org.approvalThreshold,
-        ...(org.lockedUntilDate ? { lockedUntilDate: org.lockedUntilDate } : {}),
-        inviteCode: org.inviteCode,
-        extraSeats: org.extraSeats || 0,
-        updatedAt: serverTimestamp(),
-      });
-    }
-    await batch.commit();
-  } catch {
-    // Non-fatal offline/local-first org sync
+  if (!currentUser) {
+    throw new Error('AUTH_REQUIRED');
   }
+  return currentUser.getIdToken();
 }
 
-export async function redeemProCodeWithServer(code: string): Promise<{
+export async function redeemProCodeWithServer(
+  code: string,
+  orgId?: string
+): Promise<{
   isPro: boolean;
   proPlan: ProPlanCode;
   planTier: PlanTier;
   billingCycle: BillingCycle;
   expiresAt: number | null;
 }> {
-  const currentUser = auth.currentUser;
-  if (!currentUser) {
-    throw new Error('AUTH_REQUIRED');
-  }
-  const idToken = await currentUser.getIdToken();
+  const idToken = await getRequiredIdToken();
   const response = await fetch('/api/redeem-code', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${idToken}`,
     },
-    body: JSON.stringify({ code: code.trim() }),
+    body: JSON.stringify({ code: code.trim(), ...(orgId ? { orgId } : {}) }),
   });
 
   const payload = (await response.json().catch(() => ({}))) as {
@@ -671,23 +663,21 @@ export async function redeemProCodeWithServer(code: string): Promise<{
   };
 }
 
-export async function startBusinessTrialWithServer(): Promise<{
+export async function startBusinessTrialWithServer(orgId?: string): Promise<{
   isPro: boolean;
   proPlan: ProPlanCode;
   planTier: PlanTier;
   billingCycle: BillingCycle;
   expiresAt: number | null;
 }> {
-  const currentUser = auth.currentUser;
-  if (!currentUser) {
-    throw new Error('AUTH_REQUIRED');
-  }
-  const idToken = await currentUser.getIdToken();
+  const idToken = await getRequiredIdToken();
   const response = await fetch('/api/start-business-trial', {
     method: 'POST',
     headers: {
+      'Content-Type': 'application/json',
       Authorization: `Bearer ${idToken}`,
     },
+    body: JSON.stringify(orgId ? { orgId } : {}),
   });
 
   const payload = (await response.json().catch(() => ({}))) as {
@@ -713,11 +703,12 @@ export async function startBusinessTrialWithServer(): Promise<{
   };
 }
 
-export async function fetchScanQuotaFromServer(): Promise<ScanQuotaInfo | null> {
+export async function fetchScanQuotaFromServer(orgId?: string): Promise<ScanQuotaInfo | null> {
   const currentUser = auth.currentUser;
   if (!currentUser) return null;
   const idToken = await currentUser.getIdToken();
-  const response = await fetch('/api/scan-quota', {
+  const url = orgId ? `/api/scan-quota?orgId=${encodeURIComponent(orgId)}` : '/api/scan-quota';
+  const response = await fetch(url, {
     headers: {
       Authorization: `Bearer ${idToken}`,
     },
@@ -726,12 +717,216 @@ export async function fetchScanQuotaFromServer(): Promise<ScanQuotaInfo | null> 
   return (await response.json()) as ScanQuotaInfo;
 }
 
-export async function deleteAccountFromServer(): Promise<void> {
-  const currentUser = auth.currentUser;
-  if (!currentUser) {
-    throw new Error('AUTH_REQUIRED');
+// ---------------------------------------------------------------------------
+// Cloud Organization Admin API Clients
+// ---------------------------------------------------------------------------
+export async function createOrgOnServer(params: {
+  name: string;
+  currency: string;
+  industry: OrganizationIndustry;
+  vatRate: number;
+  approvalThreshold: number;
+  taxNumber?: string;
+  loadSampleData?: boolean;
+  skipStarterSeed?: boolean;
+  preferredOrgId?: string;
+}): Promise<{ ok: true; orgId: string; organization: Organization }> {
+  const idToken = await getRequiredIdToken();
+  const response = await fetch('/api/org/create', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify(params),
+  });
+  const payload = (await response.json().catch(() => ({}))) as {
+    ok?: boolean;
+    orgId?: string;
+    organization?: Organization;
+    error?: string;
+    message?: string;
+  };
+  if (!response.ok || !payload.ok || !payload.orgId || !payload.organization) {
+    throw new Error(payload.message || payload.error || 'ORG_CREATE_FAILED');
   }
-  const idToken = await currentUser.getIdToken();
+  return { ok: true, orgId: payload.orgId, organization: payload.organization };
+}
+
+export async function createOrgInviteOnServer(
+  orgId: string,
+  role: Exclude<OrganizationRole, 'owner'>,
+  expiresInDays = 7,
+  maxUses = 5
+): Promise<{ invite: OrganizationInvite; code: string }> {
+  const idToken = await getRequiredIdToken();
+  const response = await fetch('/api/org/invite', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({ orgId, role, expiresInDays, maxUses }),
+  });
+  const payload = (await response.json().catch(() => ({}))) as {
+    ok?: boolean;
+    invite?: OrganizationInvite;
+    code?: string;
+    error?: string;
+    message?: string;
+  };
+  if (!response.ok || !payload.ok || !payload.invite || !payload.code) {
+    throw new Error(payload.message || payload.error || 'INVITE_CREATE_FAILED');
+  }
+  return { invite: payload.invite, code: payload.code };
+}
+
+export async function fetchOrgInvitesFromServer(orgId: string): Promise<OrganizationInvite[]> {
+  const idToken = await getRequiredIdToken();
+  const response = await fetch(`/api/org/invites?orgId=${encodeURIComponent(orgId)}`, {
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+    },
+  });
+  const payload = (await response.json().catch(() => ({}))) as {
+    ok?: boolean;
+    invites?: OrganizationInvite[];
+    error?: string;
+    message?: string;
+  };
+  if (!response.ok) {
+    throw new Error(payload.message || payload.error || 'INVITES_LIST_FAILED');
+  }
+  return Array.isArray(payload.invites) ? payload.invites : [];
+}
+
+export async function revokeOrgInviteOnServer(orgId: string, inviteId: string): Promise<void> {
+  const idToken = await getRequiredIdToken();
+  const response = await fetch('/api/org/invite/revoke', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({ orgId, inviteId }),
+  });
+  const payload = (await response.json().catch(() => ({}))) as {
+    ok?: boolean;
+    error?: string;
+    message?: string;
+  };
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.message || payload.error || 'INVITE_REVOKE_FAILED');
+  }
+}
+
+export async function joinOrgByInviteCode(code: string): Promise<{
+  orgId: string;
+  orgName: string;
+  role: OrganizationRole;
+  alreadyMember?: boolean;
+}> {
+  const idToken = await getRequiredIdToken();
+  const response = await fetch('/api/org/join', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({ code: code.trim() }),
+  });
+  const payload = (await response.json().catch(() => ({}))) as {
+    ok?: boolean;
+    orgId?: string;
+    orgName?: string;
+    role?: OrganizationRole;
+    alreadyMember?: boolean;
+    error?: string;
+    message?: string;
+  };
+  if (!response.ok || !payload.ok || !payload.orgId) {
+    throw new Error(payload.message || payload.error || 'ORG_JOIN_FAILED');
+  }
+  return {
+    orgId: payload.orgId,
+    orgName: payload.orgName || '',
+    role: payload.role || 'employee',
+    alreadyMember: payload.alreadyMember,
+  };
+}
+
+export async function manageOrgMemberOnServer(params: {
+  orgId: string;
+  targetUid: string;
+  action: 'change_role' | 'suspend' | 'reactivate' | 'remove' | 'set_spending_limit';
+  role?: Exclude<OrganizationRole, 'owner'>;
+  spendingLimit?: number | null;
+  department?: string;
+}): Promise<void> {
+  const idToken = await getRequiredIdToken();
+  const response = await fetch('/api/org/member', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify(params),
+  });
+  const payload = (await response.json().catch(() => ({}))) as {
+    ok?: boolean;
+    error?: string;
+    message?: string;
+  };
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.message || payload.error || 'MEMBER_UPDATE_FAILED');
+  }
+}
+
+export async function transferOrgOwnershipOnServer(
+  orgId: string,
+  newOwnerUid: string
+): Promise<void> {
+  const idToken = await getRequiredIdToken();
+  const response = await fetch('/api/org/transfer-ownership', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({ orgId, newOwnerUid }),
+  });
+  const payload = (await response.json().catch(() => ({}))) as {
+    ok?: boolean;
+    error?: string;
+    message?: string;
+  };
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.message || payload.error || 'TRANSFER_OWNERSHIP_FAILED');
+  }
+}
+
+export async function deleteOrgOnServer(orgId: string, confirmName: string): Promise<void> {
+  const idToken = await getRequiredIdToken();
+  const response = await fetch('/api/org/delete', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({ orgId, confirmName }),
+  });
+  const payload = (await response.json().catch(() => ({}))) as {
+    ok?: boolean;
+    error?: string;
+    message?: string;
+  };
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.message || payload.error || 'ORG_DELETE_FAILED');
+  }
+}
+
+export async function deleteAccountFromServer(): Promise<void> {
+  const idToken = await getRequiredIdToken();
   const response = await fetch('/api/delete-account', {
     method: 'POST',
     headers: {
@@ -741,8 +936,179 @@ export async function deleteAccountFromServer(): Promise<void> {
 
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as { message?: string; error?: string };
-    throw new Error(payload.message || payload.error || 'DELETE_ACCOUNT_FAILED');
+    const err = new Error(payload.message || payload.error || 'DELETE_ACCOUNT_FAILED') as Error & {
+      code?: string;
+    };
+    err.code = payload.error;
+    throw err;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Firebase Storage Org Receipt Attachments & Offline Upload Queue
+// ---------------------------------------------------------------------------
+const MAX_ORG_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+
+async function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('FILE_READ_FAILED'));
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function compressImageDataUrl(rawUrl: string): Promise<string> {
+  if (typeof document === 'undefined') return rawUrl;
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onerror = () => resolve(rawUrl);
+    img.onload = () => {
+      const maxDim = 1280;
+      let { width, height } = img;
+      if (width > height && width > maxDim) {
+        height = Math.round((height * maxDim) / width);
+        width = maxDim;
+      } else if (height >= width && height > maxDim) {
+        width = Math.round((width * maxDim) / height);
+        height = maxDim;
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(rawUrl);
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL('image/jpeg', 0.8));
+    };
+    img.src = rawUrl;
+  });
+}
+
+function dataUrlToBlob(dataUrl: string): { blob: Blob; mimeType: string } {
+  const parts = dataUrl.split(',');
+  const header = parts[0] || '';
+  const body = parts[1] || '';
+  const mimeMatch = header.match(/data:([^;]+);base64/i);
+  const mimeType = mimeMatch?.[1] || 'image/jpeg';
+  const binary = atob(body);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return { blob: new Blob([bytes], { type: mimeType }), mimeType };
+}
+
+function sanitizeAttachmentFileName(name: string, mimeType: string): string {
+  const base = name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 64) || 'receipt';
+  if (/\.[a-z0-9]{2,5}$/i.test(base)) return base;
+  if (mimeType === 'application/pdf') return `${base}.pdf`;
+  if (mimeType === 'image/png') return `${base}.png`;
+  if (mimeType === 'image/webp') return `${base}.webp`;
+  return `${base}.jpg`;
+}
+
+export async function uploadOrgReceiptAttachment(
+  orgId: string,
+  txId: string,
+  fileOrDataUrl: File | string,
+  providedName?: string,
+  providedMimeType?: string
+): Promise<{ path: string; pendingOffline: boolean; queueId?: string }> {
+  let finalDataUrl = '';
+  let mimeType = providedMimeType || 'image/jpeg';
+  let rawName = providedName || 'receipt';
+
+  if (typeof fileOrDataUrl === 'string') {
+    finalDataUrl = fileOrDataUrl;
+    if (fileOrDataUrl.startsWith('data:image/')) {
+      finalDataUrl = await compressImageDataUrl(fileOrDataUrl);
+      mimeType = 'image/jpeg';
+    }
+  } else {
+    rawName = fileOrDataUrl.name || rawName;
+    mimeType = fileOrDataUrl.type || mimeType;
+    const rawUrl = await fileToDataUrl(fileOrDataUrl);
+    if (mimeType.startsWith('image/')) {
+      finalDataUrl = await compressImageDataUrl(rawUrl);
+      mimeType = 'image/jpeg';
+    } else {
+      finalDataUrl = rawUrl;
+    }
+  }
+
+  const { blob, mimeType: resolvedMime } = dataUrlToBlob(finalDataUrl);
+  mimeType = resolvedMime;
+  if (blob.size > MAX_ORG_ATTACHMENT_BYTES) {
+    throw new Error('ATTACHMENT_TOO_LARGE');
+  }
+
+  const safeName = sanitizeAttachmentFileName(rawName, mimeType);
+  const objectPath = `orgs/${orgId}/receipts/${txId}/${Date.now()}_${safeName}`;
+
+  const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+  if (!isOffline) {
+    try {
+      const ref = storageRef(storage, objectPath);
+      await uploadBytes(ref, blob, { contentType: mimeType });
+      return { path: objectPath, pendingOffline: false };
+    } catch (err) {
+      console.warn('Attachment upload failed, queueing for retry:', err);
+    }
+  }
+
+  const queueItem: PendingAttachmentUpload = {
+    id: `attq-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    orgId,
+    txId,
+    fileName: safeName,
+    mimeType,
+    dataUrl: finalDataUrl,
+    createdAt: Date.now(),
+  };
+  await enqueuePendingAttachmentUpload(queueItem);
+  return { path: `pending://${queueItem.id}/${safeName}`, pendingOffline: true, queueId: queueItem.id };
+}
+
+export async function flushPendingOrgUploads(
+  onUploaded?: (item: PendingAttachmentUpload, uploadedPath: string) => Promise<void> | void
+): Promise<number> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return 0;
+  if (!auth.currentUser) return 0;
+  const pending = await loadPendingAttachmentUploads();
+  if (pending.length === 0) return 0;
+
+  let uploadedCount = 0;
+  for (const item of pending) {
+    try {
+      const { blob, mimeType } = dataUrlToBlob(item.dataUrl);
+      const objectPath = `orgs/${item.orgId}/receipts/${item.txId}/${Date.now()}_${item.fileName}`;
+      await uploadBytes(storageRef(storage, objectPath), blob, { contentType: mimeType });
+      await removePendingAttachmentUpload(item.id);
+      if (onUploaded) {
+        await onUploaded(item, objectPath);
+      }
+      uploadedCount++;
+    } catch {
+      // Stop early if network failed again
+      break;
+    }
+  }
+  return uploadedCount;
+}
+
+export async function resolveOrgAttachmentUrl(path: string): Promise<string> {
+  if (!path) return '';
+  if (path.startsWith('data:') || path.startsWith('https://') || path.startsWith('http://')) {
+    return path;
+  }
+  if (path.startsWith('pending://')) {
+    return '';
+  }
+  return getDownloadURL(storageRef(storage, path));
 }
 
 export { onAuthStateChanged };

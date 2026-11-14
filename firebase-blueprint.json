@@ -182,7 +182,7 @@
     },
     "Organization": {
       "title": "Organization",
-      "description": "Enterprise workspace container with VAT, approval threshold, and accounting period lock",
+      "description": "Enterprise workspace root container with VAT, approval threshold, accounting period lock, and server-managed Business entitlement",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
@@ -193,13 +193,50 @@
         "taxNumber": { "type": "string", "maxLength": 64 },
         "approvalThreshold": { "type": "number" },
         "lockedUntilDate": { "type": "string", "maxLength": 16 },
-        "inviteCode": { "type": "string", "maxLength": 32 },
         "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "planTier": { "type": "string", "enum": ["free", "business_pro"] },
+        "billingCycle": { "type": "string", "enum": ["free", "monthly", "yearly", "lifetime", "trial", "code"] },
+        "expiresAt": { "type": "number" },
+        "seatLimit": { "type": "number" },
         "extraSeats": { "type": "number" },
+        "aiScansUsed": { "type": "number" },
+        "aiScansMonth": { "type": "string", "maxLength": 16 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "name", "currency", "vatRate", "approvalThreshold", "inviteCode", "ownerUid", "createdAt", "updatedAt"]
+      "required": ["id", "name", "currency", "vatRate", "approvalThreshold", "ownerUid", "planTier", "seatLimit", "createdAt", "updatedAt"]
+    },
+    "OrgRef": {
+      "title": "OrgRef",
+      "description": "Server-managed membership index under users/{uid}/orgRefs/{orgId}",
+      "type": "object",
+      "properties": {
+        "orgId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orgName": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["owner", "admin", "accountant", "employee", "viewer"] },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "currency": { "type": "string", "maxLength": 8 },
+        "joinedAt": { "type": "number" }
+      },
+      "required": ["orgId", "orgName", "role", "status", "currency", "joinedAt"]
+    },
+    "OrganizationInvite": {
+      "title": "OrganizationInvite",
+      "description": "Server-only hashed organization invitation record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "orgId": { "type": "string", "maxLength": 128 },
+        "codeHash": { "type": "string", "maxLength": 128 },
+        "role": { "type": "string", "enum": ["admin", "accountant", "employee", "viewer"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "number" },
+        "expiresAt": { "type": "number" },
+        "maxUses": { "type": "number" },
+        "usedCount": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "revoked", "exhausted"] }
+      },
+      "required": ["id", "orgId", "codeHash", "role", "createdBy", "createdAt", "expiresAt", "maxUses", "usedCount", "status"]
     },
     "OrganizationMember": {
       "title": "OrganizationMember",
@@ -212,7 +249,8 @@
         "role": { "type": "string", "enum": ["owner", "admin", "accountant", "employee", "viewer"] },
         "department": { "type": "string", "maxLength": 80 },
         "spendingLimit": { "type": "number" },
-        "status": { "type": "string", "enum": ["active", "invited", "suspended"] },
+        "spendingLimitMinor": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
         "joinedAt": { "type": "number" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -231,6 +269,7 @@
         "nameEn": { "type": "string", "maxLength": 120 },
         "type": { "type": "string", "enum": ["department", "project", "branch"] },
         "budgetAllocated": { "type": "number" },
+        "budgetAllocatedMinor": { "type": "number" },
         "isActive": { "type": "boolean" },
         "createdAt": { "type": "number" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -252,6 +291,7 @@
         "creditLimit": { "type": "number" },
         "currency": { "type": "string", "maxLength": 8 },
         "balance": { "type": "number" },
+        "balanceMinor": { "type": "number" },
         "dueDate": { "type": "string", "maxLength": 16 },
         "notes": { "type": "string", "maxLength": 400 },
         "createdAt": { "type": "number" },
@@ -266,8 +306,13 @@
       "properties": {
         "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "orgId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "date": { "type": "string", "maxLength": 16 },
+        "amountMinor": { "type": "number" },
+        "balanceMinor": { "type": "number" },
         "submittedBy": { "type": "string", "maxLength": 128 },
-        "approvalStatus": { "type": "string", "enum": ["approved", "pending_approval", "rejected"] },
+        "approvedBy": { "type": "string", "maxLength": 128 },
+        "approvalStatus": { "type": "string", "enum": ["draft", "pending", "pending_approval", "approved", "rejected", "paid"] },
+        "deletedAt": { "type": "number" },
         "payload": { "type": "object" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -280,7 +325,14 @@
       "properties": {
         "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "orgId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "action": { "type": "string", "enum": ["create", "update", "delete", "approve", "reject", "lock_period", "role_change"] },
+        "action": {
+          "type": "string",
+          "enum": [
+            "create", "update", "delete", "restore", "approve", "reject",
+            "lock_period", "role_change", "invite_create", "invite_revoke",
+            "member_join", "member_remove", "transfer_ownership", "recalculate"
+          ]
+        },
         "entityType": { "type": "string", "maxLength": 40 },
         "entityId": { "type": "string", "maxLength": 128 },
         "actorUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
@@ -297,17 +349,21 @@
       "schema": { "$ref": "#/entities/UserProfile" },
       "description": "Private user profile and server-managed PRO / Business subscription status"
     },
+    "/users/{userId}/orgRefs/{orgId}": {
+      "schema": { "$ref": "#/entities/OrgRef" },
+      "description": "Server-managed list of organizations the user belongs to"
+    },
     "/users/{userId}/backup/{docId}": {
       "schema": { "$ref": "#/entities/CloudBackupMeta" },
-      "description": "Chunked backup metadata and non-transaction collections"
+      "description": "Chunked personal backup metadata and non-transaction collections"
     },
     "/users/{userId}/backupChunks/{chunkId}": {
       "schema": { "$ref": "#/entities/CloudBackupChunk" },
-      "description": "Chunked transaction slices (max 400 transactions per doc)"
+      "description": "Chunked personal transaction slices (max 400 transactions per doc)"
     },
     "/users/{userId}/scanQuotas/{monthKey}": {
       "schema": { "$ref": "#/entities/ScanQuota" },
-      "description": "Server-only monthly AI receipt scan quota counter"
+      "description": "Server-only monthly AI receipt scan quota counter for personal mode"
     },
     "/activationCodes/{codeHash}": {
       "schema": { "$ref": "#/entities/ActivationCode" },
@@ -320,6 +376,14 @@
     "/organizations/{orgId}/members/{memberUid}": {
       "schema": { "$ref": "#/entities/OrganizationMember" },
       "description": "Organization team members & RBAC roles"
+    },
+    "/organizations/{orgId}/invites/{inviteId}": {
+      "schema": { "$ref": "#/entities/OrganizationInvite" },
+      "description": "Server-only hashed organization invites"
+    },
+    "/organizations/{orgId}/scanQuotas/{monthKey}": {
+      "schema": { "$ref": "#/entities/ScanQuota" },
+      "description": "Server-only shared organization monthly AI receipt scan counter"
     },
     "/organizations/{orgId}/costCenters/{costCenterId}": {
       "schema": { "$ref": "#/entities/CostCenter" },

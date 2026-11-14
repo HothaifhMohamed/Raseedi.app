@@ -3,6 +3,7 @@
  */
 import { AppNotificationItem, AppSettings, Budget, Debt, Transaction } from '../types';
 import { getActiveBudgetAlerts, getUpcomingDebtReminders } from './calculations';
+import type { OrgSubscriptionState } from './entitlements';
 
 export function isWebNotificationSupported(): boolean {
   return typeof window !== 'undefined' && 'Notification' in window;
@@ -48,10 +49,83 @@ export function buildAppNotifications(params: {
   debts: Debt[];
   settings: AppSettings;
   pendingApprovalsCount?: number;
+  isOrgWorkspace?: boolean;
+  orgName?: string;
+  orgSubscriptionState?: OrgSubscriptionState | null;
   now?: Date;
 }): AppNotificationItem[] {
-  const { budgets, transactions, debts, settings, pendingApprovalsCount = 0, now = new Date() } = params;
+  const {
+    budgets,
+    transactions,
+    debts,
+    settings,
+    pendingApprovalsCount = 0,
+    isOrgWorkspace = false,
+    orgName = '',
+    orgSubscriptionState = null,
+    now = new Date(),
+  } = params;
   const items: AppNotificationItem[] = [];
+
+  // 0. Organization Subscription Lifecycle Alerts (14d / 3d / 0d / grace / expired read-only)
+  if (isOrgWorkspace && orgSubscriptionState && orgSubscriptionState.expiryNotificationStage !== 'none') {
+    const stage = orgSubscriptionState.expiryNotificationStage;
+    const label = orgName ? `"${orgName}"` : '';
+    if (stage === 'expired') {
+      items.push({
+        id: `notif-org-sub-expired`,
+        type: 'org_subscription_readonly',
+        titleAr: 'المؤسسة في وضع القراءة فقط',
+        titleEn: 'Organization in Read-Only Mode',
+        messageAr: `انتهت فترة باقة الأعمال للمؤسسة ${label}. يمكنك التصدير والطباعة فقط — جدّد باقة Business PRO لاستئناف الإضافة والاعتمادات.`,
+        messageEn: `Business subscription ended for ${label || 'this organization'}. Export & print remain available; renew Business PRO to resume writes.`,
+        severity: 'danger',
+        timestamp: now.getTime(),
+        read: false,
+        actionTarget: 'upgrade',
+      });
+    } else if (stage === 'grace') {
+      const graceLeft = orgSubscriptionState.graceDaysRemaining ?? 0;
+      items.push({
+        id: `notif-org-sub-grace-${graceLeft}`,
+        type: 'org_subscription_grace',
+        titleAr: 'فترة سماح باقة المؤسسة',
+        titleEn: 'Organization Grace Period',
+        messageAr: `انتهت باقة المؤسسة ${label} وتبقّى ${graceLeft} يوم في فترة السماح قبل التحول لوضع القراءة فقط.`,
+        messageEn: `Subscription expired for ${label || 'this organization'}. ${graceLeft} grace day(s) remaining before Read-Only mode.`,
+        severity: 'danger',
+        timestamp: now.getTime(),
+        read: false,
+        actionTarget: 'upgrade',
+      });
+    } else {
+      const daysLeft = orgSubscriptionState.daysRemaining ?? 0;
+      items.push({
+        id: `notif-org-sub-expiring-${stage}`,
+        type: 'org_subscription_expiring',
+        titleAr:
+          stage === '0d'
+            ? 'تنتهي باقة المؤسسة اليوم'
+            : 'قرب انتهاء اشتراك المؤسسة',
+        titleEn:
+          stage === '0d'
+            ? 'Organization Subscription Ends Today'
+            : 'Organization Subscription Expiring Soon',
+        messageAr:
+          stage === '0d'
+            ? `تنتهي باقة Business PRO للمؤسسة ${label} خلال أقل من 24 ساعة.`
+            : `يتبقّى ${daysLeft} يوم على انتهاء باقة Business PRO للمؤسسة ${label}.`,
+        messageEn:
+          stage === '0d'
+            ? `Business PRO for ${label || 'this organization'} expires within 24 hours.`
+            : `${daysLeft} day(s) left on Business PRO for ${label || 'this organization'}.`,
+        severity: stage === '0d' || stage === '3d' ? 'danger' : 'warning',
+        timestamp: now.getTime(),
+        read: false,
+        actionTarget: 'upgrade',
+      });
+    }
+  }
 
   // 1. Pending org approvals
   if (pendingApprovalsCount > 0) {

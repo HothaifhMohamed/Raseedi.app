@@ -26,6 +26,7 @@ import {
   FileSpreadsheet,
   Building2,
   CircleDollarSign,
+  UploadCloud,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ReportsModal } from './ReportsModal';
@@ -46,6 +47,9 @@ export const MoreMenu: React.FC = () => {
     orgCostCenters,
     orgParties,
     orgMembers,
+    activeOrgSubscriptionState,
+    legacyLocalOrgs,
+    openOrgMigrationModal,
     pendingApprovalsCount,
     openOrgHub,
     transactions,
@@ -172,6 +176,30 @@ export const MoreMenu: React.FC = () => {
         </button>
       </div>
 
+      {/* LEGACY LOCAL ORGS MIGRATION BANNER */}
+      {legacyLocalOrgs.length > 0 && (
+        <button
+          type="button"
+          onClick={openOrgMigrationModal}
+          className="w-full p-3.5 rounded-xl bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/35 hover:border-[var(--color-accent)] flex items-center justify-between gap-3 text-start transition-colors"
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            <UploadCloud className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-[var(--color-ink)] truncate">
+                {t('migrateLocalOrgsTitle')}
+              </div>
+              <div className="text-[11px] text-[var(--color-muted)] truncate">
+                {isRTL
+                  ? `${legacyLocalOrgs.length} مؤسسة محلية جاهزة للترحيل إلى السحابة`
+                  : `${legacyLocalOrgs.length} local organization(s) ready to migrate`}
+              </div>
+            </div>
+          </div>
+          <ArrowIcon className="w-4 h-4 text-[var(--color-accent)] shrink-0" />
+        </button>
+      )}
+
       {/* ENTERPRISE SECTION (Active Organization Workspace) */}
       {isOrgWorkspace && activeOrganization && (
         <div className="space-y-1.5">
@@ -262,7 +290,9 @@ export const MoreMenu: React.FC = () => {
                 <div>
                   <div className="font-semibold text-[var(--color-ink)]">{t('teamAndRoles')}</div>
                   <div className="text-[11px] text-[var(--color-muted)]">
-                    {isRTL ? `${orgMembers.length} أعضاء وعُهد الموظفين • كود: ${activeOrganization.inviteCode}` : `${orgMembers.length} members & petty cash • Code: ${activeOrganization.inviteCode}`}
+                    {isRTL
+                      ? `${orgMembers.length} / ${activeOrgSubscriptionState?.seatLimit ?? activeOrganization.seatLimit ?? 5} مقاعد • عُهد وصلاحيات`
+                      : `${orgMembers.length} / ${activeOrgSubscriptionState?.seatLimit ?? activeOrganization.seatLimit ?? 5} seats • Roles & petty cash`}
                   </div>
                 </div>
               </div>
@@ -657,7 +687,7 @@ export const MoreMenu: React.FC = () => {
                     {t('facebookPage')}
                   </div>
                   <div className="text-[10px] text-[var(--color-muted)] truncate">
-                    <bdi dir="ltr">facebook.com/raseedi</bdi>
+                    {isRTL ? 'الصفحة الرسمية على فيسبوك' : 'Official Facebook Page'}
                   </div>
                 </div>
               </div>

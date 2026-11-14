@@ -319,6 +319,35 @@ export function roundCurrency(
 }
 
 /**
+ * Convert a decimal currency amount into exact integer minor units (piasters/cents/fils).
+ * Uses safe string-aligned rounding so IEEE-754 artifacts like 19.99 * 100 never lose 1 unit.
+ */
+export function toMinor(amount: number, currencyCode: string): number {
+  if (!Number.isFinite(amount)) return 0;
+  const decimals = getCurrencyDecimals(currencyCode, 2);
+  const factor = Math.pow(10, decimals);
+  const fixed = roundCurrency(amount, decimals).toFixed(decimals);
+  const [wholePart, fracPart = ''] = fixed.split('.');
+  const isNegative = wholePart.startsWith('-');
+  const absWhole = Math.abs(parseInt(wholePart || '0', 10));
+  const paddedFrac = fracPart.padEnd(decimals, '0').slice(0, decimals);
+  const fracNum = parseInt(paddedFrac || '0', 10);
+  const total = absWhole * factor + fracNum;
+  if (total === 0) return 0;
+  return isNegative ? -total : total;
+}
+
+/**
+ * Convert integer minor units back to decimal currency units.
+ */
+export function fromMinor(amountMinor: number, currencyCode: string): number {
+  if (!Number.isFinite(amountMinor)) return 0;
+  const decimals = getCurrencyDecimals(currencyCode, 2);
+  const factor = Math.pow(10, decimals);
+  return roundCurrency(Math.trunc(amountMinor) / factor, decimals);
+}
+
+/**
  * Convert an amount from one currency to another using custom overrides, live rates (if enabled), or static fallback
  */
 export function convertCurrency(

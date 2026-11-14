@@ -3,6 +3,7 @@
  * Supports isolated Personal Local-First Workspace & Enterprise Organization Workspaces.
  */
 import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback, useMemo } from 'react';
+import { DocumentData, QueryDocumentSnapshot } from 'firebase/firestore';
 import {
   Transaction,
   Wallet,
@@ -18,11 +19,12 @@ import {
   PlanTier,
   Organization,
   OrganizationMember,
+  OrganizationInvite,
   OrganizationRole,
+  OrgRef,
   CostCenter,
   BusinessParty,
   AuditLogEntry,
-  AuditLogAction,
   OrgWorkspaceData,
   AppNotificationItem,
   MoneyCircle,
@@ -44,8 +46,8 @@ import {
   loadPreRestoreSnapshot,
   loadOrgWorkspaces,
   saveOrgWorkspaces,
-  createStarterOrgCategories,
-  createStarterCostCentersForIndustry,
+  loadActiveWorkspacePref,
+  saveActiveWorkspacePref,
 } from '../services/db';
 import { translations } from '../services/i18n';
 import {
@@ -64,11 +66,21 @@ import {
   roundCurrency,
   setLiveExchangeRatesRuntime,
 } from '../services/currency';
+import {
+  canRoleApproveOrg,
+  canRoleEditOrg,
+  canRoleManageOrg,
+  computeOrgSeatLimit,
+  computeOrgSubscriptionState,
+  normalizeApprovalStatus,
+  OrgSubscriptionState,
+} from '../services/entitlements';
 import { verifyAndUpgradePin } from '../services/security';
 import {
   auth,
   onAuthStateChanged,
   signInWithGoogle,
+  reauthenticateWithGoogle,
   signOutGoogle,
   ensureUserProfile,
   fetchUserProfile,
@@ -79,12 +91,49 @@ import {
   startBusinessTrialWithServer,
   fetchScanQuotaFromServer,
   deleteAccountFromServer,
-  syncOrganizationMetaToCloud,
+  createOrgOnServer,
+  createOrgInviteOnServer,
+  fetchOrgInvitesFromServer,
+  revokeOrgInviteOnServer,
+  joinOrgByInviteCode,
+  manageOrgMemberOnServer,
+  transferOrgOwnershipOnServer,
+  deleteOrgOnServer,
+  flushPendingOrgUploads,
   isEntitlementActive,
   resolvePlanTierFromProfile,
   CloudBackupPayload,
   ScanQuotaInfo,
 } from '../services/firebase';
+import { EntitlementProvider, EntitlementContextValue, useEntitlement } from './EntitlementContext';
+import { OrgProvider, OrgContextValue, useOrg } from './OrgContext';
+import {
+  subscribeUserOrgRefs,
+  subscribeActiveOrganization,
+  loadMoreOrgTransactions as fetchMoreOrgTransactionsCloud,
+  createOrgTransactionCloud,
+  updateOrgTransactionCloud,
+  approveOrRejectOrMarkPaidOrgTxCloud,
+  softDeleteOrgTransactionCloud,
+  restoreOrgTransactionCloud,
+  updateOrgTxAttachmentPathsCloud,
+  moveOrgTransactionsCloud,
+  batchUpdateOrgTransactionsCategoryCloud,
+  importOrgTransactionsBatchCloud,
+  recalculateOrgBalancesFromApproved,
+  upsertOrgWalletCloud,
+  deleteOrgWalletCloud,
+  upsertOrgCategoryCloud,
+  deleteOrgCategoryCloud,
+  upsertOrgBudgetCloud,
+  deleteOrgBudgetCloud,
+  upsertOrgCostCenterCloud,
+  deleteOrgCostCenterCloud,
+  upsertOrgPartyCloud,
+  deleteOrgPartyCloud,
+  updateOrgSettingsCloud,
+  OrgActorInfo,
+} from '../services/orgCloud';
 import {
   buildAppNotifications,
   dispatchBrowserNotification,
@@ -126,7 +175,7 @@ export interface CategoryDependencies {
 export type OrgHubTab = 'approvals' | 'cost_centers' | 'parties' | 'team' | 'reports';
 
 interface AppContextType {
-  // Core Data (reflects active Workspace: Personal OR Active Organization)
+  // Core Data (reflects active Workspace: Personal OR Active Cloud Organization)
   isLoading: boolean;
   transactions: Transaction[];
   wallets: Wallet[];
@@ -140,12 +189,22 @@ interface AppContextType {
   user: UserAccount | null;
   hasCompletedOnboarding: boolean;
 
-  // Dual Workspace & Enterprise State
+  // Dual Workspace & Cloud Enterprise State
   activeWorkspace: string; // 'personal' | orgId
-  orgWorkspaces: Record<string, OrgWorkspaceData>;
+  orgRefs: OrgRef[];
   isOrgWorkspace: boolean;
+  isOrgLoading: boolean;
+  orgSyncPendingWrites: boolean;
+  orgActionError: string | null;
+  clearOrgActionError: () => void;
+  orgTrashTransactions: Transaction[];
+  orgHasMoreTx: boolean;
+  loadMoreOrgTransactions: () => Promise<void>;
   organizationsList: Organization[];
   activeOrganization: Organization | null;
+  activeOrgSubscriptionState: OrgSubscriptionState | null;
+  isOrgReadOnly: boolean;
+  activeOrgMemberStatus: 'active' | 'suspended' | 'invited' | null;
   orgMembers: OrganizationMember[];
   orgCostCenters: CostCenter[];
   orgParties: BusinessParty[];
@@ -164,22 +223,54 @@ interface AppContextType {
     taxNumber?: string;
     approvalThreshold?: number;
     loadSampleData?: boolean;
-  }) => Organization;
-  joinOrganizationByCode: (inviteCode: string) => { ok: boolean; orgName?: string; error?: string };
+  }) => Promise<Organization>;
+  joinOrganizationByCode: (
+    inviteCode: string
+  ) => Promise<{ ok: boolean; orgId?: string; orgName?: string; error?: string }>;
+  pendingJoinCode: string | null;
+  clearPendingJoinCode: () => void;
   updateOrganizationSettings: (updates: Partial<Organization>) => void;
   lockAccountingPeriod: (lockedUntilDate: string | undefined) => void;
+
+  // Legacy Local-to-Cloud Org Migration Wizard
+  legacyLocalOrgs: OrgWorkspaceData[];
+  isOrgMigrationModalOpen: boolean;
+  openOrgMigrationModal: () => void;
+  dismissLegacyOrgMigration: () => void;
+  completeLegacyOrgMigration: (migratedOrgIds: string[]) => Promise<void>;
+  queueLegacyOrgsForMigration: (workspaces: Record<string, OrgWorkspaceData>) => void;
 
   // Enterprise Operations
   approveOrgTransaction: (txId: string) => void;
   rejectOrgTransaction: (txId: string, reason: string) => void;
+  markOrgTransactionPaid: (txId: string) => void;
+  restoreOrgTransaction: (txId: string) => void;
+  recalculateOrgBalances: () => Promise<void>;
+  attachOrgReceiptPaths: (txId: string, attachmentPaths: string[], fallbackTx?: Transaction) => Promise<void>;
   addCostCenter: (data: Omit<CostCenter, 'id' | 'orgId' | 'createdAt'>) => CostCenter | null;
   updateCostCenter: (id: string, updates: Partial<CostCenter>) => void;
   deleteCostCenter: (id: string) => void;
   addBusinessParty: (data: Omit<BusinessParty, 'id' | 'orgId' | 'createdAt'>) => BusinessParty | null;
   updateBusinessParty: (id: string, updates: Partial<BusinessParty>) => void;
   deleteBusinessParty: (id: string) => void;
-  addOrUpdateOrgMember: (member: Omit<OrganizationMember, 'joinedAt'>) => void;
-  removeOrgMember: (uid: string) => void;
+
+  // Team, Invites & Ownership (Admin SDK)
+  createOrgInvite: (
+    role: Exclude<OrganizationRole, 'owner'>,
+    expiresInDays?: number,
+    maxUses?: number
+  ) => Promise<{ invite: OrganizationInvite; code: string }>;
+  listOrgInvites: () => Promise<OrganizationInvite[]>;
+  revokeOrgInvite: (inviteId: string) => Promise<void>;
+  manageOrgMember: (params: {
+    targetUid: string;
+    action: 'change_role' | 'suspend' | 'reactivate' | 'remove' | 'set_spending_limit';
+    role?: Exclude<OrganizationRole, 'owner'>;
+    spendingLimit?: number | null;
+    department?: string;
+  }) => Promise<void>;
+  transferOrgOwnership: (newOwnerUid: string) => Promise<void>;
+  deleteOrganization: (confirmName: string) => Promise<void>;
 
   // Unified Enterprise Hub Modal
   isOrgHubOpen: boolean;
@@ -242,8 +333,8 @@ interface AppContextType {
   isBusinessPro: boolean;
   planTier: PlanTier;
   proEntitlement: VerifiedProEntitlement | null;
-  redeemProCode: (code: string) => Promise<{ ok: boolean; error?: string }>;
-  startBusinessTrial: () => Promise<{ ok: boolean; error?: string }>;
+  redeemProCode: (code: string, orgId?: string) => Promise<{ ok: boolean; error?: string }>;
+  startBusinessTrial: (orgId?: string) => Promise<{ ok: boolean; error?: string }>;
   devActivateProPreview: (tier?: 'personal_pro' | 'business_pro') => void;
   restorePurchases: () => Promise<boolean>;
   scanQuota: ScanQuotaInfo | null;
@@ -261,7 +352,8 @@ interface AppContextType {
   restoreFromCloudNow: () => Promise<boolean>;
   resolveCloudConflictOverwrite: () => Promise<boolean>;
   clearCloudConflict: () => void;
-  deleteAccountAndData: () => Promise<boolean>;
+  reauthenticateGoogleAccount: () => Promise<boolean>;
+  deleteAccountAndData: () => Promise<{ ok: boolean; errorCode?: string; errorMessage?: string }>;
 
   // Backup Pre-Restore Snapshot Safety
   preRestoreSnapshotDate: number | null;
@@ -364,9 +456,44 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [user, setUser] = useState<UserAccount | null>(null);
   const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState(false);
 
-  // Dual Workspace / Enterprise State
+  // Dual Workspace / Cloud Enterprise State
   const [activeWorkspace, setActiveWorkspace] = useState<string>('personal');
-  const [orgWorkspaces, setOrgWorkspaces] = useState<Record<string, OrgWorkspaceData>>({});
+  const [orgRefs, setOrgRefs] = useState<OrgRef[]>([]);
+  const [orgRefsLoaded, setOrgRefsLoaded] = useState(false);
+  const [isOrgLoading, setIsOrgLoading] = useState(false);
+  const [orgSyncPendingWrites, setOrgSyncPendingWrites] = useState(false);
+  const [orgActionError, setOrgActionError] = useState<string | null>(null);
+  const [activeCloudOrg, setActiveCloudOrg] = useState<Organization | null>(null);
+  const [activeCloudMembers, setActiveCloudMembers] = useState<OrganizationMember[]>([]);
+  const [activeCloudWallets, setActiveCloudWallets] = useState<Wallet[]>([]);
+  const [activeCloudCategories, setActiveCloudCategories] = useState<Category[]>([]);
+  const [activeCloudBudgets, setActiveCloudBudgets] = useState<Budget[]>([]);
+  const [activeCloudCostCenters, setActiveCloudCostCenters] = useState<CostCenter[]>([]);
+  const [activeCloudParties, setActiveCloudParties] = useState<BusinessParty[]>([]);
+  const [activeCloudTransactions, setActiveCloudTransactions] = useState<Transaction[]>([]);
+  const [activeCloudTrashTransactions, setActiveCloudTrashTransactions] = useState<Transaction[]>([]);
+  const [extraOrgTransactions, setExtraOrgTransactions] = useState<Transaction[]>([]);
+  const [extraOrgTrashTransactions, setExtraOrgTrashTransactions] = useState<Transaction[]>([]);
+  const [orgTxLastCursor, setOrgTxLastCursor] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
+  const [orgHasMoreTx, setOrgHasMoreTx] = useState(false);
+  const [activeCloudAuditLogs, setActiveCloudAuditLogs] = useState<AuditLogEntry[]>([]);
+
+  // Legacy IndexedDB/JSON Organization Migration State
+  const [legacyLocalOrgs, setLegacyLocalOrgs] = useState<OrgWorkspaceData[]>([]);
+  const [isOrgMigrationModalOpen, setIsOrgMigrationModalOpen] = useState(false);
+  const [pendingJoinCode, setPendingJoinCode] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const fromUrl = new URLSearchParams(window.location.search).get('join');
+      if (fromUrl && fromUrl.trim()) {
+        sessionStorage.setItem('raseedi_pending_join_code', fromUrl.trim().toUpperCase());
+        return fromUrl.trim().toUpperCase();
+      }
+      return sessionStorage.getItem('raseedi_pending_join_code') || null;
+    } catch {
+      return null;
+    }
+  });
 
   // Cloud Sync State
   const [isCloudSyncing, setIsCloudSyncing] = useState(false);
@@ -434,57 +561,122 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const isBusinessPro = planTier === 'business_pro';
 
   // Active workspace projection
-  const activeOrgData: OrgWorkspaceData | null =
-    activeWorkspace !== 'personal' && orgWorkspaces[activeWorkspace]
-      ? orgWorkspaces[activeWorkspace]
-      : null;
-  const isOrgWorkspace = activeOrgData !== null;
-  const activeOrganization = activeOrgData?.organization || null;
-
-  const transactions = activeOrgData ? activeOrgData.transactions : personalTransactions;
-  const wallets = activeOrgData ? activeOrgData.wallets : personalWallets;
-  const categories = activeOrgData ? activeOrgData.categories : personalCategories;
-  const budgets = activeOrgData ? activeOrgData.budgets : personalBudgets;
-  const debts = activeOrgData ? activeOrgData.debts : personalDebts;
-  const goals = activeOrgData ? activeOrgData.goals : personalGoals;
-  const templates = activeOrgData ? activeOrgData.templates : personalTemplates;
-
-  const orgMembers = activeOrgData ? activeOrgData.members : [];
-  const orgCostCenters = activeOrgData ? activeOrgData.costCenters : [];
-  const orgParties = activeOrgData ? activeOrgData.parties : [];
-  const orgAuditLogs = activeOrgData ? activeOrgData.auditLogs : [];
-
-  const organizationsList = useMemo(
-    () => Object.values(orgWorkspaces).map((w) => w.organization),
-    [orgWorkspaces]
+  const activeOrgRef = useMemo(
+    () => (activeWorkspace !== 'personal' ? orgRefs.find((r) => r.orgId === activeWorkspace) || null : null),
+    [activeWorkspace, orgRefs]
   );
 
-  const activeOrgRole: OrganizationRole | null = useMemo(() => {
-    if (!activeOrgData) return null;
-    const uid = user?.id || 'local-owner';
-    const match =
-      activeOrgData.members.find((m) => m.uid === uid) ||
-      activeOrgData.members.find((m) => m.uid === 'local-owner');
-    if (match) return match.role;
-    if (activeOrgData.organization.ownerUid === uid || activeOrgData.organization.ownerUid === 'local-owner') {
-      return 'owner';
-    }
-    return 'employee';
-  }, [activeOrgData, user?.id]);
+  const isOrgWorkspace =
+    activeWorkspace !== 'personal' &&
+    Boolean(user?.isLoggedIn) &&
+    (Boolean(activeCloudOrg) || Boolean(activeOrgRef));
 
-  const canOrgWrite = !isOrgWorkspace || activeOrgRole !== 'viewer';
+  const activeOrganization: Organization | null = useMemo(() => {
+    if (!isOrgWorkspace) return null;
+    if (activeCloudOrg) return activeCloudOrg;
+    if (activeOrgRef) {
+      return {
+        id: activeOrgRef.orgId,
+        name: activeOrgRef.orgName,
+        currency: activeOrgRef.currency || 'EGP',
+        vatRate: 14,
+        approvalThreshold: 5000,
+        ownerUid: '',
+        createdAt: activeOrgRef.joinedAt || Date.now(),
+        updatedAt: Date.now(),
+      };
+    }
+    return null;
+  }, [isOrgWorkspace, activeCloudOrg, activeOrgRef]);
+
+  const orgTransactions = useMemo(() => {
+    if (extraOrgTransactions.length === 0) return activeCloudTransactions;
+    const seen = new Set(activeCloudTransactions.map((t) => t.id));
+    return [...activeCloudTransactions, ...extraOrgTransactions.filter((t) => !seen.has(t.id))];
+  }, [activeCloudTransactions, extraOrgTransactions]);
+
+  const orgTrashTransactions = useMemo(() => {
+    if (extraOrgTrashTransactions.length === 0) return activeCloudTrashTransactions;
+    const seen = new Set(activeCloudTrashTransactions.map((t) => t.id));
+    return [...activeCloudTrashTransactions, ...extraOrgTrashTransactions.filter((t) => !seen.has(t.id))];
+  }, [activeCloudTrashTransactions, extraOrgTrashTransactions]);
+
+  const transactions = isOrgWorkspace ? orgTransactions : personalTransactions;
+  const wallets = isOrgWorkspace ? activeCloudWallets : personalWallets;
+  const categories = isOrgWorkspace ? activeCloudCategories : personalCategories;
+  const budgets = isOrgWorkspace ? activeCloudBudgets : personalBudgets;
+  const debts = isOrgWorkspace ? [] : personalDebts;
+  const goals = isOrgWorkspace ? [] : personalGoals;
+  const templates = isOrgWorkspace ? [] : personalTemplates;
+
+  const orgMembers = isOrgWorkspace ? activeCloudMembers : [];
+  const orgCostCenters = isOrgWorkspace ? activeCloudCostCenters : [];
+  const orgParties = isOrgWorkspace ? activeCloudParties : [];
+  const orgAuditLogs = isOrgWorkspace ? activeCloudAuditLogs : [];
+
+  const organizationsList: Organization[] = useMemo(() => {
+    return orgRefs.map((refItem) => {
+      if (activeCloudOrg && activeCloudOrg.id === refItem.orgId) {
+        return activeCloudOrg;
+      }
+      return {
+        id: refItem.orgId,
+        name: refItem.orgName,
+        currency: refItem.currency || 'EGP',
+        vatRate: 14,
+        approvalThreshold: 5000,
+        ownerUid: refItem.role === 'owner' && user?.id ? user.id : '',
+        createdAt: refItem.joinedAt || Date.now(),
+        updatedAt: Date.now(),
+      };
+    });
+  }, [orgRefs, activeCloudOrg, user?.id]);
+
+  const activeOrgMember = useMemo(() => {
+    if (!isOrgWorkspace || !user?.id) return null;
+    return activeCloudMembers.find((m) => m.uid === user.id) || null;
+  }, [isOrgWorkspace, activeCloudMembers, user?.id]);
+
+  const activeOrgRole: OrganizationRole | null = useMemo(() => {
+    if (!isOrgWorkspace) return null;
+    if (activeOrgMember) return activeOrgMember.role;
+    if (activeOrgRef) return activeOrgRef.role;
+    if (activeCloudOrg && user?.id && activeCloudOrg.ownerUid === user.id) return 'owner';
+    return 'viewer';
+  }, [isOrgWorkspace, activeOrgMember, activeOrgRef, activeCloudOrg, user?.id]);
+
+  const activeOrgMemberStatus: 'active' | 'suspended' | 'invited' | null = useMemo(() => {
+    if (!isOrgWorkspace) return null;
+    return activeOrgMember?.status || activeOrgRef?.status || 'active';
+  }, [isOrgWorkspace, activeOrgMember, activeOrgRef]);
+
+  const activeOrgSubscriptionState: OrgSubscriptionState | null = useMemo(() => {
+    if (!isOrgWorkspace || !activeCloudOrg) return null;
+    return computeOrgSubscriptionState({
+      planTier: activeCloudOrg.planTier || 'business_pro',
+      billingCycle: activeCloudOrg.billingCycle || 'trial',
+      expiresAt: activeCloudOrg.expiresAt ?? null,
+      extraSeats: activeCloudOrg.extraSeats || 0,
+      seatLimit: activeCloudOrg.seatLimit ?? computeOrgSeatLimit(activeCloudOrg.extraSeats || 0),
+    });
+  }, [isOrgWorkspace, activeCloudOrg]);
+
+  const isOrgReadOnly = Boolean(isOrgWorkspace && activeOrgSubscriptionState?.isReadOnly);
+
+  const canOrgWrite =
+    !isOrgWorkspace ||
+    (activeOrgMemberStatus === 'active' && !isOrgReadOnly && canRoleEditOrg(activeOrgRole));
   const canOrgApprove =
     !isOrgWorkspace ||
-    activeOrgRole === 'owner' ||
-    activeOrgRole === 'admin' ||
-    activeOrgRole === 'accountant';
+    (activeOrgMemberStatus === 'active' && !isOrgReadOnly && canRoleApproveOrg(activeOrgRole));
   const canOrgManage =
-    !isOrgWorkspace || activeOrgRole === 'owner' || activeOrgRole === 'admin';
+    !isOrgWorkspace ||
+    (activeOrgMemberStatus === 'active' && !isOrgReadOnly && canRoleManageOrg(activeOrgRole));
 
   const pendingApprovalsCount = useMemo(
     () =>
       isOrgWorkspace
-        ? transactions.filter((tx) => tx.approvalStatus === 'pending_approval').length
+        ? transactions.filter((tx) => normalizeApprovalStatus(tx.approvalStatus) === 'pending').length
         : 0,
     [isOrgWorkspace, transactions]
   );
@@ -517,8 +709,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     hasCompletedOnboarding,
   };
 
-  const latestOrgRef = React.useRef({ activeWorkspace, orgWorkspaces });
-  latestOrgRef.current = { activeWorkspace, orgWorkspaces };
+  const getOrgActor = useCallback((): OrgActorInfo => {
+    const uid = auth.currentUser?.uid || user?.id || '';
+    const name =
+      user?.name ||
+      auth.currentUser?.displayName ||
+      auth.currentUser?.email?.split('@')[0] ||
+      (settings.language === 'en' ? 'Member' : 'عضو الفريق');
+    return { uid, name };
+  }, [user?.id, user?.name, settings.language]);
 
   const savePersonalState = useCallback(
     (updates?: Partial<AppDatabaseData>) => {
@@ -541,45 +740,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     []
   );
 
-  const updateActiveOrgWorkspace = useCallback(
-    (updater: (prev: OrgWorkspaceData) => OrgWorkspaceData) => {
-      const { activeWorkspace: wsId, orgWorkspaces: map } = latestOrgRef.current;
-      const current = map[wsId];
-      if (!current) return;
-      const updated = updater(current);
-      const nextMap = { ...map, [wsId]: updated };
-      setOrgWorkspaces(nextMap);
-      void saveOrgWorkspaces(wsId, nextMap);
-    },
-    []
-  );
-
-  const createAuditEntry = useCallback(
-    (
-      orgId: string,
-      action: AuditLogAction,
-      entityType: AuditLogEntry['entityType'],
-      entityId: string,
-      summary: string,
-      before?: unknown,
-      after?: unknown
-    ): AuditLogEntry => {
-      return {
-        id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        orgId,
-        action,
-        entityType,
-        entityId,
-        actorUid: user?.id || 'local-owner',
-        actorName: user?.name || (settings.language === 'en' ? 'Account Owner' : 'مالك المؤسسة'),
-        summary,
-        before,
-        after,
-        timestamp: Date.now(),
-      };
-    },
-    [user?.id, user?.name, settings.language]
-  );
+  const clearOrgActionError = useCallback(() => setOrgActionError(null), []);
 
   const applyVerifiedProState = useCallback(async (entitlement: VerifiedProEntitlement | null) => {
     setVerifiedPro(entitlement);
@@ -592,12 +753,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return;
     }
     try {
-      const q = await fetchScanQuotaFromServer();
+      const targetOrgId = activeWorkspace !== 'personal' ? activeWorkspace : undefined;
+      const q = await fetchScanQuotaFromServer(targetOrgId);
       if (q) setScanQuota(q);
     } catch {
       // Non-fatal
     }
-  }, []);
+  }, [activeWorkspace]);
 
   const refreshExchangeRates = useCallback(async (force = true): Promise<boolean> => {
     setIsRefreshingRates(true);
@@ -692,14 +854,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setCloudSyncError(null);
 
       if (backup.orgWorkspaces && typeof backup.orgWorkspaces === 'object' && !Array.isArray(backup.orgWorkspaces)) {
-        const restoredOrgs = backup.orgWorkspaces;
-        const resolvedActiveWs =
-          backup.activeWorkspace && restoredOrgs[backup.activeWorkspace]
-            ? backup.activeWorkspace
-            : 'personal';
-        setOrgWorkspaces(restoredOrgs);
-        setActiveWorkspace(resolvedActiveWs);
-        void saveOrgWorkspaces(resolvedActiveWs, restoredOrgs);
+        const legacyList = Object.values(backup.orgWorkspaces).filter(
+          (w): w is OrgWorkspaceData => Boolean(w && w.organization && w.organization.id)
+        );
+        if (legacyList.length > 0) {
+          setLegacyLocalOrgs(legacyList);
+          setIsOrgMigrationModalOpen(true);
+          void saveOrgWorkspaces('personal', backup.orgWorkspaces);
+        }
       }
 
       void persistData({
@@ -726,7 +888,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, []);
 
   const redeemProCode = useCallback(
-    async (code: string): Promise<{ ok: boolean; error?: string }> => {
+    async (code: string, orgId?: string): Promise<{ ok: boolean; error?: string }> => {
       if (!auth.currentUser) {
         return {
           ok: false,
@@ -737,7 +899,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         };
       }
       try {
-        const res = await redeemProCodeWithServer(code);
+        const res = await redeemProCodeWithServer(code, orgId);
         const entitlement: VerifiedProEntitlement = {
           uid: auth.currentUser.uid,
           isPro: true,
@@ -764,41 +926,44 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     [applyVerifiedProState, refreshScanQuota]
   );
 
-  const startBusinessTrial = useCallback(async (): Promise<{ ok: boolean; error?: string }> => {
-    if (!auth.currentUser) {
-      return {
-        ok: false,
-        error:
-          latestPersonalRef.current.settings.language === 'en'
-            ? 'Please sign in with Google first to activate your 14-day Business Trial.'
-            : 'يرجى تسجيل الدخول بحساب جوجل أولاً لتفعيل الفترة التجريبية لباقة الأعمال (14 يوماً).',
-      };
-    }
-    try {
-      const res = await startBusinessTrialWithServer();
-      const entitlement: VerifiedProEntitlement = {
-        uid: auth.currentUser.uid,
-        isPro: true,
-        proPlan: res.proPlan,
-        planTier: res.planTier,
-        billingCycle: res.billingCycle,
-        expiresAt: res.expiresAt,
-        proExpiresAt: res.expiresAt,
-        verifiedAt: Date.now(),
-      };
-      await applyVerifiedProState(entitlement);
-      await refreshScanQuota();
-      return { ok: true };
-    } catch (err) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : latestPersonalRef.current.settings.language === 'en'
-          ? 'Could not activate trial.'
-          : 'تعذر تفعيل الفترة التجريبية.';
-      return { ok: false, error: msg };
-    }
-  }, [applyVerifiedProState, refreshScanQuota]);
+  const startBusinessTrial = useCallback(
+    async (orgId?: string): Promise<{ ok: boolean; error?: string }> => {
+      if (!auth.currentUser) {
+        return {
+          ok: false,
+          error:
+            latestPersonalRef.current.settings.language === 'en'
+              ? 'Please sign in with Google first to activate your 14-day Business Trial.'
+              : 'يرجى تسجيل الدخول بحساب جوجل أولاً لتفعيل الفترة التجريبية لباقة الأعمال (14 يوماً).',
+        };
+      }
+      try {
+        const res = await startBusinessTrialWithServer(orgId);
+        const entitlement: VerifiedProEntitlement = {
+          uid: auth.currentUser.uid,
+          isPro: true,
+          proPlan: res.proPlan,
+          planTier: res.planTier,
+          billingCycle: res.billingCycle,
+          expiresAt: res.expiresAt,
+          proExpiresAt: res.expiresAt,
+          verifiedAt: Date.now(),
+        };
+        await applyVerifiedProState(entitlement);
+        await refreshScanQuota();
+        return { ok: true };
+      } catch (err) {
+        const msg =
+          err instanceof Error
+            ? err.message
+            : latestPersonalRef.current.settings.language === 'en'
+            ? 'Could not activate trial.'
+            : 'تعذر تفعيل الفترة التجريبية.';
+        return { ok: false, error: msg };
+      }
+    },
+    [applyVerifiedProState, refreshScanQuota]
+  );
 
   const restorePurchases = useCallback(async (): Promise<boolean> => {
     if (isEntitlementActive(verifiedPro)) {
@@ -996,12 +1161,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setSettings(resolvedSettings);
       setUser(data.user || null);
       setHasCompletedOnboarding(onboarded);
-      setOrgWorkspaces(orgData.workspaces || {});
-      setActiveWorkspace(
-        orgData.activeWorkspace && orgData.workspaces?.[orgData.activeWorkspace]
-          ? orgData.activeWorkspace
-          : 'personal'
+
+      const savedWsPref = loadActiveWorkspacePref();
+      if (savedWsPref && savedWsPref !== 'personal') {
+        setActiveWorkspace(savedWsPref);
+      }
+
+      const legacyList = Object.values(orgData.workspaces || {}).filter(
+        (w): w is OrgWorkspaceData => Boolean(w && w.organization && w.organization.id)
       );
+      if (legacyList.length > 0) {
+        setLegacyLocalOrgs(legacyList);
+        setIsOrgMigrationModalOpen(true);
+      }
 
       if (preSnap) {
         setPreRestoreSnapshotDate(preSnap.updatedAt);
@@ -1071,6 +1243,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (!firebaseUser) {
         setLastCloudBackupExists(false);
         setScanQuota(null);
+        setOrgRefs([]);
+        setOrgRefsLoaded(false);
+        setActiveWorkspace('personal');
+        saveActiveWorkspacePref('personal');
         return;
       }
 
@@ -1124,6 +1300,185 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     return () => unsubscribe();
   }, [applyCloudBackupLocally, applyVerifiedProState, refreshScanQuota]);
+
+  // Subscribe to user's organization memberships (/users/{uid}/orgRefs)
+  useEffect(() => {
+    if (!user?.isLoggedIn || !user.id) {
+      setOrgRefs([]);
+      setOrgRefsLoaded(false);
+      return;
+    }
+    const unsub = subscribeUserOrgRefs(
+      user.id,
+      (refs) => {
+        setOrgRefs(refs);
+        setOrgRefsLoaded(true);
+      },
+      (err) => {
+        console.warn('Failed to listen orgRefs:', err);
+        setOrgRefsLoaded(true);
+      }
+    );
+    return () => unsub();
+  }, [user?.isLoggedIn, user?.id]);
+
+  // Validate activeWorkspace against server-managed orgRefs
+  useEffect(() => {
+    if (!orgRefsLoaded || activeWorkspace === 'personal') return;
+    const match = orgRefs.find((r) => r.orgId === activeWorkspace);
+    if (!match || match.status === 'suspended') {
+      setActiveWorkspace('personal');
+      saveActiveWorkspacePref('personal');
+      if (match?.status === 'suspended') {
+        setOrgActionError(
+          settings.language === 'en'
+            ? 'Your membership in this organization is suspended.'
+            : 'تم تعليق عضويتك في هذه المؤسسة.'
+        );
+      }
+    }
+  }, [orgRefsLoaded, orgRefs, activeWorkspace, settings.language]);
+
+  // Subscribe cleanly ONLY to the active cloud organization
+  const activeOrgRefRoleForSub = useMemo<OrganizationRole>(() => {
+    if (activeOrgRef?.role) return activeOrgRef.role;
+    return 'viewer';
+  }, [activeOrgRef?.role]);
+
+  useEffect(() => {
+    if (!user?.isLoggedIn || activeWorkspace === 'personal' || !activeOrgRef || activeOrgRef.status === 'suspended') {
+      setIsOrgLoading(false);
+      setActiveCloudOrg(null);
+      setActiveCloudMembers([]);
+      setActiveCloudWallets([]);
+      setActiveCloudCategories([]);
+      setActiveCloudBudgets([]);
+      setActiveCloudCostCenters([]);
+      setActiveCloudParties([]);
+      setActiveCloudTransactions([]);
+      setActiveCloudTrashTransactions([]);
+      setExtraOrgTransactions([]);
+      setExtraOrgTrashTransactions([]);
+      setOrgTxLastCursor(null);
+      setOrgHasMoreTx(false);
+      setActiveCloudAuditLogs([]);
+      setOrgSyncPendingWrites(false);
+      return;
+    }
+
+    setIsOrgLoading(true);
+    setExtraOrgTransactions([]);
+    setExtraOrgTrashTransactions([]);
+    setOrgTxLastCursor(null);
+
+    const unsub = subscribeActiveOrganization(
+      activeWorkspace,
+      activeOrgRefRoleForSub,
+      {
+        onOrganization: (org) => {
+          setActiveCloudOrg(org);
+          setIsOrgLoading(false);
+        },
+        onMembers: (members) => setActiveCloudMembers(members),
+        onWallets: (w) => setActiveCloudWallets(w),
+        onCategories: (c) => setActiveCloudCategories(c),
+        onBudgets: (b) => setActiveCloudBudgets(b),
+        onCostCenters: (cc) => setActiveCloudCostCenters(cc),
+        onParties: (p) => setActiveCloudParties(p),
+        onTransactions: (activeTxs, trashTxs, meta) => {
+          setActiveCloudTransactions(activeTxs);
+          setActiveCloudTrashTransactions(trashTxs);
+          setOrgTxLastCursor(meta.lastCursor);
+          setOrgHasMoreTx(meta.hasMore);
+          setOrgSyncPendingWrites(meta.hasPendingWrites);
+          setIsOrgLoading(false);
+        },
+        onAuditLogs: (logs) => setActiveCloudAuditLogs(logs),
+        onError: (scope, err) => {
+          console.warn(`Org listener error (${scope}):`, err);
+          setIsOrgLoading(false);
+        },
+      }
+    );
+
+    return () => unsub();
+  }, [user?.isLoggedIn, activeWorkspace, activeOrgRef?.orgId, activeOrgRef?.status, activeOrgRefRoleForSub]);
+
+  // Refresh scan quota when active workspace changes
+  useEffect(() => {
+    if (!user?.isLoggedIn) return;
+    void refreshScanQuota();
+  }, [activeWorkspace, user?.isLoggedIn, refreshScanQuota]);
+
+  // Auto-process ?join=CODE URL link once signed in
+  const processingJoinRef = React.useRef(false);
+  useEffect(() => {
+    if (!user?.isLoggedIn || !auth.currentUser || !pendingJoinCode || processingJoinRef.current) return;
+    processingJoinRef.current = true;
+    const codeToRedeem = pendingJoinCode;
+    void joinOrgByInviteCode(codeToRedeem)
+      .then((res) => {
+        setPendingJoinCode(null);
+        try {
+          sessionStorage.removeItem('raseedi_pending_join_code');
+          const url = new URL(window.location.href);
+          if (url.searchParams.has('join')) {
+            url.searchParams.delete('join');
+            window.history.replaceState({}, '', url.toString());
+          }
+        } catch {
+          // ignore
+        }
+        setActiveWorkspace(res.orgId);
+        saveActiveWorkspacePref(res.orgId);
+        setHasCompletedOnboarding(true);
+        savePersonalState({ hasCompletedOnboarding: true });
+      })
+      .catch((err) => {
+        setPendingJoinCode(null);
+        try {
+          sessionStorage.removeItem('raseedi_pending_join_code');
+          const url = new URL(window.location.href);
+          if (url.searchParams.has('join')) {
+            url.searchParams.delete('join');
+            window.history.replaceState({}, '', url.toString());
+          }
+        } catch {
+          // ignore
+        }
+        setOrgActionError(
+          err instanceof Error
+            ? err.message
+            : settings.language === 'en'
+            ? 'Could not join organization with invite link.'
+            : 'تعذر الانضمام للمؤسسة عبر رابط الدعوة.'
+        );
+      })
+      .finally(() => {
+        processingJoinRef.current = false;
+      });
+  }, [user?.isLoggedIn, pendingJoinCode, savePersonalState, settings.language]);
+
+  // Flush pending offline Storage attachment uploads when back online
+  const activeTransactionsRef = React.useRef<Transaction[]>([]);
+  activeTransactionsRef.current = activeCloudTransactions;
+  useEffect(() => {
+    if (!user?.isLoggedIn) return;
+    const handleFlush = () => {
+      void flushPendingOrgUploads(async (item, uploadedPath) => {
+        const targetTx = activeTransactionsRef.current.find((t) => t.id === item.txId);
+        if (!targetTx) return;
+        const nextPaths = [
+          ...(targetTx.attachmentPaths || []).filter((p) => !p.includes(item.id)),
+          uploadedPath,
+        ];
+        await updateOrgTxAttachmentPathsCloud(item.orgId, targetTx, nextPaths);
+      });
+    };
+    handleFlush();
+    window.addEventListener('online', handleFlush);
+    return () => window.removeEventListener('online', handleFlush);
+  }, [user?.isLoggedIn]);
 
   const signInWithGoogleAccount = useCallback(async (): Promise<{
     restored: boolean;
@@ -1246,8 +1601,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           goals: snap.goals,
           templates: snap.templates,
           moneyCircles: snap.moneyCircles,
-          orgWorkspaces: latestOrgRef.current.orgWorkspaces,
-          activeWorkspace: latestOrgRef.current.activeWorkspace,
           settings: snap.settings,
           hasCompletedOnboarding: snap.hasCompletedOnboarding,
         }
@@ -1324,41 +1677,60 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const resolveCloudConflictOverwrite = useCallback(async () => syncToCloudNow(true), [syncToCloudNow]);
   const clearCloudConflict = useCallback(() => setCloudConflict(null), []);
 
-  const deleteAccountAndData = useCallback(async (): Promise<boolean> => {
+  const reauthenticateGoogleAccount = useCallback(async (): Promise<boolean> => {
     try {
-      if (auth.currentUser) {
-        await deleteAccountFromServer();
-        await signOutGoogle().catch(() => {});
-      }
-      await clearLocalAppStorageAndDb();
-      setPersonalTransactions([]);
-      setPersonalWallets(DEFAULT_WALLETS);
-      setPersonalCategories(DEFAULT_CATEGORIES);
-      setPersonalBudgets([]);
-      setPersonalDebts([]);
-      setPersonalGoals([]);
-      setPersonalTemplates([]);
-      setPersonalMoneyCircles([]);
-      setOrgWorkspaces({});
-      setActiveWorkspace('personal');
-      setSettings(DEFAULT_SETTINGS);
-      setUser(null);
-      setVerifiedPro(null);
-      setDevProTierPreview(null);
-      setScanQuota(null);
-      setPreRestoreSnapshotDate(null);
-      setLastCloudBackupExists(false);
-      setCloudConflict(null);
-      setCloudSyncStatus('idle');
-      setCloudSyncError(null);
-      setHasCompletedOnboarding(false);
+      await reauthenticateWithGoogle();
       return true;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Account deletion failed';
-      setCloudSyncError(msg);
+    } catch {
       return false;
     }
   }, []);
+
+  const deleteAccountAndData = useCallback(
+    async (): Promise<{ ok: boolean; errorCode?: string; errorMessage?: string }> => {
+      try {
+        if (auth.currentUser) {
+          await deleteAccountFromServer();
+          await signOutGoogle().catch(() => {});
+        }
+        await clearLocalAppStorageAndDb();
+        setPersonalTransactions([]);
+        setPersonalWallets(DEFAULT_WALLETS);
+        setPersonalCategories(DEFAULT_CATEGORIES);
+        setPersonalBudgets([]);
+        setPersonalDebts([]);
+        setPersonalGoals([]);
+        setPersonalTemplates([]);
+        setPersonalMoneyCircles([]);
+        setOrgRefs([]);
+        setOrgRefsLoaded(false);
+        setActiveCloudOrg(null);
+        setActiveWorkspace('personal');
+        saveActiveWorkspacePref('personal');
+        setSettings(DEFAULT_SETTINGS);
+        setUser(null);
+        setVerifiedPro(null);
+        setDevProTierPreview(null);
+        setScanQuota(null);
+        setPreRestoreSnapshotDate(null);
+        setLastCloudBackupExists(false);
+        setCloudConflict(null);
+        setCloudSyncStatus('idle');
+        setCloudSyncError(null);
+        setHasCompletedOnboarding(false);
+        return { ok: true };
+      } catch (err) {
+        const errorCode =
+          typeof err === 'object' && err && 'code' in err
+            ? String((err as { code?: unknown }).code || '')
+            : undefined;
+        const msg = err instanceof Error ? err.message : 'Account deletion failed';
+        setCloudSyncError(msg);
+        return { ok: false, errorCode, errorMessage: msg };
+      }
+    },
+    []
+  );
 
   // Auto cloud sync (personal state)
   useEffect(() => {
@@ -1401,8 +1773,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             goals: snap.goals,
             templates: snap.templates,
             moneyCircles: snap.moneyCircles,
-            orgWorkspaces: latestOrgRef.current.orgWorkspaces,
-            activeWorkspace: latestOrgRef.current.activeWorkspace,
             settings: snap.settings,
             hasCompletedOnboarding: snap.hasCompletedOnboarding,
           }
@@ -1447,8 +1817,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     personalGoals,
     personalTemplates,
     personalMoneyCircles,
-    orgWorkspaces,
-    activeWorkspace,
     settings,
   ]);
 
@@ -1460,12 +1828,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       debts,
       settings,
       pendingApprovalsCount,
+      isOrgWorkspace,
+      orgName: activeOrganization?.name,
+      orgSubscriptionState: activeOrgSubscriptionState,
     });
     return raw.map((item) => ({
       ...item,
       read: readNotificationIds.has(item.id),
     }));
-  }, [budgets, transactions, debts, settings, pendingApprovalsCount, readNotificationIds]);
+  }, [
+    budgets,
+    transactions,
+    debts,
+    settings,
+    pendingApprovalsCount,
+    isOrgWorkspace,
+    activeOrganization?.name,
+    activeOrgSubscriptionState,
+    readNotificationIds,
+  ]);
 
   const unreadNotificationsCount = useMemo(
     () => notifications.filter((n) => !n.read).length,
@@ -1554,13 +1935,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (result.valid) {
           setLockedWalletIds((prev) => prev.filter((id) => id !== walletId));
           if (result.needsUpgrade && result.newHash && result.newSalt) {
-            if (isOrgWorkspace) {
-              updateActiveOrgWorkspace((org) => ({
-                ...org,
-                wallets: org.wallets.map((w) =>
-                  w.id === walletId ? { ...w, pin: result.newHash, pinSalt: result.newSalt } : w
-                ),
-              }));
+            if (isOrgWorkspace && activeOrganization) {
+              const upgraded = { ...wallet, pin: result.newHash, pinSalt: result.newSalt };
+              void upsertOrgWalletCloud(activeOrganization.id, upgraded, false, getOrgActor()).catch(
+                () => {}
+              );
             } else {
               const updatedWallets = personalWallets.map((w) =>
                 w.id === walletId ? { ...w, pin: result.newHash, pinSalt: result.newSalt } : w
@@ -1574,7 +1953,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       return false;
     },
-    [wallets, isOrgWorkspace, personalWallets, updateActiveOrgWorkspace, savePersonalState]
+    [wallets, isOrgWorkspace, activeOrganization, personalWallets, getOrgActor, savePersonalState]
   );
 
   const triggerUndo = useCallback(() => {
@@ -1585,20 +1964,77 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [undoAction]);
 
   // ===========================================================================
-  // Workspace Management (Personal <-> Organizations)
+  // Workspace Management (Personal <-> Cloud Organizations)
   // ===========================================================================
-  const switchWorkspace = useCallback((workspaceId: string) => {
-    setSelectedTransactionIds([]);
-    setActiveWalletId(null);
-    resetFilters();
-    if (workspaceId === 'personal' || latestOrgRef.current.orgWorkspaces[workspaceId]) {
-      setActiveWorkspace(workspaceId);
-      void saveOrgWorkspaces(workspaceId, latestOrgRef.current.orgWorkspaces);
+  const switchWorkspace = useCallback(
+    (workspaceId: string) => {
+      setSelectedTransactionIds([]);
+      setActiveWalletId(null);
+      setOrgActionError(null);
+      resetFilters();
+      if (workspaceId === 'personal') {
+        setActiveWorkspace('personal');
+        saveActiveWorkspacePref('personal');
+        return;
+      }
+      if (orgRefs.some((r) => r.orgId === workspaceId)) {
+        setActiveWorkspace(workspaceId);
+        saveActiveWorkspacePref(workspaceId);
+      }
+    },
+    [resetFilters, orgRefs]
+  );
+
+  const clearPendingJoinCode = useCallback(() => {
+    setPendingJoinCode(null);
+    try {
+      sessionStorage.removeItem('raseedi_pending_join_code');
+    } catch {
+      // ignore
     }
-  }, [resetFilters]);
+  }, []);
+
+  const openOrgMigrationModal = useCallback(() => {
+    if (legacyLocalOrgs.length > 0) {
+      setIsOrgMigrationModalOpen(true);
+    }
+  }, [legacyLocalOrgs.length]);
+
+  const dismissLegacyOrgMigration = useCallback(() => {
+    setIsOrgMigrationModalOpen(false);
+  }, []);
+
+  const completeLegacyOrgMigration = useCallback(async (migratedOrgIds: string[]) => {
+    const idSet = new Set(migratedOrgIds);
+    const currentStored = await loadOrgWorkspaces();
+    const remainingMap: Record<string, OrgWorkspaceData> = {};
+    for (const [k, ws] of Object.entries(currentStored.workspaces || {})) {
+      if (!idSet.has(k) && !idSet.has(ws?.organization?.id)) {
+        remainingMap[k] = ws;
+      }
+    }
+    await saveOrgWorkspaces('personal', remainingMap);
+    setLegacyLocalOrgs((prev) => {
+      const next = prev.filter((item) => !idSet.has(item.organization.id));
+      if (next.length === 0) {
+        setIsOrgMigrationModalOpen(false);
+      }
+      return next;
+    });
+  }, []);
+
+  const queueLegacyOrgsForMigration = useCallback((workspaces: Record<string, OrgWorkspaceData>) => {
+    const list = Object.values(workspaces || {}).filter(
+      (w): w is OrgWorkspaceData => Boolean(w && w.organization && w.organization.id)
+    );
+    if (list.length === 0) return;
+    void saveOrgWorkspaces('personal', workspaces);
+    setLegacyLocalOrgs(list);
+    setIsOrgMigrationModalOpen(true);
+  }, []);
 
   const createOrganization = useCallback(
-    (params: {
+    async (params: {
       name: string;
       currency: string;
       industry?: OrganizationIndustry;
@@ -1606,203 +2042,38 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       taxNumber?: string;
       approvalThreshold?: number;
       loadSampleData?: boolean;
-    }): Organization => {
-      const now = Date.now();
-      const orgId = `org-${now}-${Math.random().toString(36).slice(2, 6)}`;
-      const inviteCode = `RS-${Math.random().toString(36).slice(2, 6).toUpperCase()}-${Math.floor(
-        100 + Math.random() * 899
-      )}`;
-      const ownerUid = user?.id || 'local-owner';
-      const industry: OrganizationIndustry = params.industry || 'general';
-      const org: Organization = {
-        id: orgId,
+    }): Promise<Organization> => {
+      if (!auth.currentUser || !user?.isLoggedIn) {
+        throw new Error(
+          settings.language === 'en'
+            ? 'Please sign in with Google first to create a Cloud Organization.'
+            : 'يرجى تسجيل الدخول بحساب جوجل أولاً لإنشاء مؤسسة سحابية.'
+        );
+      }
+
+      const res = await createOrgOnServer({
         name: params.name.trim() || (settings.language === 'en' ? 'My Company' : 'شركتي'),
         currency: params.currency || settings.mainCurrency,
-        mainCurrency: params.currency || settings.mainCurrency,
-        industry,
+        industry: params.industry || 'general',
         vatRate: params.vatRate ?? 14,
-        taxNumber: params.taxNumber?.trim() || undefined,
         approvalThreshold: params.approvalThreshold ?? 2000,
-        inviteCode,
-        ownerUid,
-        ownerId: ownerUid,
-        extraSeats: 0,
-        createdAt: now,
-        updatedAt: now,
-      };
+        taxNumber: params.taxNumber?.trim() || undefined,
+        loadSampleData: Boolean(params.loadSampleData),
+      });
 
-      const ownerMember: OrganizationMember = {
-        uid: ownerUid,
-        email: user?.email || 'owner@company.local',
-        displayName: user?.name || (settings.language === 'en' ? 'Owner' : 'المالك'),
-        role: 'owner',
-        department: settings.language === 'en' ? 'Management' : 'الإدارة العامة',
-        status: 'active',
-        joinedAt: now,
-      };
-
-      const starterWallets: Wallet[] = [
-        {
-          id: `org-w-bank-${now}`,
-          name: settings.language === 'en' ? 'Company Bank Account' : 'حساب البنك التجاري',
-          currency: org.currency,
-          initialBalance: params.loadSampleData ? 250000 : 0,
-          balance: params.loadSampleData ? 250000 : 0,
-          color: '#1E6F73',
-          icon: 'Landmark',
-          isArchived: false,
-          order: 1,
-          walletType: 'bank_account',
-        },
-        {
-          id: `org-w-petty-${now}`,
-          name: settings.language === 'en' ? 'Petty Cash Treasury' : 'خزينة النثرية (عُهدة)',
-          currency: org.currency,
-          initialBalance: params.loadSampleData ? 15000 : 0,
-          balance: params.loadSampleData ? 15000 : 0,
-          color: '#3A605B',
-          icon: 'Wallet',
-          isArchived: false,
-          order: 2,
-          walletType: 'petty_cash',
-          custodianMemberUid: ownerUid,
-        },
-      ];
-
-      const starterCostCenters: CostCenter[] = createStarterCostCentersForIndustry(
-        orgId,
-        industry,
-        params.loadSampleData,
-        now
-      );
-
-      const todayStr = formatLocalDate(new Date());
-      const starterParties: BusinessParty[] = params.loadSampleData
-        ? [
-            {
-              id: `party-vendor-${now}`,
-              orgId,
-              type: 'vendor',
-              name: 'شركة التوريدات الحديثة',
-              currency: org.currency,
-              balance: 18500,
-              dueDate: todayStr,
-              notes: 'فاتورة توريد أجهزة ومعدات',
-              createdAt: now,
-            },
-            {
-              id: `party-client-${now}`,
-              orgId,
-              type: 'client',
-              name: 'مجموعة الأفق التجارية',
-              currency: org.currency,
-              balance: 42000,
-              dueDate: todayStr,
-              notes: 'مستحقات عقد استشارات Q4',
-              createdAt: now,
-            },
-          ]
-        : [];
-
-      const starterTx: Transaction[] = params.loadSampleData
-        ? [
-            {
-              id: `org-tx-1-${now}`,
-              workspaceId: orgId,
-              type: 'income',
-              amount: 85500,
-              taxAmount: 10500,
-              taxRate: org.vatRate,
-              isTaxInclusive: true,
-              currency: org.currency,
-              date: todayStr,
-              time: '10:30',
-              categoryId: 'org-cat-sales',
-              walletId: starterWallets[0].id,
-              costCenterId: starterCostCenters[1]?.id || starterCostCenters[0]?.id,
-              partyId: starterParties[1].id,
-              invoiceNumber: 'INV-2026-101',
-              voucherNumber: 'RV-0001',
-              notes: 'إيراد عقد توريد وتنفيذ شامل ضريبة القيمة المضافة',
-              priority: 'essential',
-              doesNotAffectBalance: false,
-              approvalStatus: 'approved',
-              submittedBy: ownerUid,
-              submittedByName: ownerMember.displayName,
-              createdAt: now - 30000,
-              updatedAt: now - 30000,
-            },
-            {
-              id: `org-tx-2-${now}`,
-              workspaceId: orgId,
-              type: 'expense',
-              amount: 11400,
-              taxAmount: 1400,
-              taxRate: org.vatRate,
-              isTaxInclusive: true,
-              currency: org.currency,
-              date: todayStr,
-              time: '12:15',
-              categoryId: 'org-cat-suppliers',
-              walletId: starterWallets[0].id,
-              costCenterId: starterCostCenters[0]?.id,
-              partyId: starterParties[0].id,
-              invoiceNumber: 'BILL-882',
-              voucherNumber: 'PV-0001',
-              notes: 'مستلزمات مكتبية ومعدات تشغيل',
-              priority: 'essential',
-              doesNotAffectBalance: false,
-              approvalStatus: 'pending_approval',
-              isReimbursement: true,
-              submittedBy: 'emp-sample',
-              submittedByName: 'كريم أحمد (موظف)',
-              createdAt: now - 10000,
-              updatedAt: now - 10000,
-            },
-          ]
-        : [];
-
-      const workspaceData: OrgWorkspaceData = {
-        organization: org,
-        members: [ownerMember],
-        costCenters: starterCostCenters,
-        parties: starterParties,
-        wallets: starterWallets,
-        categories: createStarterOrgCategories(industry),
-        transactions: starterTx,
-        budgets: [],
-        debts: [],
-        goals: [],
-        templates: [],
-        auditLogs: [
-          {
-            id: `audit-init-${now}`,
-            orgId,
-            action: 'create',
-            entityType: 'organization',
-            entityId: orgId,
-            actorUid: ownerUid,
-            actorName: ownerMember.displayName,
-            summary: `Created organization "${org.name}" (${industry})`,
-            timestamp: now,
-          },
-        ],
-      };
-
-      const nextMap = { ...latestOrgRef.current.orgWorkspaces, [orgId]: workspaceData };
-      setOrgWorkspaces(nextMap);
-      setActiveWorkspace(orgId);
+      setActiveWorkspace(res.orgId);
+      saveActiveWorkspacePref(res.orgId);
       setHasCompletedOnboarding(true);
-      void saveOrgWorkspaces(orgId, nextMap);
       savePersonalState({ hasCompletedOnboarding: true });
-      void syncOrganizationMetaToCloud(workspaceData);
-      return org;
+      return res.organization;
     },
-    [user?.id, user?.email, user?.name, settings.language, settings.mainCurrency, savePersonalState]
+    [user?.isLoggedIn, settings.language, settings.mainCurrency, savePersonalState]
   );
 
   const joinOrganizationByCode = useCallback(
-    (inviteCode: string): { ok: boolean; orgName?: string; error?: string } => {
+    async (
+      inviteCode: string
+    ): Promise<{ ok: boolean; orgId?: string; orgName?: string; error?: string }> => {
       const normalized = inviteCode.trim().toUpperCase();
       if (!normalized) {
         return {
@@ -1810,367 +2081,369 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           error: settings.language === 'en' ? 'Enter a valid invite code' : 'أدخل رمز دعوة صحيح',
         };
       }
-
-      const foundEntry = Object.entries(latestOrgRef.current.orgWorkspaces).find(
-        ([, ws]) => ws.organization.inviteCode.toUpperCase() === normalized
-      );
-
-      if (!foundEntry) {
+      if (!auth.currentUser || !user?.isLoggedIn) {
         return {
           ok: false,
           error:
             settings.language === 'en'
-              ? 'No organization matched that invite code on this device.'
-              : 'لم يتم العثور على شركة مطابقة لرمز الدعوة هذا على الجهاز.',
+              ? 'Please sign in with Google first to join an organization.'
+              : 'يرجى تسجيل الدخول بحساب جوجل أولاً للانضمام إلى المؤسسة.',
         };
       }
 
-      const [orgId, ws] = foundEntry;
-      const uid = user?.id || 'local-member';
-      const exists = ws.members.some((m) => m.uid === uid);
-      if (!exists) {
-        const nextWs: OrgWorkspaceData = {
-          ...ws,
-          members: [
-            ...ws.members,
-            {
-              uid,
-              email: user?.email || 'member@company.local',
-              displayName: user?.name || 'Team Member',
-              role: 'employee',
-              status: 'active',
-              joinedAt: Date.now(),
-            },
-          ],
+      try {
+        const res = await joinOrgByInviteCode(normalized);
+        setActiveWorkspace(res.orgId);
+        saveActiveWorkspacePref(res.orgId);
+        setHasCompletedOnboarding(true);
+        savePersonalState({ hasCompletedOnboarding: true });
+        return { ok: true, orgId: res.orgId, orgName: res.orgName };
+      } catch (err) {
+        return {
+          ok: false,
+          error:
+            err instanceof Error
+              ? err.message
+              : settings.language === 'en'
+              ? 'Could not join organization.'
+              : 'تعذر الانضمام إلى المؤسسة.',
         };
-        const nextMap = { ...latestOrgRef.current.orgWorkspaces, [orgId]: nextWs };
-        setOrgWorkspaces(nextMap);
-        void saveOrgWorkspaces(orgId, nextMap);
       }
-      setActiveWorkspace(orgId);
-      return { ok: true, orgName: ws.organization.name };
     },
-    [user?.id, user?.email, user?.name, settings.language]
+    [user?.isLoggedIn, settings.language, savePersonalState]
   );
+
+  const loadMoreOrgTransactions = useCallback(async () => {
+    if (!isOrgWorkspace || !activeOrganization || !orgTxLastCursor || !orgHasMoreTx) return;
+    try {
+      const res = await fetchMoreOrgTransactionsCloud(activeOrganization.id, orgTxLastCursor, 200);
+      if (res.active.length > 0) {
+        setExtraOrgTransactions((prev) => [...prev, ...res.active]);
+      }
+      if (res.trash.length > 0) {
+        setExtraOrgTrashTransactions((prev) => [...prev, ...res.trash]);
+      }
+      setOrgTxLastCursor(res.lastCursor);
+      setOrgHasMoreTx(res.hasMore);
+    } catch (err) {
+      setOrgActionError(err instanceof Error ? err.message : 'Failed to load more transactions');
+    }
+  }, [isOrgWorkspace, activeOrganization, orgTxLastCursor, orgHasMoreTx]);
 
   const updateOrganizationSettings = useCallback(
     (updates: Partial<Organization>) => {
-      if (!isOrgWorkspace || !canOrgManage) return;
-      updateActiveOrgWorkspace((org) => {
-        const updatedOrg = { ...org.organization, ...updates, updatedAt: Date.now() };
-        const log = createAuditEntry(
-          org.organization.id,
-          'update',
-          'organization',
-          org.organization.id,
-          'Updated organization settings',
-          org.organization,
-          updatedOrg
-        );
-        const nextWs = {
-          ...org,
-          organization: updatedOrg,
-          auditLogs: [log, ...org.auditLogs],
-        };
-        void syncOrganizationMetaToCloud(nextWs);
-        return nextWs;
-      });
+      if (!isOrgWorkspace || !activeOrganization || !canOrgManage) return;
+      void updateOrgSettingsCloud(
+        activeOrganization.id,
+        activeOrganization,
+        updates,
+        getOrgActor()
+      ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Update failed'));
     },
-    [isOrgWorkspace, canOrgManage, updateActiveOrgWorkspace, createAuditEntry]
+    [isOrgWorkspace, activeOrganization, canOrgManage, getOrgActor]
   );
 
   const lockAccountingPeriod = useCallback(
     (lockedUntilDate: string | undefined) => {
-      if (!isOrgWorkspace || !canOrgManage) return;
-      updateActiveOrgWorkspace((org) => {
-        const updatedOrg = { ...org.organization, lockedUntilDate, updatedAt: Date.now() };
-        const log = createAuditEntry(
-          org.organization.id,
-          'lock_period',
-          'organization',
-          org.organization.id,
-          lockedUntilDate
-            ? `Locked accounting period through ${lockedUntilDate}`
-            : 'Unlocked accounting period',
-          org.organization.lockedUntilDate,
-          lockedUntilDate
-        );
-        return {
-          ...org,
-          organization: updatedOrg,
-          auditLogs: [log, ...org.auditLogs],
-        };
-      });
+      if (!isOrgWorkspace || !activeOrganization || !canOrgManage) return;
+      void updateOrgSettingsCloud(
+        activeOrganization.id,
+        activeOrganization,
+        { lockedUntilDate: lockedUntilDate || undefined },
+        getOrgActor()
+      ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Lock failed'));
     },
-    [isOrgWorkspace, canOrgManage, updateActiveOrgWorkspace, createAuditEntry]
+    [isOrgWorkspace, activeOrganization, canOrgManage, getOrgActor]
   );
 
   const approveOrgTransaction = useCallback(
     (txId: string) => {
-      if (!isOrgWorkspace || !canOrgApprove) return;
-      updateActiveOrgWorkspace((org) => {
-        const target = org.transactions.find((t) => t.id === txId);
-        if (!target || target.approvalStatus === 'approved') return org;
-
-        const approvedTx: Transaction = {
-          ...target,
-          approvalStatus: 'approved',
-          reviewedBy: user?.name || user?.id || 'Reviewer',
-          reviewedAt: Date.now(),
-          rejectionReason: undefined,
-          updatedAt: Date.now(),
-        };
-
-        const { sourceDelta, destDelta } = getTransactionWalletDeltas(approvedTx);
-        const updatedWallets = org.wallets.map((w) => {
-          if (w.id === approvedTx.walletId && sourceDelta !== 0) {
-            const deltaInWallet = convertCurrency(
-              sourceDelta,
-              approvedTx.currency,
-              w.currency,
-              settings.customExchangeRates
-            );
-            return { ...w, balance: roundCurrency(w.balance + deltaInWallet, w.currency) };
-          }
-          if (approvedTx.toWalletId && w.id === approvedTx.toWalletId && destDelta !== 0) {
-            return { ...w, balance: roundCurrency(w.balance + destDelta, w.currency) };
-          }
-          return w;
-        });
-
-        const log = createAuditEntry(
-          org.organization.id,
-          'approve',
-          'transaction',
-          txId,
-          `Approved ${approvedTx.type} ${approvedTx.amount} ${approvedTx.currency}`,
-          target,
-          approvedTx
-        );
-
-        return {
-          ...org,
-          transactions: org.transactions.map((t) => (t.id === txId ? approvedTx : t)),
-          wallets: updatedWallets,
-          auditLogs: [log, ...org.auditLogs],
-        };
-      });
+      if (!isOrgWorkspace || !activeOrganization || !canOrgApprove) return;
+      const target = orgTransactions.find((tx) => tx.id === txId);
+      if (!target || normalizeApprovalStatus(target.approvalStatus) === 'approved') return;
+      void approveOrRejectOrMarkPaidOrgTxCloud(
+        activeOrganization.id,
+        target,
+        'approved',
+        activeCloudWallets,
+        settings.customExchangeRates,
+        getOrgActor()
+      ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Approval failed'));
     },
     [
       isOrgWorkspace,
+      activeOrganization,
       canOrgApprove,
-      updateActiveOrgWorkspace,
-      user?.name,
-      user?.id,
+      orgTransactions,
+      activeCloudWallets,
       settings.customExchangeRates,
-      createAuditEntry,
+      getOrgActor,
     ]
   );
 
   const rejectOrgTransaction = useCallback(
     (txId: string, reason: string) => {
-      if (!isOrgWorkspace || !canOrgApprove) return;
-      updateActiveOrgWorkspace((org) => {
-        const target = org.transactions.find((t) => t.id === txId);
-        if (!target) return org;
-
-        // If previously approved, reverse treasury balance impact
-        let updatedWallets = org.wallets;
-        const oldDeltas = getTransactionWalletDeltas(target);
-        if (oldDeltas.sourceDelta !== 0 || oldDeltas.destDelta !== 0) {
-          updatedWallets = org.wallets.map((w) => {
-            if (w.id === target.walletId && oldDeltas.sourceDelta !== 0) {
-              const deltaInWallet = convertCurrency(
-                oldDeltas.sourceDelta,
-                target.currency,
-                w.currency,
-                settings.customExchangeRates
-              );
-              return { ...w, balance: roundCurrency(w.balance - deltaInWallet, w.currency) };
-            }
-            if (target.toWalletId && w.id === target.toWalletId && oldDeltas.destDelta !== 0) {
-              return { ...w, balance: roundCurrency(w.balance - oldDeltas.destDelta, w.currency) };
-            }
-            return w;
-          });
-        }
-
-        const rejectedTx: Transaction = {
-          ...target,
-          approvalStatus: 'rejected',
-          reviewedBy: user?.name || user?.id || 'Reviewer',
-          reviewedAt: Date.now(),
-          rejectionReason: reason.trim() || 'Rejected',
-          updatedAt: Date.now(),
-        };
-
-        const log = createAuditEntry(
-          org.organization.id,
-          'reject',
-          'transaction',
-          txId,
-          `Rejected transaction: ${rejectedTx.rejectionReason}`,
-          target,
-          rejectedTx
-        );
-
-        return {
-          ...org,
-          transactions: org.transactions.map((t) => (t.id === txId ? rejectedTx : t)),
-          wallets: updatedWallets,
-          auditLogs: [log, ...org.auditLogs],
-        };
-      });
+      if (!isOrgWorkspace || !activeOrganization || !canOrgApprove) return;
+      const target = orgTransactions.find((tx) => tx.id === txId);
+      if (!target) return;
+      void approveOrRejectOrMarkPaidOrgTxCloud(
+        activeOrganization.id,
+        target,
+        'rejected',
+        activeCloudWallets,
+        settings.customExchangeRates,
+        getOrgActor(),
+        reason.trim() || 'Rejected'
+      ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Rejection failed'));
     },
     [
       isOrgWorkspace,
+      activeOrganization,
       canOrgApprove,
-      updateActiveOrgWorkspace,
+      orgTransactions,
+      activeCloudWallets,
       settings.customExchangeRates,
-      user?.name,
-      user?.id,
-      createAuditEntry,
+      getOrgActor,
     ]
+  );
+
+  const markOrgTransactionPaid = useCallback(
+    (txId: string) => {
+      if (!isOrgWorkspace || !activeOrganization || !canOrgApprove) return;
+      const target = orgTransactions.find((tx) => tx.id === txId);
+      if (!target || normalizeApprovalStatus(target.approvalStatus) === 'paid') return;
+      void approveOrRejectOrMarkPaidOrgTxCloud(
+        activeOrganization.id,
+        target,
+        'paid',
+        activeCloudWallets,
+        settings.customExchangeRates,
+        getOrgActor()
+      ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Mark paid failed'));
+    },
+    [
+      isOrgWorkspace,
+      activeOrganization,
+      canOrgApprove,
+      orgTransactions,
+      activeCloudWallets,
+      settings.customExchangeRates,
+      getOrgActor,
+    ]
+  );
+
+  const restoreOrgTransaction = useCallback(
+    (txId: string) => {
+      if (!isOrgWorkspace || !activeOrganization || !canOrgWrite) return;
+      const target = orgTrashTransactions.find((tx) => tx.id === txId);
+      if (!target) return;
+      void restoreOrgTransactionCloud(
+        activeOrganization.id,
+        target,
+        activeCloudWallets,
+        settings.customExchangeRates,
+        getOrgActor()
+      ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Restore failed'));
+    },
+    [
+      isOrgWorkspace,
+      activeOrganization,
+      canOrgWrite,
+      orgTrashTransactions,
+      activeCloudWallets,
+      settings.customExchangeRates,
+      getOrgActor,
+    ]
+  );
+
+  const recalculateOrgBalances = useCallback(async () => {
+    if (!isOrgWorkspace || !activeOrganization || !canOrgManage) return;
+    await recalculateOrgBalancesFromApproved(
+      activeOrganization.id,
+      activeCloudWallets,
+      orgTransactions,
+      settings.customExchangeRates,
+      getOrgActor()
+    );
+  }, [
+    isOrgWorkspace,
+    activeOrganization,
+    canOrgManage,
+    activeCloudWallets,
+    orgTransactions,
+    settings.customExchangeRates,
+    getOrgActor,
+  ]);
+
+  const attachOrgReceiptPaths = useCallback(
+    async (txId: string, attachmentPaths: string[], fallbackTx?: Transaction) => {
+      if (!isOrgWorkspace || !activeOrganization) return;
+      const target =
+        orgTransactions.find((tx) => tx.id === txId) || fallbackTx;
+      if (!target) return;
+      await updateOrgTxAttachmentPathsCloud(
+        activeOrganization.id,
+        target,
+        attachmentPaths
+      );
+    },
+    [isOrgWorkspace, activeOrganization, orgTransactions]
   );
 
   const addCostCenter = useCallback(
     (data: Omit<CostCenter, 'id' | 'orgId' | 'createdAt'>): CostCenter | null => {
-      if (!isOrgWorkspace || !canOrgApprove) return null;
-      const orgId = activeOrganization!.id;
+      if (!isOrgWorkspace || !activeOrganization || !canOrgApprove) return null;
       const newCC: CostCenter = {
         ...data,
         id: `cc-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
-        orgId,
+        orgId: activeOrganization.id,
         createdAt: Date.now(),
       };
-      updateActiveOrgWorkspace((org) => ({
-        ...org,
-        costCenters: [newCC, ...org.costCenters],
-        auditLogs: [
-          createAuditEntry(orgId, 'create', 'cost_center', newCC.id, `Created cost center ${newCC.code}`),
-          ...org.auditLogs,
-        ],
-      }));
+      void upsertOrgCostCenterCloud(
+        activeOrganization.id,
+        newCC,
+        activeOrganization.currency,
+        true,
+        getOrgActor()
+      ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Cost center create failed'));
       return newCC;
     },
-    [isOrgWorkspace, canOrgApprove, activeOrganization, updateActiveOrgWorkspace, createAuditEntry]
+    [isOrgWorkspace, activeOrganization, canOrgApprove, getOrgActor]
   );
 
   const updateCostCenter = useCallback(
     (id: string, updates: Partial<CostCenter>) => {
-      if (!isOrgWorkspace || !canOrgApprove) return;
-      updateActiveOrgWorkspace((org) => ({
-        ...org,
-        costCenters: org.costCenters.map((cc) => (cc.id === id ? { ...cc, ...updates } : cc)),
-      }));
+      if (!isOrgWorkspace || !activeOrganization || !canOrgApprove) return;
+      const existing = activeCloudCostCenters.find((c) => c.id === id);
+      if (!existing) return;
+      void upsertOrgCostCenterCloud(
+        activeOrganization.id,
+        { ...existing, ...updates },
+        activeOrganization.currency,
+        false,
+        getOrgActor()
+      ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Cost center update failed'));
     },
-    [isOrgWorkspace, canOrgApprove, updateActiveOrgWorkspace]
+    [isOrgWorkspace, activeOrganization, canOrgApprove, activeCloudCostCenters, getOrgActor]
   );
 
   const deleteCostCenter = useCallback(
     (id: string) => {
-      if (!isOrgWorkspace || !canOrgManage) return;
-      updateActiveOrgWorkspace((org) => ({
-        ...org,
-        costCenters: org.costCenters.filter((cc) => cc.id !== id),
-        transactions: org.transactions.map((tx) =>
-          tx.costCenterId === id ? { ...tx, costCenterId: undefined } : tx
-        ),
-        auditLogs: [
-          createAuditEntry(org.organization.id, 'delete', 'cost_center', id, `Deleted cost center ${id}`),
-          ...org.auditLogs,
-        ],
-      }));
+      if (!isOrgWorkspace || !activeOrganization || !canOrgManage) return;
+      void deleteOrgCostCenterCloud(activeOrganization.id, id, getOrgActor()).catch((err) =>
+        setOrgActionError(err instanceof Error ? err.message : 'Cost center delete failed')
+      );
     },
-    [isOrgWorkspace, canOrgManage, updateActiveOrgWorkspace, createAuditEntry]
+    [isOrgWorkspace, activeOrganization, canOrgManage, getOrgActor]
   );
 
   const addBusinessParty = useCallback(
     (data: Omit<BusinessParty, 'id' | 'orgId' | 'createdAt'>): BusinessParty | null => {
-      if (!isOrgWorkspace || !canOrgApprove) return null;
-      const orgId = activeOrganization!.id;
+      if (!isOrgWorkspace || !activeOrganization || !canOrgApprove) return null;
       const newParty: BusinessParty = {
         ...data,
         id: `party-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
-        orgId,
+        orgId: activeOrganization.id,
         createdAt: Date.now(),
       };
-      updateActiveOrgWorkspace((org) => ({
-        ...org,
-        parties: [newParty, ...org.parties],
-        auditLogs: [
-          createAuditEntry(orgId, 'create', 'party', newParty.id, `Created ${newParty.type} "${newParty.name}"`),
-          ...org.auditLogs,
-        ],
-      }));
+      void upsertOrgPartyCloud(activeOrganization.id, newParty, true, getOrgActor()).catch((err) =>
+        setOrgActionError(err instanceof Error ? err.message : 'Party create failed')
+      );
       return newParty;
     },
-    [isOrgWorkspace, canOrgApprove, activeOrganization, updateActiveOrgWorkspace, createAuditEntry]
+    [isOrgWorkspace, activeOrganization, canOrgApprove, getOrgActor]
   );
 
   const updateBusinessParty = useCallback(
     (id: string, updates: Partial<BusinessParty>) => {
-      if (!isOrgWorkspace || !canOrgApprove) return;
-      updateActiveOrgWorkspace((org) => ({
-        ...org,
-        parties: org.parties.map((p) => (p.id === id ? { ...p, ...updates } : p)),
-      }));
+      if (!isOrgWorkspace || !activeOrganization || !canOrgApprove) return;
+      const existing = activeCloudParties.find((p) => p.id === id);
+      if (!existing) return;
+      void upsertOrgPartyCloud(
+        activeOrganization.id,
+        { ...existing, ...updates },
+        false,
+        getOrgActor()
+      ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Party update failed'));
     },
-    [isOrgWorkspace, canOrgApprove, updateActiveOrgWorkspace]
+    [isOrgWorkspace, activeOrganization, canOrgApprove, activeCloudParties, getOrgActor]
   );
 
   const deleteBusinessParty = useCallback(
     (id: string) => {
-      if (!isOrgWorkspace || !canOrgManage) return;
-      updateActiveOrgWorkspace((org) => ({
-        ...org,
-        parties: org.parties.filter((p) => p.id !== id),
-        transactions: org.transactions.map((tx) =>
-          tx.partyId === id ? { ...tx, partyId: undefined } : tx
-        ),
-      }));
+      if (!isOrgWorkspace || !activeOrganization || !canOrgManage) return;
+      void deleteOrgPartyCloud(activeOrganization.id, id, getOrgActor()).catch((err) =>
+        setOrgActionError(err instanceof Error ? err.message : 'Party delete failed')
+      );
     },
-    [isOrgWorkspace, canOrgManage, updateActiveOrgWorkspace]
+    [isOrgWorkspace, activeOrganization, canOrgManage, getOrgActor]
   );
 
-  const addOrUpdateOrgMember = useCallback(
-    (member: Omit<OrganizationMember, 'joinedAt'>) => {
-      if (!isOrgWorkspace || !canOrgManage) return;
-      updateActiveOrgWorkspace((org) => {
-        const exists = org.members.find((m) => m.uid === member.uid);
-        const updatedMembers = exists
-          ? org.members.map((m) => (m.uid === member.uid ? { ...m, ...member } : m))
-          : [...org.members, { ...member, joinedAt: Date.now() }];
-        const log = createAuditEntry(
-          org.organization.id,
-          'role_change',
-          'member',
-          member.uid,
-          `Member "${member.displayName}" role -> ${member.role}`
-        );
-        return {
-          ...org,
-          members: updatedMembers,
-          auditLogs: [log, ...org.auditLogs],
-        };
+  const createOrgInvite = useCallback(
+    async (
+      role: Exclude<OrganizationRole, 'owner'>,
+      expiresInDays = 7,
+      maxUses = 5
+    ): Promise<{ invite: OrganizationInvite; code: string }> => {
+      if (!isOrgWorkspace || !activeOrganization) {
+        throw new Error('NO_ACTIVE_ORG');
+      }
+      return createOrgInviteOnServer(activeOrganization.id, role, expiresInDays, maxUses);
+    },
+    [isOrgWorkspace, activeOrganization]
+  );
+
+  const listOrgInvites = useCallback(async (): Promise<OrganizationInvite[]> => {
+    if (!isOrgWorkspace || !activeOrganization || !canRoleManageOrg(activeOrgRole)) return [];
+    return fetchOrgInvitesFromServer(activeOrganization.id);
+  }, [isOrgWorkspace, activeOrganization, activeOrgRole]);
+
+  const revokeOrgInvite = useCallback(
+    async (inviteId: string) => {
+      if (!isOrgWorkspace || !activeOrganization) return;
+      await revokeOrgInviteOnServer(activeOrganization.id, inviteId);
+    },
+    [isOrgWorkspace, activeOrganization]
+  );
+
+  const manageOrgMember = useCallback(
+    async (params: {
+      targetUid: string;
+      action: 'change_role' | 'suspend' | 'reactivate' | 'remove' | 'set_spending_limit';
+      role?: Exclude<OrganizationRole, 'owner'>;
+      spendingLimit?: number | null;
+      department?: string;
+    }) => {
+      if (!isOrgWorkspace || !activeOrganization) return;
+      await manageOrgMemberOnServer({
+        orgId: activeOrganization.id,
+        ...params,
       });
     },
-    [isOrgWorkspace, canOrgManage, updateActiveOrgWorkspace, createAuditEntry]
+    [isOrgWorkspace, activeOrganization]
   );
 
-  const removeOrgMember = useCallback(
-    (uid: string) => {
-      if (!isOrgWorkspace || !canOrgManage) return;
-      updateActiveOrgWorkspace((org) => ({
-        ...org,
-        members: org.members.filter((m) => m.uid !== uid || m.role === 'owner'),
-      }));
+  const transferOrgOwnership = useCallback(
+    async (newOwnerUid: string) => {
+      if (!isOrgWorkspace || !activeOrganization) return;
+      await transferOrgOwnershipOnServer(activeOrganization.id, newOwnerUid);
     },
-    [isOrgWorkspace, canOrgManage, updateActiveOrgWorkspace]
+    [isOrgWorkspace, activeOrganization]
+  );
+
+  const deleteOrganization = useCallback(
+    async (confirmName: string) => {
+      if (!isOrgWorkspace || !activeOrganization) return;
+      await deleteOrgOnServer(activeOrganization.id, confirmName);
+      setActiveWorkspace('personal');
+      saveActiveWorkspacePref('personal');
+      setIsOrgHubOpen(false);
+    },
+    [isOrgWorkspace, activeOrganization]
   );
 
   // ===========================================================================
-  // Unified CRUD: Transactions (respecting Personal vs Organization invariants)
+  // Unified CRUD: Transactions (respecting Personal vs Cloud Organization)
   // ===========================================================================
   const applyDeltasToWallets = useCallback(
     (walletList: Wallet[], tx: Transaction, multiplier: 1 | -1): Wallet[] => {
@@ -2199,9 +2472,23 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const addTransaction = useCallback(
     (data: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>): Transaction => {
       const now = Date.now();
-      let approvalStatus = data.approvalStatus;
+      let approvalStatus = normalizeApprovalStatus(data.approvalStatus);
 
       if (isOrgWorkspace && activeOrganization) {
+        if (isOrgReadOnly) {
+          throw new Error(
+            settings.language === 'en'
+              ? 'Organization subscription expired (Read-Only mode). Renew Business PRO to continue.'
+              : 'انتهت صلاحية باقة المؤسسة (وضع القراءة فقط). قم بتجديد الباقة للمتابعة.'
+          );
+        }
+        if (activeOrgMemberStatus === 'suspended' || !canOrgWrite) {
+          throw new Error(
+            settings.language === 'en'
+              ? 'Your role or status does not allow adding transactions.'
+              : 'صلاحيتك الحالية لا تسمح بإضافة معاملات جديدة.'
+          );
+        }
         if (isDateInLockedPeriod(data.date, activeOrganization.lockedUntilDate)) {
           throw new Error(
             settings.language === 'en'
@@ -2209,6 +2496,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               : `الفترة المحاسبية مغلقة حتى تاريخ ${activeOrganization.lockedUntilDate}`
           );
         }
+        if (
+          activeOrgRole === 'employee' &&
+          activeOrgMember?.spendingLimit &&
+          activeOrgMember.spendingLimit > 0
+        ) {
+          const convertedAmt = convertCurrency(
+            data.amount,
+            data.currency,
+            activeOrganization.currency,
+            settings.customExchangeRates
+          );
+          if (convertedAmt > activeOrgMember.spendingLimit) {
+            throw new Error(
+              settings.language === 'en'
+                ? `Amount exceeds your spending limit (${activeOrgMember.spendingLimit} ${activeOrganization.currency})`
+                : `المبلغ يتجاوز سقف الصرف المحدد لك (${activeOrgMember.spendingLimit} ${activeOrganization.currency})`
+            );
+          }
+        }
+
         const needsApproval =
           activeOrgRole === 'employee' ||
           data.isReimbursement ||
@@ -2220,8 +2527,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               activeOrganization.currency,
               settings.customExchangeRates
             ) > activeOrganization.approvalThreshold);
-        if (!approvalStatus) {
-          approvalStatus = needsApproval ? 'pending_approval' : 'approved';
+
+        if (activeOrgRole === 'employee') {
+          approvalStatus = approvalStatus === 'draft' ? 'draft' : 'pending';
+        } else if (!approvalStatus) {
+          approvalStatus = needsApproval ? 'pending' : 'approved';
         }
       }
 
@@ -2230,26 +2540,23 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           ? generateNextVoucherNumber(transactions, data.type)
           : data.voucherNumber?.trim() || undefined;
 
+      const actor = getOrgActor();
       const newTx: Transaction = {
         ...data,
-        ...(isOrgWorkspace
+        ...(isOrgWorkspace && activeOrganization
           ? {
-              workspaceId: activeWorkspace,
+              workspaceId: activeOrganization.id,
               approvalStatus: approvalStatus || 'approved',
               voucherNumber: autoVoucherNumber,
-              submittedBy: data.submittedBy || user?.id || 'local-owner',
-              submittedByName:
-                data.submittedByName ||
-                user?.name ||
-                (settings.language === 'en' ? 'Member' : 'عضو الفريق'),
+              submittedBy: data.submittedBy || actor.uid,
+              submittedByName: data.submittedByName || actor.name,
+              deletedAt: null,
             }
           : {}),
         id: `tx-${now}-${Math.random().toString(36).slice(2, 6)}`,
         createdAt: now,
         updatedAt: now,
       };
-
-      const updatedWallets = applyDeltasToWallets(wallets, newTx, 1);
 
       const nextSettings: AppSettings = {
         ...settings,
@@ -2258,26 +2565,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       };
       setSettings(nextSettings);
 
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({
-          ...org,
-          transactions: [newTx, ...org.transactions],
-          wallets: updatedWallets,
-          auditLogs: [
-            createAuditEntry(
-              org.organization.id,
-              'create',
-              'transaction',
-              newTx.id,
-              `Added ${newTx.type} ${newTx.amount} ${newTx.currency} (${newTx.approvalStatus})`,
-              undefined,
-              newTx
-            ),
-            ...org.auditLogs,
-          ],
-        }));
+      if (isOrgWorkspace && activeOrganization) {
+        void createOrgTransactionCloud(
+          activeOrganization.id,
+          newTx,
+          activeCloudWallets,
+          settings.customExchangeRates,
+          actor
+        ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Transaction create failed'));
         savePersonalState({ settings: nextSettings });
       } else {
+        const updatedWallets = applyDeltasToWallets(personalWallets, newTx, 1);
         const nextTx = [newTx, ...personalTransactions];
         setPersonalTransactions(nextTx);
         setPersonalWallets(updatedWallets);
@@ -2289,16 +2587,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     [
       isOrgWorkspace,
       activeOrganization,
+      isOrgReadOnly,
+      activeOrgMemberStatus,
+      canOrgWrite,
       activeOrgRole,
-      activeWorkspace,
+      activeOrgMember,
       transactions,
-      user?.id,
-      user?.name,
+      getOrgActor,
       settings,
-      wallets,
+      activeCloudWallets,
       applyDeltasToWallets,
-      updateActiveOrgWorkspace,
-      createAuditEntry,
+      personalWallets,
       personalTransactions,
       savePersonalState,
     ]
@@ -2309,12 +2608,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (items.length === 0) return 0;
 
       const baseNow = Date.now();
-      const newTxs: Transaction[] = items.map((data, idx) => ({
+      const actor = getOrgActor();
+      const filteredItems =
+        isOrgWorkspace && activeOrganization
+          ? items.filter((d) => !isDateInLockedPeriod(d.date, activeOrganization.lockedUntilDate))
+          : items;
+      if (filteredItems.length === 0) return 0;
+
+      const newTxs: Transaction[] = filteredItems.map((data, idx) => ({
         ...data,
-        ...(isOrgWorkspace
+        ...(isOrgWorkspace && activeOrganization
           ? {
-              workspaceId: activeWorkspace,
-              approvalStatus: data.approvalStatus || 'approved',
+              workspaceId: activeOrganization.id,
+              approvalStatus:
+                activeOrgRole === 'employee'
+                  ? 'pending'
+                  : normalizeApprovalStatus(data.approvalStatus) || 'approved',
+              submittedBy: data.submittedBy || actor.uid,
+              submittedByName: data.submittedByName || actor.name,
+              deletedAt: null,
             }
           : {}),
         id: `csv-${baseNow}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
@@ -2322,31 +2634,38 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         updatedAt: baseNow - idx,
       }));
 
-      let updatedWallets = [...wallets];
+      if (isOrgWorkspace && activeOrganization) {
+        if (!canOrgWrite) return 0;
+        void importOrgTransactionsBatchCloud(
+          activeOrganization.id,
+          newTxs,
+          activeCloudWallets,
+          settings.customExchangeRates,
+          actor
+        ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Batch import failed'));
+        return newTxs.length;
+      }
+
+      let updatedWallets = [...personalWallets];
       for (const tx of newTxs) {
         updatedWallets = applyDeltasToWallets(updatedWallets, tx, 1);
       }
-
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({
-          ...org,
-          transactions: [...newTxs, ...org.transactions],
-          wallets: updatedWallets,
-        }));
-      } else {
-        const nextTx = [...newTxs, ...personalTransactions];
-        setPersonalTransactions(nextTx);
-        setPersonalWallets(updatedWallets);
-        savePersonalState({ transactions: nextTx, wallets: updatedWallets });
-      }
+      const nextTx = [...newTxs, ...personalTransactions];
+      setPersonalTransactions(nextTx);
+      setPersonalWallets(updatedWallets);
+      savePersonalState({ transactions: nextTx, wallets: updatedWallets });
       return newTxs.length;
     },
     [
+      getOrgActor,
       isOrgWorkspace,
-      activeWorkspace,
-      wallets,
+      activeOrganization,
+      activeOrgRole,
+      canOrgWrite,
+      activeCloudWallets,
+      settings.customExchangeRates,
+      personalWallets,
       applyDeltasToWallets,
-      updateActiveOrgWorkspace,
       personalTransactions,
       savePersonalState,
     ]
@@ -2363,14 +2682,64 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           isDateInLockedPeriod(oldTx.date, activeOrganization.lockedUntilDate) ||
           (updates.date && isDateInLockedPeriod(updates.date, activeOrganization.lockedUntilDate))
         ) {
+          setOrgActionError(
+            settings.language === 'en'
+              ? `Period locked through ${activeOrganization.lockedUntilDate}`
+              : `الفترة المحاسبية مغلقة حتى ${activeOrganization.lockedUntilDate}`
+          );
           return;
         }
-        if (activeOrgRole === 'employee' && oldTx.approvalStatus === 'approved') {
+        const normOld = normalizeApprovalStatus(oldTx.approvalStatus);
+        if (activeOrgRole === 'employee' && (normOld === 'approved' || normOld === 'paid')) {
+          setOrgActionError(
+            settings.language === 'en'
+              ? 'Approved or paid transactions cannot be edited by an employee.'
+              : 'لا يمكن للموظف تعديل معاملة تم اعتمادها أو صرفها.'
+          );
           return;
         }
+        const nextAmount = updates.amount ?? oldTx.amount;
+        const nextCurrency = updates.currency ?? oldTx.currency;
+        if (
+          activeOrgRole === 'employee' &&
+          activeOrgMember?.spendingLimit &&
+          activeOrgMember.spendingLimit > 0
+        ) {
+          const converted = convertCurrency(
+            nextAmount,
+            nextCurrency,
+            activeOrganization.currency,
+            settings.customExchangeRates
+          );
+          if (converted > activeOrgMember.spendingLimit) {
+            setOrgActionError(
+              settings.language === 'en'
+                ? `Amount exceeds your spending limit (${activeOrgMember.spendingLimit} ${activeOrganization.currency})`
+                : `المبلغ يتجاوز سقف الصرف المحدد لك (${activeOrgMember.spendingLimit} ${activeOrganization.currency})`
+            );
+            return;
+          }
+        }
+
+        const mergedTx: Transaction = {
+          ...oldTx,
+          ...updates,
+          approvalStatus:
+            normalizeApprovalStatus(updates.approvalStatus ?? oldTx.approvalStatus) || 'approved',
+          updatedAt: Date.now(),
+        };
+        void updateOrgTransactionCloud(
+          activeOrganization.id,
+          oldTx,
+          mergedTx,
+          activeCloudWallets,
+          settings.customExchangeRates,
+          getOrgActor()
+        ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Update failed'));
+        return;
       }
 
-      let updatedWallets = applyDeltasToWallets(wallets, oldTx, -1);
+      let updatedWallets = applyDeltasToWallets(personalWallets, oldTx, -1);
       const mergedTx: Transaction = {
         ...oldTx,
         ...updates,
@@ -2378,30 +2747,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       };
       updatedWallets = applyDeltasToWallets(updatedWallets, mergedTx, 1);
 
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({
-          ...org,
-          transactions: org.transactions.map((t) => (t.id === id ? mergedTx : t)),
-          wallets: updatedWallets,
-          auditLogs: [
-            createAuditEntry(
-              org.organization.id,
-              'update',
-              'transaction',
-              id,
-              `Updated transaction ${mergedTx.amount} ${mergedTx.currency}`,
-              oldTx,
-              mergedTx
-            ),
-            ...org.auditLogs,
-          ],
-        }));
-      } else {
-        const nextTx = personalTransactions.map((t) => (t.id === id ? mergedTx : t));
-        setPersonalTransactions(nextTx);
-        setPersonalWallets(updatedWallets);
-        savePersonalState({ transactions: nextTx, wallets: updatedWallets });
-      }
+      const nextTx = personalTransactions.map((t) => (t.id === id ? mergedTx : t));
+      setPersonalTransactions(nextTx);
+      setPersonalWallets(updatedWallets);
+      savePersonalState({ transactions: nextTx, wallets: updatedWallets });
     },
     [
       transactions,
@@ -2409,10 +2758,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       activeOrganization,
       canOrgWrite,
       activeOrgRole,
-      wallets,
+      activeOrgMember,
+      settings.language,
+      settings.customExchangeRates,
+      activeCloudWallets,
+      getOrgActor,
       applyDeltasToWallets,
-      updateActiveOrgWorkspace,
-      createAuditEntry,
+      personalWallets,
       personalTransactions,
       savePersonalState,
     ]
@@ -2424,148 +2776,173 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (!oldTx) return;
 
       if (isOrgWorkspace && activeOrganization) {
-        if (!canOrgApprove && oldTx.approvalStatus === 'approved') return;
-        if (isDateInLockedPeriod(oldTx.date, activeOrganization.lockedUntilDate)) return;
-      }
-
-      const updatedWallets = applyDeltasToWallets(wallets, oldTx, -1);
-
-      if (isOrgWorkspace) {
-        const prevSnapshot = latestOrgRef.current.orgWorkspaces[activeWorkspace];
-        updateActiveOrgWorkspace((org) => ({
-          ...org,
-          transactions: org.transactions.filter((t) => t.id !== id),
-          wallets: updatedWallets,
-          auditLogs: [
-            createAuditEntry(
-              org.organization.id,
-              'delete',
-              'transaction',
-              id,
-              `Deleted ${oldTx.type} ${oldTx.amount} ${oldTx.currency}`,
-              oldTx,
-              undefined
-            ),
-            ...org.auditLogs,
-          ],
-        }));
-        if (prevSnapshot) {
-          setUndoAction({
-            id: `undo-${Date.now()}`,
-            message: t('transactionDeleted'),
-            action: () => {
-              updateActiveOrgWorkspace(() => prevSnapshot);
-            },
-          });
+        if (!canOrgWrite) return;
+        const normOld = normalizeApprovalStatus(oldTx.approvalStatus);
+        if (!canOrgApprove && (normOld === 'approved' || normOld === 'paid')) {
+          setOrgActionError(
+            settings.language === 'en'
+              ? 'Only accountants or admins can delete approved transactions.'
+              : 'لا يملك الموظف صلاحية حذف معاملة معتمدة.'
+          );
+          return;
         }
-      } else {
-        const prevTx = personalTransactions;
-        const prevWallets = personalWallets;
-        const nextTx = personalTransactions.filter((t) => t.id !== id);
-        setPersonalTransactions(nextTx);
-        setPersonalWallets(updatedWallets);
-        savePersonalState({ transactions: nextTx, wallets: updatedWallets });
+        if (isDateInLockedPeriod(oldTx.date, activeOrganization.lockedUntilDate)) {
+          setOrgActionError(
+            settings.language === 'en'
+              ? `Period locked through ${activeOrganization.lockedUntilDate}`
+              : `الفترة المحاسبية مغلقة حتى ${activeOrganization.lockedUntilDate}`
+          );
+          return;
+        }
 
-        setUndoAction({
-          id: `undo-${Date.now()}`,
-          message: t('transactionDeleted'),
-          action: () => {
-            setPersonalTransactions(prevTx);
-            setPersonalWallets(prevWallets);
-            savePersonalState({ transactions: prevTx, wallets: prevWallets });
-          },
-        });
+        const actor = getOrgActor();
+        const orgId = activeOrganization.id;
+        void softDeleteOrgTransactionCloud(
+          orgId,
+          oldTx,
+          activeCloudWallets,
+          settings.customExchangeRates,
+          actor
+        )
+          .then(() => {
+            setUndoAction({
+              id: `undo-${Date.now()}`,
+              message: t('transactionDeleted'),
+              action: () => {
+                void restoreOrgTransactionCloud(
+                  orgId,
+                  { ...oldTx, deletedAt: Date.now() },
+                  activeCloudWallets,
+                  settings.customExchangeRates,
+                  actor
+                ).catch((err) =>
+                  setOrgActionError(err instanceof Error ? err.message : 'Restore failed')
+                );
+              },
+            });
+          })
+          .catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Delete failed'));
+        return;
       }
+
+      const updatedWallets = applyDeltasToWallets(personalWallets, oldTx, -1);
+      const prevTx = personalTransactions;
+      const prevWallets = personalWallets;
+      const nextTx = personalTransactions.filter((t) => t.id !== id);
+      setPersonalTransactions(nextTx);
+      setPersonalWallets(updatedWallets);
+      savePersonalState({ transactions: nextTx, wallets: updatedWallets });
+
+      setUndoAction({
+        id: `undo-${Date.now()}`,
+        message: t('transactionDeleted'),
+        action: () => {
+          setPersonalTransactions(prevTx);
+          setPersonalWallets(prevWallets);
+          savePersonalState({ transactions: prevTx, wallets: prevWallets });
+        },
+      });
     },
     [
       transactions,
       isOrgWorkspace,
       activeOrganization,
+      canOrgWrite,
       canOrgApprove,
-      wallets,
+      settings.language,
+      settings.customExchangeRates,
+      getOrgActor,
+      activeCloudWallets,
       applyDeltasToWallets,
-      activeWorkspace,
-      updateActiveOrgWorkspace,
-      createAuditEntry,
-      t,
-      personalTransactions,
       personalWallets,
+      personalTransactions,
       savePersonalState,
+      t,
     ]
   );
 
   const deleteSelectedTransactions = useCallback(() => {
     if (selectedTransactionIds.length === 0) return;
 
-    const toDeleteSet = new Set(selectedTransactionIds);
-    let updatedWallets = [...wallets];
-
-    for (const id of selectedTransactionIds) {
-      const oldTx = transactions.find((t) => t.id === id);
-      if (!oldTx) continue;
-      if (
-        isOrgWorkspace &&
-        activeOrganization &&
-        isDateInLockedPeriod(oldTx.date, activeOrganization.lockedUntilDate)
-      ) {
-        toDeleteSet.delete(id);
-        continue;
+    if (isOrgWorkspace && activeOrganization) {
+      if (!canOrgWrite) {
+        setSelectedTransactionIds([]);
+        return;
       }
-      updatedWallets = applyDeltasToWallets(updatedWallets, oldTx, -1);
-    }
+      const actor = getOrgActor();
+      const orgId = activeOrganization.id;
+      const deletable = selectedTransactionIds
+        .map((id) => orgTransactions.find((tx) => tx.id === id))
+        .filter((tx): tx is Transaction => {
+          if (!tx) return false;
+          if (isDateInLockedPeriod(tx.date, activeOrganization.lockedUntilDate)) return false;
+          const norm = normalizeApprovalStatus(tx.approvalStatus);
+          if (!canOrgApprove && (norm === 'approved' || norm === 'paid')) return false;
+          if (activeOrgRole === 'employee' && tx.submittedBy !== actor.uid) return false;
+          return true;
+        });
 
-    if (toDeleteSet.size === 0) {
       setSelectedTransactionIds([]);
+      if (deletable.length === 0) return;
+
+      void (async () => {
+        // Track running wallet state sequentially to avoid stale balance overwrites
+        let runningWallets = activeCloudWallets.map((w) => ({ ...w }));
+        for (const tx of deletable) {
+          await softDeleteOrgTransactionCloud(
+            orgId,
+            tx,
+            runningWallets,
+            settings.customExchangeRates,
+            actor
+          );
+          runningWallets = applyDeltasToWallets(runningWallets, tx, -1);
+        }
+      })().catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Batch delete failed'));
       return;
     }
 
-    if (isOrgWorkspace) {
-      const prevWs = latestOrgRef.current.orgWorkspaces[activeWorkspace];
-      updateActiveOrgWorkspace((org) => ({
-        ...org,
-        transactions: org.transactions.filter((t) => !toDeleteSet.has(t.id)),
-        wallets: updatedWallets,
-      }));
-      setSelectedTransactionIds([]);
-      if (prevWs) {
-        setUndoAction({
-          id: `undo-multi-${Date.now()}`,
-          message: t('transactionsDeleted'),
-          action: () => updateActiveOrgWorkspace(() => prevWs),
-        });
-      }
-    } else {
-      const previousTx = [...personalTransactions];
-      const previousWallets = [...personalWallets];
-      const nextTx = personalTransactions.filter((t) => !toDeleteSet.has(t.id));
-      setPersonalTransactions(nextTx);
-      setPersonalWallets(updatedWallets);
-      setSelectedTransactionIds([]);
-      savePersonalState({ transactions: nextTx, wallets: updatedWallets });
-
-      setUndoAction({
-        id: `undo-multi-${Date.now()}`,
-        message: t('transactionsDeleted'),
-        action: () => {
-          setPersonalTransactions(previousTx);
-          setPersonalWallets(previousWallets);
-          savePersonalState({ transactions: previousTx, wallets: previousWallets });
-        },
-      });
+    const toDeleteSet = new Set(selectedTransactionIds);
+    let updatedWallets = [...personalWallets];
+    for (const id of selectedTransactionIds) {
+      const oldTx = personalTransactions.find((t) => t.id === id);
+      if (!oldTx) continue;
+      updatedWallets = applyDeltasToWallets(updatedWallets, oldTx, -1);
     }
+
+    const previousTx = [...personalTransactions];
+    const previousWallets = [...personalWallets];
+    const nextTx = personalTransactions.filter((t) => !toDeleteSet.has(t.id));
+    setPersonalTransactions(nextTx);
+    setPersonalWallets(updatedWallets);
+    setSelectedTransactionIds([]);
+    savePersonalState({ transactions: nextTx, wallets: updatedWallets });
+
+    setUndoAction({
+      id: `undo-multi-${Date.now()}`,
+      message: t('transactionsDeleted'),
+      action: () => {
+        setPersonalTransactions(previousTx);
+        setPersonalWallets(previousWallets);
+        savePersonalState({ transactions: previousTx, wallets: previousWallets });
+      },
+    });
   }, [
     selectedTransactionIds,
-    wallets,
-    transactions,
     isOrgWorkspace,
     activeOrganization,
+    canOrgWrite,
+    canOrgApprove,
+    activeOrgRole,
+    getOrgActor,
+    orgTransactions,
+    activeCloudWallets,
+    settings.customExchangeRates,
     applyDeltasToWallets,
-    activeWorkspace,
-    updateActiveOrgWorkspace,
-    t,
-    personalTransactions,
     personalWallets,
+    personalTransactions,
     savePersonalState,
+    t,
   ]);
 
   const moveSelectedTransactions = useCallback(
@@ -2575,21 +2952,41 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const targetWalletOrig = wallets.find((w) => w.id === toWalletId);
       if (!targetWalletOrig) return;
 
+      if (isOrgWorkspace && activeOrganization) {
+        if (!canOrgWrite) {
+          setSelectedTransactionIds([]);
+          return;
+        }
+        const toMoveSet = new Set(selectedTransactionIds);
+        const txsToMove = orgTransactions.filter((tx) => {
+          if (!toMoveSet.has(tx.id) || tx.walletId === toWalletId) return false;
+          if (tx.type === 'transfer' && tx.toWalletId === toWalletId) return false;
+          if (isDateInLockedPeriod(tx.date, activeOrganization.lockedUntilDate)) return false;
+          return true;
+        });
+        setSelectedTransactionIds([]);
+        if (txsToMove.length === 0) return;
+        const fromId = txsToMove[0].walletId;
+        void moveOrgTransactionsCloud(
+          activeOrganization.id,
+          txsToMove,
+          fromId,
+          toWalletId,
+          activeCloudWallets,
+          settings.customExchangeRates,
+          getOrgActor()
+        ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Move failed'));
+        return;
+      }
+
       const toMoveSet = new Set(selectedTransactionIds);
-      const updatedWallets = wallets.map((w) => ({ ...w }));
+      const updatedWallets = personalWallets.map((w) => ({ ...w }));
       const targetWallet = updatedWallets.find((w) => w.id === toWalletId)!;
       let anyMoved = false;
 
-      const nextTx = transactions.map((tx) => {
+      const nextTx = personalTransactions.map((tx) => {
         if (!toMoveSet.has(tx.id) || tx.walletId === toWalletId) return tx;
         if (tx.type === 'transfer' && tx.toWalletId === toWalletId) return tx;
-        if (
-          isOrgWorkspace &&
-          activeOrganization &&
-          isDateInLockedPeriod(tx.date, activeOrganization.lockedUntilDate)
-        ) {
-          return tx;
-        }
 
         anyMoved = true;
         const fee = tx.type === 'transfer' && tx.transferFee && tx.transferFee > 0 ? tx.transferFee : 0;
@@ -2653,43 +3050,37 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setSelectedTransactionIds([]);
       if (!anyMoved) return;
 
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({
-          ...org,
-          transactions: nextTx,
-          wallets: updatedWallets,
-        }));
-      } else {
-        const previousTx = [...personalTransactions];
-        const previousWallets = [...personalWallets];
-        setPersonalTransactions(nextTx);
-        setPersonalWallets(updatedWallets);
-        savePersonalState({ transactions: nextTx, wallets: updatedWallets });
-        setUndoAction({
-          id: `undo-move-${Date.now()}`,
-          message:
-            settings.language === 'en'
-              ? 'Transactions moved to wallet'
-              : 'تم نقل المعاملات المحددة وتحديث الأرصدة',
-          action: () => {
-            setPersonalTransactions(previousTx);
-            setPersonalWallets(previousWallets);
-            savePersonalState({ transactions: previousTx, wallets: previousWallets });
-          },
-        });
-      }
+      const previousTx = [...personalTransactions];
+      const previousWallets = [...personalWallets];
+      setPersonalTransactions(nextTx);
+      setPersonalWallets(updatedWallets);
+      savePersonalState({ transactions: nextTx, wallets: updatedWallets });
+      setUndoAction({
+        id: `undo-move-${Date.now()}`,
+        message:
+          settings.language === 'en'
+            ? 'Transactions moved to wallet'
+            : 'تم نقل المعاملات المحددة وتحديث الأرصدة',
+        action: () => {
+          setPersonalTransactions(previousTx);
+          setPersonalWallets(previousWallets);
+          savePersonalState({ transactions: previousTx, wallets: previousWallets });
+        },
+      });
     },
     [
       selectedTransactionIds,
       wallets,
-      transactions,
       isOrgWorkspace,
       activeOrganization,
+      canOrgWrite,
+      orgTransactions,
+      activeCloudWallets,
       settings.customExchangeRates,
       settings.language,
-      updateActiveOrgWorkspace,
-      personalTransactions,
+      getOrgActor,
       personalWallets,
+      personalTransactions,
       savePersonalState,
     ]
   );
@@ -2698,19 +3089,43 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     (newCategoryId: string) => {
       if (selectedTransactionIds.length === 0) return;
       const toChangeSet = new Set(selectedTransactionIds);
-      const nextTx = transactions.map((t) =>
+
+      if (isOrgWorkspace && activeOrganization) {
+        if (!canOrgWrite) {
+          setSelectedTransactionIds([]);
+          return;
+        }
+        const txsToUpdate = orgTransactions.filter(
+          (tx) => toChangeSet.has(tx.id) && !isDateInLockedPeriod(tx.date, activeOrganization.lockedUntilDate)
+        );
+        setSelectedTransactionIds([]);
+        if (txsToUpdate.length === 0) return;
+        void batchUpdateOrgTransactionsCategoryCloud(
+          activeOrganization.id,
+          txsToUpdate,
+          newCategoryId,
+          getOrgActor()
+        ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Batch category update failed'));
+        return;
+      }
+
+      const nextTx = personalTransactions.map((t) =>
         toChangeSet.has(t.id) ? { ...t, categoryId: newCategoryId, updatedAt: Date.now() } : t
       );
-
       setSelectedTransactionIds([]);
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, transactions: nextTx }));
-      } else {
-        setPersonalTransactions(nextTx);
-        savePersonalState({ transactions: nextTx });
-      }
+      setPersonalTransactions(nextTx);
+      savePersonalState({ transactions: nextTx });
     },
-    [selectedTransactionIds, transactions, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [
+      selectedTransactionIds,
+      isOrgWorkspace,
+      activeOrganization,
+      canOrgWrite,
+      orgTransactions,
+      getOrgActor,
+      personalTransactions,
+      savePersonalState,
+    ]
   );
 
   const duplicateTransaction = useCallback(
@@ -2728,9 +3143,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         date: todayStr,
         time: timeStr,
         approvalStatus: undefined,
+        approvedBy: undefined,
         reviewedBy: undefined,
         reviewedAt: undefined,
         rejectionReason: undefined,
+        voucherNumber: undefined,
         isRecurring: false,
         recurrenceRule: undefined,
       });
@@ -2766,34 +3183,45 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     (data: Omit<Wallet, 'id'>) => {
       const newWallet: Wallet = {
         ...data,
-        id: `w-${Date.now()}`,
+        id: `w-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
         balance: data.initialBalance,
         isArchived: false,
         order: wallets.length + 1,
       };
-      const nextWallets = [...wallets, newWallet];
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, wallets: nextWallets }));
-      } else {
-        setPersonalWallets(nextWallets);
-        savePersonalState({ wallets: nextWallets });
+      if (isOrgWorkspace && activeOrganization) {
+        if (!canOrgWrite) return newWallet;
+        void upsertOrgWalletCloud(activeOrganization.id, newWallet, true, getOrgActor()).catch((err) =>
+          setOrgActionError(err instanceof Error ? err.message : 'Wallet create failed')
+        );
+        return newWallet;
       }
+      const nextWallets = [...personalWallets, newWallet];
+      setPersonalWallets(nextWallets);
+      savePersonalState({ wallets: nextWallets });
       return newWallet;
     },
-    [wallets, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [wallets.length, isOrgWorkspace, activeOrganization, canOrgWrite, getOrgActor, personalWallets, savePersonalState]
   );
 
   const updateWallet = useCallback(
     (id: string, updates: Partial<Wallet>) => {
-      const nextWallets = wallets.map((w) => (w.id === id ? { ...w, ...updates } : w));
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, wallets: nextWallets }));
-      } else {
-        setPersonalWallets(nextWallets);
-        savePersonalState({ wallets: nextWallets });
+      if (isOrgWorkspace && activeOrganization) {
+        if (!canOrgWrite) return;
+        const existing = activeCloudWallets.find((w) => w.id === id);
+        if (!existing) return;
+        void upsertOrgWalletCloud(
+          activeOrganization.id,
+          { ...existing, ...updates },
+          false,
+          getOrgActor()
+        ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Wallet update failed'));
+        return;
       }
+      const nextWallets = personalWallets.map((w) => (w.id === id ? { ...w, ...updates } : w));
+      setPersonalWallets(nextWallets);
+      savePersonalState({ wallets: nextWallets });
     },
-    [wallets, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [isOrgWorkspace, activeOrganization, canOrgWrite, activeCloudWallets, getOrgActor, personalWallets, savePersonalState]
   );
 
   const migrateAndDeleteWallet = useCallback(
@@ -2802,7 +3230,48 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const sourceWallet = wallets.find((w) => w.id === walletId);
       if (!targetWallet || !sourceWallet || walletId === targetWalletId) return;
 
-      const migratedTx = transactions.map((tx) => {
+      if (isOrgWorkspace && activeOrganization) {
+        if (!canOrgManage) return;
+        const affectedTxs = orgTransactions.filter(
+          (tx) => tx.walletId === walletId || tx.toWalletId === walletId
+        );
+        const actor = getOrgActor();
+        const convertedInit = convertCurrency(
+          sourceWallet.initialBalance || 0,
+          sourceWallet.currency,
+          targetWallet.currency,
+          settings.customExchangeRates
+        );
+        void (async () => {
+          if (convertedInit !== 0) {
+            await upsertOrgWalletCloud(
+              activeOrganization.id,
+              {
+                ...targetWallet,
+                initialBalance: roundCurrency(
+                  (targetWallet.initialBalance || 0) + convertedInit,
+                  targetWallet.currency
+                ),
+                balance: roundCurrency(targetWallet.balance + convertedInit, targetWallet.currency),
+              },
+              false,
+              actor
+            );
+          }
+          await deleteOrgWalletCloud(
+            activeOrganization.id,
+            walletId,
+            actor,
+            affectedTxs,
+            targetWalletId,
+            activeCloudWallets,
+            settings.customExchangeRates
+          );
+        })().catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Wallet migration failed'));
+        return;
+      }
+
+      const migratedTx = personalTransactions.map((tx) => {
         if (tx.walletId !== walletId && tx.toWalletId !== walletId) return tx;
         return {
           ...tx,
@@ -2811,26 +3280,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           updatedAt: Date.now(),
         };
       });
-      const migratedBudgets = budgets.map((b) =>
+      const migratedBudgets = personalBudgets.map((b) =>
         b.walletId === walletId ? { ...b, walletId: targetWalletId } : b
       );
-      const migratedTemplates = templates.map((tm) => ({
+      const migratedTemplates = personalTemplates.map((tm) => ({
         ...tm,
         walletId: tm.walletId === walletId ? targetWalletId : tm.walletId,
         toWalletId: tm.toWalletId === walletId ? targetWalletId : tm.toWalletId,
       }));
-      const migratedGoals = goals.map((g) =>
+      const migratedGoals = personalGoals.map((g) =>
         g.walletId === walletId ? { ...g, walletId: targetWalletId } : g
       );
 
-      // Carry over remaining source balance to target wallet converted in target currency
       const convertedRemaining = convertCurrency(
         sourceWallet.balance,
         sourceWallet.currency,
         targetWallet.currency,
         settings.customExchangeRates
       );
-      const nextWallets = wallets
+      const nextWallets = personalWallets
         .filter((w) => w.id !== walletId)
         .map((w) =>
           w.id === targetWalletId
@@ -2838,39 +3306,33 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             : w
         );
 
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({
-          ...org,
-          wallets: nextWallets,
-          transactions: migratedTx,
-          budgets: migratedBudgets,
-          templates: migratedTemplates,
-          goals: migratedGoals,
-        }));
-      } else {
-        setPersonalWallets(nextWallets);
-        setPersonalTransactions(migratedTx);
-        setPersonalBudgets(migratedBudgets);
-        setPersonalTemplates(migratedTemplates);
-        setPersonalGoals(migratedGoals);
-        savePersonalState({
-          wallets: nextWallets,
-          transactions: migratedTx,
-          budgets: migratedBudgets,
-          templates: migratedTemplates,
-          goals: migratedGoals,
-        });
-      }
+      setPersonalWallets(nextWallets);
+      setPersonalTransactions(migratedTx);
+      setPersonalBudgets(migratedBudgets);
+      setPersonalTemplates(migratedTemplates);
+      setPersonalGoals(migratedGoals);
+      savePersonalState({
+        wallets: nextWallets,
+        transactions: migratedTx,
+        budgets: migratedBudgets,
+        templates: migratedTemplates,
+        goals: migratedGoals,
+      });
     },
     [
       wallets,
-      transactions,
-      budgets,
-      templates,
-      goals,
-      settings.customExchangeRates,
       isOrgWorkspace,
-      updateActiveOrgWorkspace,
+      activeOrganization,
+      canOrgManage,
+      orgTransactions,
+      getOrgActor,
+      settings.customExchangeRates,
+      activeCloudWallets,
+      personalTransactions,
+      personalBudgets,
+      personalTemplates,
+      personalGoals,
+      personalWallets,
       savePersonalState,
     ]
   );
@@ -2878,15 +3340,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const deleteWallet = useCallback(
     (id: string) => {
       if (getWalletDependencies(id).totalCount > 0) return;
-      const nextWallets = wallets.filter((w) => w.id !== id);
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, wallets: nextWallets }));
-      } else {
-        setPersonalWallets(nextWallets);
-        savePersonalState({ wallets: nextWallets });
+      if (isOrgWorkspace && activeOrganization) {
+        if (!canOrgManage) return;
+        void deleteOrgWalletCloud(activeOrganization.id, id, getOrgActor()).catch((err) =>
+          setOrgActionError(err instanceof Error ? err.message : 'Wallet delete failed')
+        );
+        return;
       }
+      const nextWallets = personalWallets.filter((w) => w.id !== id);
+      setPersonalWallets(nextWallets);
+      savePersonalState({ wallets: nextWallets });
     },
-    [wallets, getWalletDependencies, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [getWalletDependencies, isOrgWorkspace, activeOrganization, canOrgManage, getOrgActor, personalWallets, savePersonalState]
   );
 
   // ===========================================================================
@@ -2911,76 +3376,94 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     (data: Omit<Category, 'id'>) => {
       const newCat: Category = {
         ...data,
-        id: `cat-${Date.now()}`,
+        id: `cat-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
         order: categories.length + 1,
       };
-      const nextCategories = [...categories, newCat];
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, categories: nextCategories }));
-      } else {
-        setPersonalCategories(nextCategories);
-        savePersonalState({ categories: nextCategories });
+      if (isOrgWorkspace && activeOrganization) {
+        if (!canOrgWrite) return newCat;
+        void upsertOrgCategoryCloud(activeOrganization.id, newCat, true, getOrgActor()).catch((err) =>
+          setOrgActionError(err instanceof Error ? err.message : 'Category create failed')
+        );
+        return newCat;
       }
+      const nextCategories = [...personalCategories, newCat];
+      setPersonalCategories(nextCategories);
+      savePersonalState({ categories: nextCategories });
       return newCat;
     },
-    [categories, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [categories.length, isOrgWorkspace, activeOrganization, canOrgWrite, getOrgActor, personalCategories, savePersonalState]
   );
 
   const updateCategory = useCallback(
     (id: string, updates: Partial<Category>) => {
-      const nextCategories = categories.map((c) => (c.id === id ? { ...c, ...updates } : c));
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, categories: nextCategories }));
-      } else {
-        setPersonalCategories(nextCategories);
-        savePersonalState({ categories: nextCategories });
+      if (isOrgWorkspace && activeOrganization) {
+        if (!canOrgWrite) return;
+        const existing = activeCloudCategories.find((c) => c.id === id);
+        if (!existing) return;
+        void upsertOrgCategoryCloud(
+          activeOrganization.id,
+          { ...existing, ...updates },
+          false,
+          getOrgActor()
+        ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Category update failed'));
+        return;
       }
+      const nextCategories = personalCategories.map((c) => (c.id === id ? { ...c, ...updates } : c));
+      setPersonalCategories(nextCategories);
+      savePersonalState({ categories: nextCategories });
     },
-    [categories, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [isOrgWorkspace, activeOrganization, canOrgWrite, activeCloudCategories, getOrgActor, personalCategories, savePersonalState]
   );
 
   const migrateAndDeleteCategory = useCallback(
     (categoryId: string, targetCategoryId: string) => {
       if (categoryId === targetCategoryId) return;
-      const migratedTx = transactions.map((tx) =>
+
+      if (isOrgWorkspace && activeOrganization) {
+        if (!canOrgManage) return;
+        const affectedTxs = orgTransactions.filter((tx) => tx.categoryId === categoryId);
+        void deleteOrgCategoryCloud(
+          activeOrganization.id,
+          categoryId,
+          getOrgActor(),
+          affectedTxs,
+          targetCategoryId
+        ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Category migration failed'));
+        return;
+      }
+
+      const migratedTx = personalTransactions.map((tx) =>
         tx.categoryId === categoryId ? { ...tx, categoryId: targetCategoryId, updatedAt: Date.now() } : tx
       );
-      const migratedBudgets = budgets.map((b) =>
+      const migratedBudgets = personalBudgets.map((b) =>
         b.categoryId === categoryId ? { ...b, categoryId: targetCategoryId } : b
       );
-      const migratedTemplates = templates.map((tm) =>
+      const migratedTemplates = personalTemplates.map((tm) =>
         tm.categoryId === categoryId ? { ...tm, categoryId: targetCategoryId } : tm
       );
-      const nextCategories = categories.filter((c) => c.id !== categoryId);
+      const nextCategories = personalCategories.filter((c) => c.id !== categoryId);
 
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({
-          ...org,
-          categories: nextCategories,
-          transactions: migratedTx,
-          budgets: migratedBudgets,
-          templates: migratedTemplates,
-        }));
-      } else {
-        setPersonalCategories(nextCategories);
-        setPersonalTransactions(migratedTx);
-        setPersonalBudgets(migratedBudgets);
-        setPersonalTemplates(migratedTemplates);
-        savePersonalState({
-          categories: nextCategories,
-          transactions: migratedTx,
-          budgets: migratedBudgets,
-          templates: migratedTemplates,
-        });
-      }
+      setPersonalCategories(nextCategories);
+      setPersonalTransactions(migratedTx);
+      setPersonalBudgets(migratedBudgets);
+      setPersonalTemplates(migratedTemplates);
+      savePersonalState({
+        categories: nextCategories,
+        transactions: migratedTx,
+        budgets: migratedBudgets,
+        templates: migratedTemplates,
+      });
     },
     [
-      transactions,
-      budgets,
-      templates,
-      categories,
       isOrgWorkspace,
-      updateActiveOrgWorkspace,
+      activeOrganization,
+      canOrgManage,
+      orgTransactions,
+      getOrgActor,
+      personalTransactions,
+      personalBudgets,
+      personalTemplates,
+      personalCategories,
       savePersonalState,
     ]
   );
@@ -2988,15 +3471,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const deleteCategory = useCallback(
     (id: string) => {
       if (getCategoryDependencies(id).totalCount > 0) return;
-      const nextCategories = categories.filter((c) => c.id !== id);
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, categories: nextCategories }));
-      } else {
-        setPersonalCategories(nextCategories);
-        savePersonalState({ categories: nextCategories });
+      if (isOrgWorkspace && activeOrganization) {
+        if (!canOrgManage) return;
+        void deleteOrgCategoryCloud(activeOrganization.id, id, getOrgActor()).catch((err) =>
+          setOrgActionError(err instanceof Error ? err.message : 'Category delete failed')
+        );
+        return;
       }
+      const nextCategories = personalCategories.filter((c) => c.id !== id);
+      setPersonalCategories(nextCategories);
+      savePersonalState({ categories: nextCategories });
     },
-    [categories, getCategoryDependencies, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [getCategoryDependencies, isOrgWorkspace, activeOrganization, canOrgManage, getOrgActor, personalCategories, savePersonalState]
   );
 
   // ===========================================================================
@@ -3004,43 +3490,62 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // ===========================================================================
   const addBudget = useCallback(
     (data: Omit<Budget, 'id'>) => {
-      const newBudget: Budget = { ...data, id: `b-${Date.now()}` };
-      const nextBudgets = [...budgets, newBudget];
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, budgets: nextBudgets }));
-      } else {
-        setPersonalBudgets(nextBudgets);
-        savePersonalState({ budgets: nextBudgets });
+      const newBudget: Budget = { ...data, id: `b-${Date.now()}-${Math.random().toString(36).slice(2, 5)}` };
+      if (isOrgWorkspace && activeOrganization) {
+        if (!canOrgWrite) return newBudget;
+        void upsertOrgBudgetCloud(
+          activeOrganization.id,
+          newBudget,
+          activeOrganization.currency,
+          true,
+          getOrgActor()
+        ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Budget create failed'));
+        return newBudget;
       }
+      const nextBudgets = [...personalBudgets, newBudget];
+      setPersonalBudgets(nextBudgets);
+      savePersonalState({ budgets: nextBudgets });
       return newBudget;
     },
-    [budgets, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [isOrgWorkspace, activeOrganization, canOrgWrite, getOrgActor, personalBudgets, savePersonalState]
   );
 
   const updateBudget = useCallback(
     (id: string, updates: Partial<Budget>) => {
-      const nextBudgets = budgets.map((b) => (b.id === id ? { ...b, ...updates } : b));
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, budgets: nextBudgets }));
-      } else {
-        setPersonalBudgets(nextBudgets);
-        savePersonalState({ budgets: nextBudgets });
+      if (isOrgWorkspace && activeOrganization) {
+        if (!canOrgWrite) return;
+        const existing = activeCloudBudgets.find((b) => b.id === id);
+        if (!existing) return;
+        void upsertOrgBudgetCloud(
+          activeOrganization.id,
+          { ...existing, ...updates },
+          activeOrganization.currency,
+          false,
+          getOrgActor()
+        ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Budget update failed'));
+        return;
       }
+      const nextBudgets = personalBudgets.map((b) => (b.id === id ? { ...b, ...updates } : b));
+      setPersonalBudgets(nextBudgets);
+      savePersonalState({ budgets: nextBudgets });
     },
-    [budgets, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [isOrgWorkspace, activeOrganization, canOrgWrite, activeCloudBudgets, getOrgActor, personalBudgets, savePersonalState]
   );
 
   const deleteBudget = useCallback(
     (id: string) => {
-      const nextBudgets = budgets.filter((b) => b.id !== id);
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, budgets: nextBudgets }));
-      } else {
-        setPersonalBudgets(nextBudgets);
-        savePersonalState({ budgets: nextBudgets });
+      if (isOrgWorkspace && activeOrganization) {
+        if (!canOrgManage) return;
+        void deleteOrgBudgetCloud(activeOrganization.id, id, getOrgActor()).catch((err) =>
+          setOrgActionError(err instanceof Error ? err.message : 'Budget delete failed')
+        );
+        return;
       }
+      const nextBudgets = personalBudgets.filter((b) => b.id !== id);
+      setPersonalBudgets(nextBudgets);
+      savePersonalState({ budgets: nextBudgets });
     },
-    [budgets, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [isOrgWorkspace, activeOrganization, canOrgManage, getOrgActor, personalBudgets, savePersonalState]
   );
 
   const addDebt = useCallback(
@@ -3052,29 +3557,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         isSettled: data.paidAmount >= data.totalAmount,
         createdAt: Date.now(),
       };
-      const nextDebts = [newDebt, ...debts];
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, debts: nextDebts }));
-      } else {
-        setPersonalDebts(nextDebts);
-        savePersonalState({ debts: nextDebts });
-      }
+      const nextDebts = [newDebt, ...personalDebts];
+      setPersonalDebts(nextDebts);
+      savePersonalState({ debts: nextDebts });
       return newDebt;
     },
-    [debts, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [personalDebts, savePersonalState]
   );
 
   const updateDebt = useCallback(
     (id: string, updates: Partial<Debt>) => {
-      const nextDebts = debts.map((d) => (d.id === id ? { ...d, ...updates } : d));
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, debts: nextDebts }));
-      } else {
-        setPersonalDebts(nextDebts);
-        savePersonalState({ debts: nextDebts });
-      }
+      const nextDebts = personalDebts.map((d) => (d.id === id ? { ...d, ...updates } : d));
+      setPersonalDebts(nextDebts);
+      savePersonalState({ debts: nextDebts });
     },
-    [debts, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [personalDebts, savePersonalState]
   );
 
   const recordDebtPayment = useCallback(
@@ -3083,7 +3580,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       payment: { amount: number; date: string; walletId?: string; notes?: string },
       logAsTx: boolean
     ) => {
-      const target = debts.find((d) => d.id === debtId);
+      const target = personalDebts.find((d) => d.id === debtId);
       if (!target) return;
 
       const newPaid = target.paidAmount + payment.amount;
@@ -3111,19 +3608,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         payments: [paymentItem, ...target.payments],
       };
 
-      const nextDebts = debts.map((d) => (d.id === debtId ? updatedDebt : d));
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, debts: nextDebts }));
-      } else {
-        setPersonalDebts(nextDebts);
-        savePersonalState({ debts: nextDebts });
-      }
+      const nextDebts = personalDebts.map((d) => (d.id === debtId ? updatedDebt : d));
+      setPersonalDebts(nextDebts);
+      savePersonalState({ debts: nextDebts });
 
       if (logAsTx && payment.walletId) {
         const isIncome = target.type === 'owed_to_me';
-        const fallbackCatId = categories.find((c) =>
-          isIncome ? c.type === 'income' : c.type === 'expense'
-        )?.id || 'cat-other';
+        const fallbackCatId =
+          personalCategories.find((c) => (isIncome ? c.type === 'income' : c.type === 'expense'))
+            ?.id || 'cat-other';
 
         addTransaction({
           type: isIncome ? 'income' : 'expense',
@@ -3131,7 +3624,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           currency: target.currency,
           date: payment.date,
           time: '12:00',
-          categoryId: categories.some((c) => c.id === (isIncome ? 'cat-withdraw' : 'cat-bills'))
+          categoryId: personalCategories.some(
+            (c) => c.id === (isIncome ? 'cat-withdraw' : 'cat-bills')
+          )
             ? isIncome
               ? 'cat-withdraw'
               : 'cat-bills'
@@ -3144,20 +3639,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         });
       }
     },
-    [debts, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState, categories, addTransaction]
+    [personalDebts, savePersonalState, personalCategories, addTransaction]
   );
 
   const deleteDebt = useCallback(
     (id: string) => {
-      const nextDebts = debts.filter((d) => d.id !== id);
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, debts: nextDebts }));
-      } else {
-        setPersonalDebts(nextDebts);
-        savePersonalState({ debts: nextDebts });
-      }
+      const nextDebts = personalDebts.filter((d) => d.id !== id);
+      setPersonalDebts(nextDebts);
+      savePersonalState({ debts: nextDebts });
     },
-    [debts, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [personalDebts, savePersonalState]
   );
 
   const addGoal = useCallback(
@@ -3168,34 +3659,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         isCompleted: data.currentAmount >= data.targetAmount,
         createdAt: Date.now(),
       };
-      const nextGoals = [newGoal, ...goals];
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, goals: nextGoals }));
-      } else {
-        setPersonalGoals(nextGoals);
-        savePersonalState({ goals: nextGoals });
-      }
+      const nextGoals = [newGoal, ...personalGoals];
+      setPersonalGoals(nextGoals);
+      savePersonalState({ goals: nextGoals });
       return newGoal;
     },
-    [goals, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [personalGoals, savePersonalState]
   );
 
   const updateGoal = useCallback(
     (id: string, updates: Partial<SavingsGoal>) => {
-      const nextGoals = goals.map((g) => (g.id === id ? { ...g, ...updates } : g));
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, goals: nextGoals }));
-      } else {
-        setPersonalGoals(nextGoals);
-        savePersonalState({ goals: nextGoals });
-      }
+      const nextGoals = personalGoals.map((g) => (g.id === id ? { ...g, ...updates } : g));
+      setPersonalGoals(nextGoals);
+      savePersonalState({ goals: nextGoals });
     },
-    [goals, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [personalGoals, savePersonalState]
   );
 
   const contributeToGoal = useCallback(
     (goalId: string, amount: number, walletId?: string, isWithdrawal = false) => {
-      const target = goals.find((g) => g.id === goalId);
+      const target = personalGoals.find((g) => g.id === goalId);
       if (!target) return;
 
       const newSaved = isWithdrawal
@@ -3208,13 +3691,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         isCompleted: newSaved >= target.targetAmount,
       };
 
-      const nextGoals = goals.map((g) => (g.id === goalId ? updatedGoal : g));
-      let nextWallets = wallets;
+      const nextGoals = personalGoals.map((g) => (g.id === goalId ? updatedGoal : g));
+      let nextWallets = personalWallets;
       if (walletId) {
-        const targetWallet = wallets.find((w) => w.id === walletId);
+        const targetWallet = personalWallets.find((w) => w.id === walletId);
         if (targetWallet) {
           const balanceChange = isWithdrawal ? amount : -amount;
-          nextWallets = wallets.map((w) =>
+          nextWallets = personalWallets.map((w) =>
             w.id === walletId
               ? { ...w, balance: roundCurrency(w.balance + balanceChange, w.currency) }
               : w
@@ -3222,74 +3705,54 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
       }
 
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, goals: nextGoals, wallets: nextWallets }));
-      } else {
-        setPersonalGoals(nextGoals);
-        setPersonalWallets(nextWallets);
-        savePersonalState({ goals: nextGoals, wallets: nextWallets });
-      }
+      setPersonalGoals(nextGoals);
+      setPersonalWallets(nextWallets);
+      savePersonalState({ goals: nextGoals, wallets: nextWallets });
     },
-    [goals, wallets, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [personalGoals, personalWallets, savePersonalState]
   );
 
   const deleteGoal = useCallback(
     (id: string) => {
-      const nextGoals = goals.filter((g) => g.id !== id);
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, goals: nextGoals }));
-      } else {
-        setPersonalGoals(nextGoals);
-        savePersonalState({ goals: nextGoals });
-      }
+      const nextGoals = personalGoals.filter((g) => g.id !== id);
+      setPersonalGoals(nextGoals);
+      savePersonalState({ goals: nextGoals });
     },
-    [goals, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [personalGoals, savePersonalState]
   );
 
   const addTemplate = useCallback(
     (data: Omit<Template, 'id'>) => {
       const newTemplate: Template = { ...data, id: `tmpl-${Date.now()}` };
-      const nextTemplates = [...templates, newTemplate];
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, templates: nextTemplates }));
-      } else {
-        setPersonalTemplates(nextTemplates);
-        savePersonalState({ templates: nextTemplates });
-      }
+      const nextTemplates = [...personalTemplates, newTemplate];
+      setPersonalTemplates(nextTemplates);
+      savePersonalState({ templates: nextTemplates });
       return newTemplate;
     },
-    [templates, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [personalTemplates, savePersonalState]
   );
 
   const updateTemplate = useCallback(
     (id: string, updates: Partial<Template>) => {
-      const nextTemplates = templates.map((t) => (t.id === id ? { ...t, ...updates } : t));
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, templates: nextTemplates }));
-      } else {
-        setPersonalTemplates(nextTemplates);
-        savePersonalState({ templates: nextTemplates });
-      }
+      const nextTemplates = personalTemplates.map((t) => (t.id === id ? { ...t, ...updates } : t));
+      setPersonalTemplates(nextTemplates);
+      savePersonalState({ templates: nextTemplates });
     },
-    [templates, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [personalTemplates, savePersonalState]
   );
 
   const deleteTemplate = useCallback(
     (id: string) => {
-      const nextTemplates = templates.filter((t) => t.id !== id);
-      if (isOrgWorkspace) {
-        updateActiveOrgWorkspace((org) => ({ ...org, templates: nextTemplates }));
-      } else {
-        setPersonalTemplates(nextTemplates);
-        savePersonalState({ templates: nextTemplates });
-      }
+      const nextTemplates = personalTemplates.filter((t) => t.id !== id);
+      setPersonalTemplates(nextTemplates);
+      savePersonalState({ templates: nextTemplates });
     },
-    [templates, isOrgWorkspace, updateActiveOrgWorkspace, savePersonalState]
+    [personalTemplates, savePersonalState]
   );
 
   const applyTemplate = useCallback(
     (templateId: string) => {
-      const tmpl = templates.find((t) => t.id === templateId);
+      const tmpl = personalTemplates.find((t) => t.id === templateId);
       if (!tmpl) return;
 
       const now = new Date();
@@ -3299,8 +3762,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       let convertedAmount: number | undefined = undefined;
       if (tmpl.type === 'transfer' && tmpl.toWalletId) {
-        const fromW = wallets.find((w) => w.id === tmpl.walletId);
-        const toW = wallets.find((w) => w.id === tmpl.toWalletId);
+        const fromW = personalWallets.find((w) => w.id === tmpl.walletId);
+        const toW = personalWallets.find((w) => w.id === tmpl.toWalletId);
         if (fromW && toW) {
           convertedAmount = convertCurrency(
             tmpl.amount,
@@ -3329,7 +3792,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         doesNotAffectBalance: tmpl.doesNotAffectBalance,
       });
     },
-    [templates, wallets, settings.customExchangeRates, addTransaction]
+    [personalTemplates, personalWallets, settings.customExchangeRates, addTransaction]
   );
 
   // ===========================================================================
@@ -3404,7 +3867,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             currency: target.currency,
             date: formatLocalDate(now),
             time: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
-            categoryId: personalCategories.find((c) => c.type === 'expense' || c.type === 'both')?.id || 'cat-other',
+            categoryId:
+              personalCategories.find((c) => c.type === 'expense' || c.type === 'both')?.id ||
+              'cat-other',
             walletId: linkedW.id,
             notes:
               settings.language === 'en'
@@ -3474,7 +3939,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             currency: target.currency,
             date: formatLocalDate(now),
             time: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
-            categoryId: personalCategories.find((c) => c.type === 'income' || c.type === 'both')?.id || 'cat-other',
+            categoryId:
+              personalCategories.find((c) => c.type === 'income' || c.type === 'both')?.id ||
+              'cat-other',
             walletId: linkedW.id,
             notes:
               settings.language === 'en'
@@ -3554,6 +4021,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setSettings(updatedSettings);
       setHasCompletedOnboarding(true);
       setActiveWorkspace('personal');
+      saveActiveWorkspacePref('personal');
 
       savePersonalState({
         wallets: [firstWallet],
@@ -3573,6 +4041,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (demo.goals) setPersonalGoals(demo.goals);
     setHasCompletedOnboarding(true);
     setActiveWorkspace('personal');
+    saveActiveWorkspacePref('personal');
 
     savePersonalState({
       transactions: demo.transactions,
@@ -3607,20 +4076,177 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setPersonalGoals([]);
     setPersonalTemplates([]);
     setPersonalMoneyCircles([]);
-    setOrgWorkspaces({});
     setActiveWorkspace('personal');
+    saveActiveWorkspacePref('personal');
     setSettings(DEFAULT_SETTINGS);
     setHasCompletedOnboarding(false);
 
-    void saveOrgWorkspaces('personal', {});
     void persistData(freshData);
   }, []);
 
   const isRTL = settings.language === 'ar';
 
+  const entitlementValue: EntitlementContextValue = useMemo(
+    () => ({
+      isPro,
+      isBusinessPro,
+      planTier,
+      proEntitlement: verifiedPro,
+      scanQuota,
+      setScanQuota,
+      refreshScanQuota,
+      isUpgradeModalOpen,
+      setIsUpgradeModalOpen,
+      redeemProCode,
+      startBusinessTrial,
+      devActivateProPreview,
+      restorePurchases,
+    }),
+    [
+      isPro,
+      isBusinessPro,
+      planTier,
+      verifiedPro,
+      scanQuota,
+      refreshScanQuota,
+      isUpgradeModalOpen,
+      redeemProCode,
+      startBusinessTrial,
+      devActivateProPreview,
+      restorePurchases,
+    ]
+  );
+
+  const orgValue: OrgContextValue = useMemo(
+    () => ({
+      activeWorkspace,
+      orgRefs,
+      isOrgWorkspace,
+      isOrgLoading,
+      orgSyncPendingWrites,
+      orgActionError,
+      clearOrgActionError,
+      orgTrashTransactions,
+      orgHasMoreTx,
+      loadMoreOrgTransactions,
+      organizationsList,
+      activeOrganization,
+      activeOrgSubscriptionState,
+      isOrgReadOnly,
+      activeOrgMemberStatus,
+      orgMembers,
+      orgCostCenters,
+      orgParties,
+      orgAuditLogs,
+      activeOrgRole,
+      canOrgWrite,
+      canOrgApprove,
+      canOrgManage,
+      pendingApprovalsCount,
+      switchWorkspace,
+      createOrganization,
+      joinOrganizationByCode,
+      pendingJoinCode,
+      clearPendingJoinCode,
+      updateOrganizationSettings,
+      lockAccountingPeriod,
+      legacyLocalOrgs,
+      isOrgMigrationModalOpen,
+      openOrgMigrationModal,
+      dismissLegacyOrgMigration,
+      completeLegacyOrgMigration,
+      queueLegacyOrgsForMigration,
+      approveOrgTransaction,
+      rejectOrgTransaction,
+      markOrgTransactionPaid,
+      restoreOrgTransaction,
+      recalculateOrgBalances,
+      attachOrgReceiptPaths,
+      addCostCenter,
+      updateCostCenter,
+      deleteCostCenter,
+      addBusinessParty,
+      updateBusinessParty,
+      deleteBusinessParty,
+      createOrgInvite,
+      listOrgInvites,
+      revokeOrgInvite,
+      manageOrgMember,
+      transferOrgOwnership,
+      deleteOrganization,
+      isOrgHubOpen,
+      setIsOrgHubOpen,
+      orgHubTab,
+      setOrgHubTab,
+      openOrgHub,
+    }),
+    [
+      activeWorkspace,
+      orgRefs,
+      isOrgWorkspace,
+      isOrgLoading,
+      orgSyncPendingWrites,
+      orgActionError,
+      clearOrgActionError,
+      orgTrashTransactions,
+      orgHasMoreTx,
+      loadMoreOrgTransactions,
+      organizationsList,
+      activeOrganization,
+      activeOrgSubscriptionState,
+      isOrgReadOnly,
+      activeOrgMemberStatus,
+      orgMembers,
+      orgCostCenters,
+      orgParties,
+      orgAuditLogs,
+      activeOrgRole,
+      canOrgWrite,
+      canOrgApprove,
+      canOrgManage,
+      pendingApprovalsCount,
+      switchWorkspace,
+      createOrganization,
+      joinOrganizationByCode,
+      pendingJoinCode,
+      clearPendingJoinCode,
+      updateOrganizationSettings,
+      lockAccountingPeriod,
+      legacyLocalOrgs,
+      isOrgMigrationModalOpen,
+      openOrgMigrationModal,
+      dismissLegacyOrgMigration,
+      completeLegacyOrgMigration,
+      queueLegacyOrgsForMigration,
+      approveOrgTransaction,
+      rejectOrgTransaction,
+      markOrgTransactionPaid,
+      restoreOrgTransaction,
+      recalculateOrgBalances,
+      attachOrgReceiptPaths,
+      addCostCenter,
+      updateCostCenter,
+      deleteCostCenter,
+      addBusinessParty,
+      updateBusinessParty,
+      deleteBusinessParty,
+      createOrgInvite,
+      listOrgInvites,
+      revokeOrgInvite,
+      manageOrgMember,
+      transferOrgOwnership,
+      deleteOrganization,
+      isOrgHubOpen,
+      orgHubTab,
+      openOrgHub,
+    ]
+  );
+
   return (
-    <AppContext.Provider
-      value={{
+    <EntitlementProvider value={entitlementValue}>
+      <OrgProvider value={orgValue}>
+        <AppContext.Provider
+          value={{
         isLoading,
         transactions,
         wallets,
@@ -3635,10 +4261,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         hasCompletedOnboarding,
 
         activeWorkspace,
-        orgWorkspaces,
+        orgRefs,
         isOrgWorkspace,
+        isOrgLoading,
+        orgSyncPendingWrites,
+        orgActionError,
+        clearOrgActionError,
+        orgTrashTransactions,
+        orgHasMoreTx,
+        loadMoreOrgTransactions,
         organizationsList,
         activeOrganization,
+        activeOrgSubscriptionState,
+        isOrgReadOnly,
+        activeOrgMemberStatus,
         orgMembers,
         orgCostCenters,
         orgParties,
@@ -3651,19 +4287,37 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         switchWorkspace,
         createOrganization,
         joinOrganizationByCode,
+        pendingJoinCode,
+        clearPendingJoinCode,
         updateOrganizationSettings,
         lockAccountingPeriod,
 
+        legacyLocalOrgs,
+        isOrgMigrationModalOpen,
+        openOrgMigrationModal,
+        dismissLegacyOrgMigration,
+        completeLegacyOrgMigration,
+        queueLegacyOrgsForMigration,
+
         approveOrgTransaction,
         rejectOrgTransaction,
+        markOrgTransactionPaid,
+        restoreOrgTransaction,
+        recalculateOrgBalances,
+        attachOrgReceiptPaths,
         addCostCenter,
         updateCostCenter,
         deleteCostCenter,
         addBusinessParty,
         updateBusinessParty,
         deleteBusinessParty,
-        addOrUpdateOrgMember,
-        removeOrgMember,
+
+        createOrgInvite,
+        listOrgInvites,
+        revokeOrgInvite,
+        manageOrgMember,
+        transferOrgOwnership,
+        deleteOrganization,
 
         isOrgHubOpen,
         setIsOrgHubOpen,
@@ -3739,6 +4393,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         restoreFromCloudNow,
         resolveCloudConflictOverwrite,
         clearCloudConflict,
+        reauthenticateGoogleAccount,
         deleteAccountAndData,
 
         preRestoreSnapshotDate,
@@ -3810,10 +4465,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
         t,
         isRTL,
-      }}
-    >
-      {children}
-    </AppContext.Provider>
+          }}
+        >
+          {children}
+        </AppContext.Provider>
+      </OrgProvider>
+    </EntitlementProvider>
   );
 };
 
@@ -3824,3 +4481,5 @@ export function useApp() {
   }
   return context;
 }
+
+export { useEntitlement, useOrg };

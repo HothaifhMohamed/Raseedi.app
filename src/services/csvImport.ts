@@ -170,7 +170,7 @@ export function normalizeCsvDate(raw: string): string | null {
 }
 
 function buildDuplicateKey(date: string, amount: number, type: TransactionType): string {
-  return `${date}|${amount.toFixed(2)}|${type}`;
+  return `${date}|${amount.toFixed(3)}|${type}`;
 }
 
 /**

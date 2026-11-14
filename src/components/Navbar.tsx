@@ -18,6 +18,10 @@ import {
   CheckCheck,
   AlertTriangle,
   X,
+  Loader2,
+  Cloud,
+  LogIn,
+  UploadCloud,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { getCurrency } from '../services/currency';
@@ -29,6 +33,8 @@ import { AppNotificationItem, OrganizationIndustry, OrganizationRole } from '../
 
 export const Navbar: React.FC = () => {
   const {
+    user,
+    signInWithGoogleAccount,
     settings,
     updateSettings,
     openCurrencyPicker,
@@ -43,6 +49,16 @@ export const Navbar: React.FC = () => {
     filters,
     activeWorkspace,
     isOrgWorkspace,
+    isOrgLoading,
+    orgSyncPendingWrites,
+    activeOrgSubscriptionState,
+    isOrgReadOnly,
+    orgActionError,
+    clearOrgActionError,
+    pendingJoinCode,
+    clearPendingJoinCode,
+    legacyLocalOrgs,
+    openOrgMigrationModal,
     organizationsList,
     activeOrganization,
     activeOrgRole,
@@ -79,12 +95,25 @@ export const Navbar: React.FC = () => {
   const [newOrgCurrency, setNewOrgCurrency] = useState(settings.mainCurrency || 'EGP');
   const [newOrgIndustry, setNewOrgIndustry] = useState<OrganizationIndustry>('general');
   const [newOrgVat, setNewOrgVat] = useState('14');
+  const [newOrgTaxNumber, setNewOrgTaxNumber] = useState('');
+  const [newOrgThreshold, setNewOrgThreshold] = useState('1000');
   const [newOrgSample, setNewOrgSample] = useState(true);
   const [inviteCodeInput, setInviteCodeInput] = useState('');
+  const [createOrgError, setCreateOrgError] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [isSubmittingOrg, setIsSubmittingOrg] = useState(false);
+  const [isSigningInOrg, setIsSigningInOrg] = useState(false);
   const [notifPermission, setNotifPermission] = useState<string>(() =>
     isWebNotificationSupported() ? Notification.permission : 'unsupported'
   );
+
+  useEffect(() => {
+    if (pendingJoinCode && !showJoinOrg) {
+      setInviteCodeInput(pendingJoinCode);
+      setJoinError(null);
+      setShowJoinOrg(true);
+    }
+  }, [pendingJoinCode]);
 
   const overflowRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
@@ -142,7 +171,9 @@ export const Navbar: React.FC = () => {
   const handleNotificationClick = (item: AppNotificationItem) => {
     markNotificationRead(item.id);
     setIsNotifOpen(false);
-    if (item.actionTarget === 'budget') {
+    if (item.actionTarget === 'upgrade') {
+      setIsUpgradeModalOpen(true);
+    } else if (item.actionTarget === 'budget') {
       setActiveNav('budget');
     } else if (item.actionTarget === 'approvals') {
       openOrgHub('approvals');
@@ -153,37 +184,83 @@ export const Navbar: React.FC = () => {
     }
   };
 
-  const handleCreateOrgSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = newOrgName.trim();
-    if (!trimmed) return;
-    createOrganization({
-      name: trimmed,
-      currency: newOrgCurrency,
-      industry: newOrgIndustry,
-      vatRate: Number(newOrgVat) >= 0 ? Number(newOrgVat) : 14,
-      loadSampleData: newOrgSample,
-    });
-    setNewOrgName('');
-    setNewOrgIndustry('general');
-    setShowCreateOrg(false);
-    setIsWorkspaceOpen(false);
+  const handleOrgSignIn = async () => {
+    setIsSigningInOrg(true);
+    setCreateOrgError(null);
+    setJoinError(null);
+    try {
+      await signInWithGoogleAccount();
+    } catch {
+      const msg = isRTL ? 'تعذر تسجيل الدخول بحساب جوجل.' : 'Google sign-in failed.';
+      setCreateOrgError(msg);
+      setJoinError(msg);
+    } finally {
+      setIsSigningInOrg(false);
+    }
   };
 
-  const handleJoinOrgSubmit = (e: React.FormEvent) => {
+  const handleCreateOrgSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setJoinError(null);
-    const res = joinOrganizationByCode(inviteCodeInput.trim());
-    if (!res.ok) {
-      setJoinError(
-        res.error ||
-          (isRTL ? 'كود الدعوة غير صحيح أو غير موجود.' : 'Invalid or unknown invite code.')
-      );
+    if (!user?.isLoggedIn) {
+      setCreateOrgError(t('signInRequiredForCloudOrg'));
       return;
     }
-    setInviteCodeInput('');
-    setShowJoinOrg(false);
-    setIsWorkspaceOpen(false);
+    const trimmed = newOrgName.trim();
+    if (!trimmed) return;
+    setIsSubmittingOrg(true);
+    setCreateOrgError(null);
+    try {
+      await createOrganization({
+        name: trimmed,
+        currency: newOrgCurrency,
+        industry: newOrgIndustry,
+        vatRate: Number(newOrgVat) >= 0 ? Number(newOrgVat) : 14,
+        taxNumber: newOrgTaxNumber.trim() || undefined,
+        approvalThreshold: Number(newOrgThreshold) >= 0 ? Number(newOrgThreshold) : 1000,
+        loadSampleData: newOrgSample,
+      });
+      setNewOrgName('');
+      setNewOrgTaxNumber('');
+      setNewOrgIndustry('general');
+      setShowCreateOrg(false);
+      setIsWorkspaceOpen(false);
+    } catch (err: any) {
+      setCreateOrgError(
+        err?.message || (isRTL ? 'تعذر إنشاء المؤسسة السحابية.' : 'Failed to create cloud organization.')
+      );
+    } finally {
+      setIsSubmittingOrg(false);
+    }
+  };
+
+  const handleJoinOrgSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user?.isLoggedIn) {
+      setJoinError(t('signInRequiredForCloudOrg'));
+      return;
+    }
+    setJoinError(null);
+    setIsSubmittingOrg(true);
+    try {
+      const res = await joinOrganizationByCode(inviteCodeInput.trim());
+      if (!res.ok) {
+        setJoinError(
+          res.error ||
+            (isRTL ? 'كود الدعوة غير صحيح أو منتهي الصلاحية.' : 'Invalid or expired invite code.')
+        );
+        return;
+      }
+      clearPendingJoinCode();
+      setInviteCodeInput('');
+      setShowJoinOrg(false);
+      setIsWorkspaceOpen(false);
+    } catch (err: any) {
+      setJoinError(
+        err?.message || (isRTL ? 'تعذر الانضمام للمؤسسة.' : 'Failed to join organization.')
+      );
+    } finally {
+      setIsSubmittingOrg(false);
+    }
   };
 
   return (
@@ -208,7 +285,7 @@ export const Navbar: React.FC = () => {
             >
               <div className="min-w-0 flex flex-col gap-0.5">
                 <div className="flex items-center gap-1">
-                  <span className="font-title text-sm sm:text-base font-bold text-[var(--color-ink)] leading-snug truncate">
+                  <span className="font-title text-sm sm:text-base font-bold text-[var(--color-ink)] leading-normal py-0.5 truncate">
                     {isOrgWorkspace && activeOrganization ? activeOrganization.name : t('appName')}
                   </span>
                 </div>
@@ -216,6 +293,16 @@ export const Navbar: React.FC = () => {
                   {isOrgWorkspace ? (
                     <>
                       <Building2 className="w-2.5 h-2.5 text-[var(--color-accent)] shrink-0" />
+                      <span
+                        title={orgSyncPendingWrites ? t('cloudOrgSyncPending') : t('cloudOrgSyncOnline')}
+                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                          isOrgLoading
+                            ? 'bg-[var(--color-accent)] animate-pulse'
+                            : orgSyncPendingWrites
+                            ? 'bg-amber-500'
+                            : 'bg-[var(--color-income)]'
+                        }`}
+                      />
                       <span className="truncate">
                         {isRTL ? 'مساحة الشركة' : 'Business'}
                       </span>
@@ -634,6 +721,86 @@ export const Navbar: React.FC = () => {
         </div>
       </header>
 
+      {/* Contextual Cloud Org / Migration / Read-only Banners */}
+      {orgActionError && (
+        <div
+          dir={isRTL ? 'rtl' : 'ltr'}
+          className="px-3 py-2 bg-[var(--color-expense)]/12 border-b border-[var(--color-expense)]/30 text-[11px] text-[var(--color-expense)] flex items-center justify-between gap-2"
+        >
+          <div className="flex items-center gap-1.5 min-w-0">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate font-semibold">{orgActionError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={clearOrgActionError}
+            aria-label={t('close')}
+            className="p-1 rounded hover:bg-[var(--color-expense)]/15 shrink-0"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {isOrgWorkspace && isOrgReadOnly && (
+        <div
+          dir={isRTL ? 'rtl' : 'ltr'}
+          className="px-3 py-2 bg-amber-500/12 border-b border-amber-500/30 text-[11px] text-amber-800 dark:text-amber-300 flex items-center justify-between gap-2"
+        >
+          <span className="font-semibold leading-snug">{t('orgReadOnlyBanner')}</span>
+          <button
+            type="button"
+            onClick={() => setIsUpgradeModalOpen(true)}
+            className="px-2.5 py-1 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-[10px] font-bold shrink-0"
+          >
+            {isRTL ? 'ترقية الباقة' : 'Upgrade'}
+          </button>
+        </div>
+      )}
+
+      {isOrgWorkspace && !isOrgReadOnly && activeOrgSubscriptionState?.status === 'grace' && (
+        <div
+          dir={isRTL ? 'rtl' : 'ltr'}
+          className="px-3 py-1.5 bg-amber-500/10 border-b border-amber-500/25 text-[11px] text-amber-800 dark:text-amber-300 flex items-center justify-between gap-2"
+        >
+          <span className="font-medium">
+            {isRTL
+              ? `فترة سماح للاشتراك: متبقي ${activeOrgSubscriptionState.daysRemaining} يوم قبل التحويل لوضع القراءة فقط.`
+              : `Subscription grace period: ${activeOrgSubscriptionState.daysRemaining} day(s) left before read-only mode.`}
+          </span>
+          <button
+            type="button"
+            onClick={() => setIsUpgradeModalOpen(true)}
+            className="px-2 py-0.5 rounded bg-amber-600 text-white text-[10px] font-bold shrink-0"
+          >
+            {isRTL ? 'تجديد' : 'Renew'}
+          </button>
+        </div>
+      )}
+
+      {!isOrgWorkspace && legacyLocalOrgs.length > 0 && (
+        <div
+          dir={isRTL ? 'rtl' : 'ltr'}
+          className="px-3 py-2 bg-[var(--color-accent)]/10 border-b border-[var(--color-accent)]/25 text-[11px] text-[var(--color-ink)] flex items-center justify-between gap-2"
+        >
+          <div className="flex items-center gap-1.5 min-w-0">
+            <UploadCloud className="w-3.5 h-3.5 text-[var(--color-accent)] shrink-0" />
+            <span className="truncate font-medium">
+              {isRTL
+                ? `يوجد ${legacyLocalOrgs.length} مؤسسة محلية جاهزة للترحيل إلى السحابة`
+                : `${legacyLocalOrgs.length} local org(s) ready for Cloud Migration`}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={openOrgMigrationModal}
+            className="px-2.5 py-1 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-[10px] font-bold shrink-0"
+          >
+            {isRTL ? 'ترحيل الآن' : 'Migrate'}
+          </button>
+        </div>
+      )}
+
       {/* Create Organization Modal */}
       {showCreateOrg && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4">
@@ -659,6 +826,29 @@ export const Navbar: React.FC = () => {
               </button>
             </div>
 
+            {!user?.isLoggedIn && (
+              <div className="p-3 rounded-xl bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30 space-y-2 text-xs">
+                <p className="text-[var(--color-ink)] font-medium leading-relaxed">
+                  {t('signInRequiredForCloudOrg')}
+                </p>
+                <button
+                  type="button"
+                  disabled={isSigningInOrg}
+                  onClick={() => void handleOrgSignIn()}
+                  className="w-full py-2 px-3 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center justify-center gap-2 min-h-[40px] disabled:opacity-50"
+                >
+                  {isSigningInOrg ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <LogIn className="w-4 h-4" />
+                  )}
+                  <span>
+                    {isRTL ? 'تسجيل الدخول بحساب جوجل' : 'Sign in with Google'}
+                  </span>
+                </button>
+              </div>
+            )}
+
             <div className="space-y-3">
               <div>
                 <label className="block text-xs font-semibold text-[var(--color-muted)] mb-1">
@@ -667,10 +857,11 @@ export const Navbar: React.FC = () => {
                 <input
                   type="text"
                   required
+                  disabled={!user?.isLoggedIn || isSubmittingOrg}
                   value={newOrgName}
                   onChange={(e) => setNewOrgName(e.target.value)}
                   placeholder={isRTL ? 'مثال: شركة النور للتجارة' : 'e.g. Al-Noor Trading Co.'}
-                  className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px]"
+                  className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px] disabled:opacity-60"
                 />
               </div>
 
@@ -680,11 +871,12 @@ export const Navbar: React.FC = () => {
                     {t('mainCurrency')}
                   </label>
                   <select
+                    disabled={!user?.isLoggedIn || isSubmittingOrg}
                     value={newOrgCurrency}
                     onChange={(e) => setNewOrgCurrency(e.target.value)}
-                    className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[44px]"
+                    className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[44px] disabled:opacity-60"
                   >
-                    {['EGP', 'SAR', 'AED', 'KWD', 'USD', 'EUR'].map((code) => (
+                    {['EGP', 'SAR', 'AED', 'KWD', 'BHD', 'OMR', 'JOD', 'USD', 'EUR'].map((code) => (
                       <option key={code} value={code}>
                         {code}
                       </option>
@@ -700,9 +892,40 @@ export const Navbar: React.FC = () => {
                     min="0"
                     max="100"
                     step="0.5"
+                    disabled={!user?.isLoggedIn || isSubmittingOrg}
                     value={newOrgVat}
                     onChange={(e) => setNewOrgVat(e.target.value)}
-                    className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[44px]"
+                    className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[44px] disabled:opacity-60"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--color-muted)] mb-1">
+                    {t('taxNumber')}
+                  </label>
+                  <input
+                    type="text"
+                    dir="ltr"
+                    disabled={!user?.isLoggedIn || isSubmittingOrg}
+                    value={newOrgTaxNumber}
+                    onChange={(e) => setNewOrgTaxNumber(e.target.value)}
+                    placeholder="TRN-..."
+                    className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[44px] disabled:opacity-60"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--color-muted)] mb-1">
+                    {isRTL ? 'سقف الاعتماد التلقائي' : 'Approval Threshold'}
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    disabled={!user?.isLoggedIn || isSubmittingOrg}
+                    value={newOrgThreshold}
+                    onChange={(e) => setNewOrgThreshold(e.target.value)}
+                    className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[44px] disabled:opacity-60"
                   />
                 </div>
               </div>
@@ -712,10 +935,11 @@ export const Navbar: React.FC = () => {
                   {t('industryLabel')}
                 </label>
                 <select
+                  disabled={!user?.isLoggedIn || isSubmittingOrg}
                   value={newOrgIndustry}
                   onChange={(e) => setNewOrgIndustry(e.target.value as OrganizationIndustry)}
                   data-testid="create-org-industry-select"
-                  className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[44px]"
+                  className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[44px] disabled:opacity-60"
                 >
                   <option value="general">{t('industryGeneral')}</option>
                   <option value="retail">{t('industryRetail')}</option>
@@ -729,21 +953,36 @@ export const Navbar: React.FC = () => {
               <label className="flex items-center gap-2 text-xs text-[var(--color-ink)] cursor-pointer pt-1">
                 <input
                   type="checkbox"
+                  disabled={!user?.isLoggedIn || isSubmittingOrg}
                   checked={newOrgSample}
                   onChange={(e) => setNewOrgSample(e.target.checked)}
                   className="rounded border-[var(--color-line)] accent-[var(--color-accent)] w-4 h-4"
                 />
                 <span>
                   {isRTL
-                    ? 'إضافة محافظ ومراكز تكلفة وبيانات مبدئية'
-                    : 'Include starter wallets, cost centers & sample data'}
+                    ? 'إضافة محافظ ومراكز تكلفة مبدئية للعمل فوراً'
+                    : 'Include starter wallets & cost centers'}
                 </span>
               </label>
+
+              <div className="flex items-center gap-1.5 text-[10px] text-[var(--color-muted)]">
+                <Cloud className="w-3.5 h-3.5 text-[var(--color-accent)] shrink-0" />
+                <span>
+                  {isRTL
+                    ? 'يتم حفظ بيانات الشركة في السحابة مع تجربة مجانية 14 يوماً للأعمال.'
+                    : 'Cloud-synced workspace with a 14-day Business trial.'}
+                </span>
+              </div>
             </div>
+
+            {createOrgError && (
+              <p className="text-[11px] text-[var(--color-expense)] font-medium">{createOrgError}</p>
+            )}
 
             <div className="flex items-center gap-2 pt-2">
               <button
                 type="button"
+                disabled={isSubmittingOrg}
                 onClick={() => setShowCreateOrg(false)}
                 className="px-4 py-2.5 rounded-xl border border-[var(--color-line)] text-xs font-semibold text-[var(--color-muted)] min-h-[44px]"
               >
@@ -751,9 +990,11 @@ export const Navbar: React.FC = () => {
               </button>
               <button
                 type="submit"
-                className="flex-1 py-2.5 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[44px]"
+                disabled={!user?.isLoggedIn || isSubmittingOrg}
+                className="flex-1 py-2.5 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[44px] flex items-center justify-center gap-2 disabled:opacity-50"
               >
-                {t('createOrganization')}
+                {isSubmittingOrg && <Loader2 className="w-4 h-4 animate-spin" />}
+                <span>{t('createOrganization')}</span>
               </button>
             </div>
           </form>
@@ -777,13 +1018,39 @@ export const Navbar: React.FC = () => {
               </div>
               <button
                 type="button"
-                onClick={() => setShowJoinOrg(false)}
+                onClick={() => {
+                  setShowJoinOrg(false);
+                  clearPendingJoinCode();
+                }}
                 aria-label={isRTL ? 'إغلاق' : 'Close'}
                 className="w-8 h-8 rounded-lg border border-[var(--color-line)] flex items-center justify-center text-[var(--color-muted)]"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {!user?.isLoggedIn && (
+              <div className="p-3 rounded-xl bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30 space-y-2 text-xs">
+                <p className="text-[var(--color-ink)] font-medium leading-relaxed">
+                  {t('signInRequiredForCloudOrg')}
+                </p>
+                <button
+                  type="button"
+                  disabled={isSigningInOrg}
+                  onClick={() => void handleOrgSignIn()}
+                  className="w-full py-2 px-3 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center justify-center gap-2 min-h-[40px] disabled:opacity-50"
+                >
+                  {isSigningInOrg ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <LogIn className="w-4 h-4" />
+                  )}
+                  <span>
+                    {isRTL ? 'تسجيل الدخول بحساب جوجل' : 'Sign in with Google'}
+                  </span>
+                </button>
+              </div>
+            )}
 
             <div>
               <label className="block text-xs font-semibold text-[var(--color-muted)] mb-1">
@@ -793,13 +1060,14 @@ export const Navbar: React.FC = () => {
                 type="text"
                 required
                 dir="ltr"
+                disabled={!user?.isLoggedIn || isSubmittingOrg}
                 value={inviteCodeInput}
                 onChange={(e) => {
                   setInviteCodeInput(e.target.value.toUpperCase());
                   setJoinError(null);
                 }}
-                placeholder="ORG-XXXXXX"
-                className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs font-mono text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px]"
+                placeholder="RSD-XXXX-XXXX"
+                className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs font-mono text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px] disabled:opacity-60"
               />
               {joinError && (
                 <p className="text-[11px] text-[var(--color-expense)] mt-1.5">{joinError}</p>
@@ -809,16 +1077,22 @@ export const Navbar: React.FC = () => {
             <div className="flex items-center gap-2 pt-1">
               <button
                 type="button"
-                onClick={() => setShowJoinOrg(false)}
+                disabled={isSubmittingOrg}
+                onClick={() => {
+                  setShowJoinOrg(false);
+                  clearPendingJoinCode();
+                }}
                 className="px-4 py-2.5 rounded-xl border border-[var(--color-line)] text-xs font-semibold text-[var(--color-muted)] min-h-[44px]"
               >
                 {t('cancel')}
               </button>
               <button
                 type="submit"
-                className="flex-1 py-2.5 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[44px]"
+                disabled={!user?.isLoggedIn || isSubmittingOrg}
+                className="flex-1 py-2.5 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[44px] flex items-center justify-center gap-2 disabled:opacity-50"
               >
-                {t('joinOrganization')}
+                {isSubmittingOrg && <Loader2 className="w-4 h-4 animate-spin" />}
+                <span>{t('joinOrganization')}</span>
               </button>
             </div>
           </form>

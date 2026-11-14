@@ -31,6 +31,7 @@ import {
   subscribeAdConsentChanges,
 } from './components/common/AdConsentBanner';
 import { OrganizationHubModal } from './components/organization/OrganizationHubModal';
+import { OrgMigrationWizardModal } from './components/organization/OrgMigrationWizardModal';
 
 const MainLayout: React.FC = () => {
   const {
@@ -213,6 +214,9 @@ const MainLayout: React.FC = () => {
 
         {/* Unified Enterprise Workspace Hub Modal */}
         <OrganizationHubModal />
+
+        {/* Legacy Local-to-Cloud Org Migration Wizard */}
+        <OrgMigrationWizardModal />
 
         {/* Global Currency Picker Modal */}
         {onCurrencySelectCallback && (
