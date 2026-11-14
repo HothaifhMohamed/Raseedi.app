@@ -1,0 +1,145 @@
+@import "tailwindcss";
+
+:root {
+  --color-bg: #F5EFE3;
+  --color-surface: #FBF8F1;
+  --color-ink: #2B2A26;
+  --color-muted: #6B655A;
+  --color-line: #E4DBC8;
+  --color-accent: #1E6F73;
+  --color-on-accent: #FFFFFF;
+  --color-income: #4F6E2E;
+  --color-expense: #A8452F;
+  --color-warning: #C99A2E;
+  --color-warning-text: #8A6414;
+}
+
+.dark {
+  --color-bg: #1C1A17;
+  --color-surface: #25221E;
+  --color-ink: #EDE6D8;
+  --color-muted: #A59D8D;
+  --color-line: #35312B;
+  --color-accent: #5BB5AC;
+  --color-on-accent: #1C1A17;
+  --color-income: #9BB873;
+  --color-expense: #E08A6F;
+  --color-warning: #D9A84E;
+  --color-warning-text: #D9A84E;
+}
+
+@layer base {
+  body {
+    font-family: 'IBM Plex Sans Arabic', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: var(--color-bg);
+    color: var(--color-ink);
+    -webkit-tap-highlight-color: transparent;
+    transition: background-color 150ms ease, color 150ms ease;
+  }
+}
+
+.font-title {
+  font-family: 'Reem Kufi', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.num-tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+/* Subtle 3% geometric lattice pattern for wallet cards */
+.pattern-wallet-lines {
+  background-image:
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.03) 0px,
+      rgba(255, 255, 255, 0.03) 1px,
+      transparent 1px,
+      transparent 20px
+    ),
+    repeating-linear-gradient(
+      0deg,
+      rgba(255, 255, 255, 0.03) 0px,
+      rgba(255, 255, 255, 0.03) 1px,
+      transparent 1px,
+      transparent 20px
+    );
+}
+
+.pattern-wallet-lines-dark {
+  background-image:
+    repeating-linear-gradient(
+      90deg,
+      rgba(0, 0, 0, 0.03) 0px,
+      rgba(0, 0, 0, 0.03) 1px,
+      transparent 1px,
+      transparent 20px
+    ),
+    repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.03) 0px,
+      rgba(0, 0, 0, 0.03) 1px,
+      transparent 1px,
+      transparent 20px
+    );
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-line);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
+}
+
+/* Hide spin buttons */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* Official Printable Voucher & Clean Print Output */
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  body.printing-voucher * {
+    visibility: hidden !important;
+  }
+
+  body.printing-voucher .voucher-print-sheet,
+  body.printing-voucher .voucher-print-sheet * {
+    visibility: visible !important;
+  }
+
+  body.printing-voucher .voucher-print-sheet {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 24px !important;
+    background: #ffffff !important;
+    color: #111111 !important;
+    border: 2px solid #222222 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    z-index: 99999 !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+}
+

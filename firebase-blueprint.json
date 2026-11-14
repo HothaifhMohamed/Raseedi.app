@@ -1,0 +1,353 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user account, cloud sync status, and server-managed PRO / Business subscription state",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified user Google email",
+          "maxLength": 254
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name",
+          "maxLength": 120
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "User avatar URL",
+          "maxLength": 512
+        },
+        "isPro": {
+          "type": "boolean",
+          "description": "Server-managed active Raseedi PRO entitlement"
+        },
+        "proPlan": {
+          "type": "string",
+          "enum": ["free", "monthly", "yearly", "lifetime", "business_monthly", "business_yearly", "trial", "code"],
+          "description": "Server-managed active PRO subscription or code tier"
+        },
+        "planTier": {
+          "type": "string",
+          "enum": ["free", "personal_pro", "business_pro"],
+          "description": "Server-managed entitlement tier"
+        },
+        "billingCycle": {
+          "type": "string",
+          "enum": ["free", "monthly", "yearly", "lifetime", "trial", "code"],
+          "description": "Server-managed billing cycle"
+        },
+        "expiresAt": {
+          "type": "number",
+          "description": "Server-managed subscription expiration epoch milliseconds (null for lifetime/free)"
+        },
+        "proExpiresAt": {
+          "type": "number",
+          "description": "Server-managed subscription expiration epoch milliseconds alias (null for lifetime/free)"
+        },
+        "hasUsedBusinessTrial": {
+          "type": "boolean",
+          "description": "Server-managed flag tracking 14-day business trial usage"
+        },
+        "activationCodeHash": {
+          "type": "string",
+          "description": "Server-recorded SHA-256 hash of redeemed PRO activation code",
+          "maxLength": 128
+        },
+        "lastSyncedAt": {
+          "type": "number",
+          "description": "Epoch milliseconds of last cloud backup sync"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp"
+        }
+      },
+      "required": ["uid", "email", "isPro", "createdAt", "updatedAt"]
+    },
+    "CloudBackupMeta": {
+      "title": "CloudBackupMeta",
+      "description": "Chunked backup metadata, wallets, categories, budgets, debts, goals, templates, and settings",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "schemaVersion": {
+          "type": "number",
+          "description": "Backup schema version (2 = chunked)"
+        },
+        "chunkCount": {
+          "type": "number",
+          "description": "Number of transaction chunk documents in backupChunks"
+        },
+        "totalTransactions": {
+          "type": "number",
+          "description": "Total transactions stored across chunks"
+        },
+        "wallets": { "type": "array", "description": "User wallets list" },
+        "categories": { "type": "array", "description": "User categories list" },
+        "budgets": { "type": "array", "description": "User budgets list" },
+        "debts": { "type": "array", "description": "User debts list" },
+        "goals": { "type": "array", "description": "User savings goals list" },
+        "templates": { "type": "array", "description": "User quick templates list" },
+        "moneyCircles": { "type": "array", "description": "Personal money circles (ROSCA) list" },
+        "orgWorkspaces": { "type": "object", "description": "Enterprise organization workspaces keyed by orgId" },
+        "activeWorkspace": { "type": "string", "description": "Active workspace mode ('personal' or orgId)", "maxLength": 128 },
+        "settings": { "type": "object", "description": "App settings object" },
+        "hasCompletedOnboarding": { "type": "boolean", "description": "Whether onboarding is completed" },
+        "updatedAtMs": { "type": "number", "description": "Latest backup write epoch ms" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp" }
+      },
+      "required": [
+        "uid",
+        "schemaVersion",
+        "chunkCount",
+        "totalTransactions",
+        "wallets",
+        "categories",
+        "budgets",
+        "debts",
+        "goals",
+        "templates",
+        "settings",
+        "hasCompletedOnboarding",
+        "updatedAtMs",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CloudBackupChunk": {
+      "title": "CloudBackupChunk",
+      "description": "Chunk document containing up to 400 transactions for scalable cloud backup",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "chunkIndex": { "type": "number", "description": "Zero-based chunk sequence index" },
+        "transactions": { "type": "array", "description": "Slice of user transactions" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp" }
+      },
+      "required": ["uid", "chunkIndex", "transactions", "updatedAt"]
+    },
+    "ActivationCode": {
+      "title": "ActivationCode",
+      "description": "Server-only hashed PRO / Business activation codes redeemed atomically via /api/redeem-code",
+      "type": "object",
+      "properties": {
+        "plan": {
+          "type": "string",
+          "enum": ["monthly", "yearly", "lifetime", "business_monthly", "business_yearly", "code"],
+          "description": "Plan unlocked by this code"
+        },
+        "usedBy": { "type": "string", "description": "UID of user who redeemed this code" },
+        "usedAt": { "type": "string", "format": "date-time", "description": "Server timestamp of redemption" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp" }
+      },
+      "required": ["plan", "createdAt"]
+    },
+    "ScanQuota": {
+      "title": "ScanQuota",
+      "description": "Server-only monthly AI receipt scan counter per user",
+      "type": "object",
+      "properties": {
+        "month": { "type": "string", "description": "YYYY-MM month key" },
+        "count": { "type": "number", "description": "Number of receipt scans used in the month" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp" }
+      },
+      "required": ["month", "count", "updatedAt"]
+    },
+    "Organization": {
+      "title": "Organization",
+      "description": "Enterprise workspace container with VAT, approval threshold, and accounting period lock",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "maxLength": 120 },
+        "currency": { "type": "string", "maxLength": 8 },
+        "industry": { "type": "string", "enum": ["retail", "restaurant", "tech", "construction", "medical", "general"] },
+        "vatRate": { "type": "number" },
+        "taxNumber": { "type": "string", "maxLength": 64 },
+        "approvalThreshold": { "type": "number" },
+        "lockedUntilDate": { "type": "string", "maxLength": 16 },
+        "inviteCode": { "type": "string", "maxLength": 32 },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "extraSeats": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "currency", "vatRate", "approvalThreshold", "inviteCode", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "OrganizationMember": {
+      "title": "OrganizationMember",
+      "description": "Member role & spending limit inside an organization",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 254 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["owner", "admin", "accountant", "employee", "viewer"] },
+        "department": { "type": "string", "maxLength": 80 },
+        "spendingLimit": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "invited", "suspended"] },
+        "joinedAt": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "role", "status", "joinedAt", "updatedAt"]
+    },
+    "CostCenter": {
+      "title": "CostCenter",
+      "description": "Department or project cost center with allocated budget",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orgId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "code": { "type": "string", "maxLength": 32 },
+        "name": { "type": "string", "maxLength": 120 },
+        "nameAr": { "type": "string", "maxLength": 120 },
+        "nameEn": { "type": "string", "maxLength": 120 },
+        "type": { "type": "string", "enum": ["department", "project", "branch"] },
+        "budgetAllocated": { "type": "number" },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "orgId", "code", "nameAr", "nameEn", "budgetAllocated", "isActive", "createdAt", "updatedAt"]
+    },
+    "BusinessParty": {
+      "title": "BusinessParty",
+      "description": "Vendor or client sub-ledger account with aging balance",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orgId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "type": { "type": "string", "enum": ["vendor", "client", "both"] },
+        "name": { "type": "string", "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "email": { "type": "string", "maxLength": 254 },
+        "taxId": { "type": "string", "maxLength": 64 },
+        "creditLimit": { "type": "number" },
+        "currency": { "type": "string", "maxLength": 8 },
+        "balance": { "type": "number" },
+        "dueDate": { "type": "string", "maxLength": 16 },
+        "notes": { "type": "string", "maxLength": 400 },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "orgId", "type", "name", "currency", "balance", "createdAt", "updatedAt"]
+    },
+    "OrgLedgerRecord": {
+      "title": "OrgLedgerRecord",
+      "description": "Organization transaction, wallet, category, or budget document",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orgId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "submittedBy": { "type": "string", "maxLength": 128 },
+        "approvalStatus": { "type": "string", "enum": ["approved", "pending_approval", "rejected"] },
+        "payload": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "orgId", "payload", "updatedAt"]
+    },
+    "AuditLogEntry": {
+      "title": "AuditLogEntry",
+      "description": "Immutable append-only enterprise audit trail",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orgId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "action": { "type": "string", "enum": ["create", "update", "delete", "approve", "reject", "lock_period", "role_change"] },
+        "entityType": { "type": "string", "maxLength": 40 },
+        "entityId": { "type": "string", "maxLength": 128 },
+        "actorUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorName": { "type": "string", "maxLength": 120 },
+        "summary": { "type": "string", "maxLength": 300 },
+        "timestamp": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "orgId", "action", "entityType", "entityId", "actorUid", "actorName", "summary", "timestamp", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile and server-managed PRO / Business subscription status"
+    },
+    "/users/{userId}/backup/{docId}": {
+      "schema": { "$ref": "#/entities/CloudBackupMeta" },
+      "description": "Chunked backup metadata and non-transaction collections"
+    },
+    "/users/{userId}/backupChunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/CloudBackupChunk" },
+      "description": "Chunked transaction slices (max 400 transactions per doc)"
+    },
+    "/users/{userId}/scanQuotas/{monthKey}": {
+      "schema": { "$ref": "#/entities/ScanQuota" },
+      "description": "Server-only monthly AI receipt scan quota counter"
+    },
+    "/activationCodes/{codeHash}": {
+      "schema": { "$ref": "#/entities/ActivationCode" },
+      "description": "Server-only PRO activation code hashes"
+    },
+    "/organizations/{orgId}": {
+      "schema": { "$ref": "#/entities/Organization" },
+      "description": "Enterprise organization root document"
+    },
+    "/organizations/{orgId}/members/{memberUid}": {
+      "schema": { "$ref": "#/entities/OrganizationMember" },
+      "description": "Organization team members & RBAC roles"
+    },
+    "/organizations/{orgId}/costCenters/{costCenterId}": {
+      "schema": { "$ref": "#/entities/CostCenter" },
+      "description": "Organization cost centers / projects"
+    },
+    "/organizations/{orgId}/parties/{partyId}": {
+      "schema": { "$ref": "#/entities/BusinessParty" },
+      "description": "Organization vendors and clients"
+    },
+    "/organizations/{orgId}/transactions/{txId}": {
+      "schema": { "$ref": "#/entities/OrgLedgerRecord" },
+      "description": "Organization ledger transactions"
+    },
+    "/organizations/{orgId}/wallets/{walletId}": {
+      "schema": { "$ref": "#/entities/OrgLedgerRecord" },
+      "description": "Organization treasuries & bank accounts"
+    },
+    "/organizations/{orgId}/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/OrgLedgerRecord" },
+      "description": "Organization accounting categories"
+    },
+    "/organizations/{orgId}/budgets/{budgetId}": {
+      "schema": { "$ref": "#/entities/OrgLedgerRecord" },
+      "description": "Organization budgets"
+    },
+    "/organizations/{orgId}/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLogEntry" },
+      "description": "Append-only immutable audit log"
+    }
+  }
+}

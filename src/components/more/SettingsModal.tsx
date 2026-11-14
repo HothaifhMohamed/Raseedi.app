@@ -1,0 +1,690 @@
+import React, { useState } from 'react';
+import {
+  Settings as SettingsIcon,
+  Moon,
+  Sun,
+  Lock,
+  Bell,
+  Trash2,
+  UserX,
+  X,
+  Building2,
+  LockKeyhole,
+  Copy,
+  Check,
+} from 'lucide-react';
+import { useApp } from '../../context/AppContext';
+import { ConfirmationModal } from '../common/ConfirmationModal';
+import { hashPin } from '../../services/security';
+import {
+  isWebNotificationSupported,
+  requestBrowserNotificationPermission,
+} from '../../services/notifications';
+
+interface SettingsModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
+  const {
+    settings,
+    user,
+    updateSettings,
+    resetAllData,
+    deleteAccountAndData,
+    isOrgWorkspace,
+    activeOrganization,
+    canOrgManage,
+    updateOrganizationSettings,
+    lockAccountingPeriod,
+    t,
+    isRTL,
+  } = useApp();
+
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
+  const [confirmDeleteAccount, setConfirmDeleteAccount] = useState(false);
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+  const [deleteAccountError, setDeleteAccountError] = useState<string | null>(null);
+  const [pinInput, setPinInput] = useState('');
+  const [showPinInput, setShowPinInput] = useState(false);
+  const [copiedInvite, setCopiedInvite] = useState(false);
+  const [notifPerm, setNotifPerm] = useState<string>(() =>
+    isWebNotificationSupported() ? Notification.permission : 'unsupported'
+  );
+  const [lockDateInput, setLockDateInput] = useState(activeOrganization?.lockedUntilDate || '');
+
+  if (!isOpen) return null;
+
+  const handleSavePin = async () => {
+    if (pinInput.length !== 4) return;
+    const { hash, salt } = await hashPin(pinInput);
+    updateSettings({ isAppLockEnabled: true, appPin: hash, appPinSalt: salt });
+    setShowPinInput(false);
+    setPinInput('');
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-md max-h-[90vh] flex flex-col bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl text-[var(--color-ink)] shadow-xl overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between p-4 border-b border-[var(--color-line)] bg-[var(--color-bg)]">
+          <div className="flex items-center gap-2">
+            <SettingsIcon className="w-5 h-5 text-[var(--color-accent)]" />
+            <h3 className="text-sm font-bold text-[var(--color-ink)]">{t('settingsTitle')}</h3>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1.5 text-[var(--color-muted)] hover:text-[var(--color-ink)] min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Settings Form Body */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {/* 1. Language & Theme */}
+          <div className="p-4 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl space-y-3">
+            <h4 className="text-xs font-bold text-[var(--color-ink)]">
+              {isRTL ? 'اللغة والمظهر' : 'Appearance & Language'}
+            </h4>
+
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[var(--color-muted)]">{t('themeSetting')}</span>
+              <div className="flex items-center gap-1 p-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg">
+                <button
+                  onClick={() => updateSettings({ theme: 'dark' })}
+                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors min-h-[32px] ${
+                    settings.theme === 'dark'
+                      ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
+                      : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+                  }`}
+                >
+                  <Moon className="w-3.5 h-3.5" />
+                  <span>{isRTL ? 'داكن' : 'Dark'}</span>
+                </button>
+                <button
+                  onClick={() => updateSettings({ theme: 'light' })}
+                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors min-h-[32px] ${
+                    settings.theme === 'light'
+                      ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
+                      : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+                  }`}
+                >
+                  <Sun className="w-3.5 h-3.5" />
+                  <span>{isRTL ? 'فاتح' : 'Light'}</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">
+              <span className="text-xs text-[var(--color-muted)]">{t('languageSetting')}</span>
+              <div className="flex items-center gap-1 p-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg">
+                <button
+                  onClick={() => updateSettings({ language: 'ar' })}
+                  className={`px-3 py-1 rounded-md text-xs font-semibold transition-colors min-h-[32px] ${
+                    settings.language === 'ar'
+                      ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
+                      : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+                  }`}
+                >
+                  العربية
+                </button>
+                <button
+                  onClick={() => updateSettings({ language: 'en' })}
+                  className={`px-3 py-1 rounded-md text-xs font-semibold transition-colors min-h-[32px] ${
+                    settings.language === 'en'
+                      ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
+                      : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+                  }`}
+                >
+                  English
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* 2. Numbers, Digits & Calendar Settings */}
+          <div className="p-4 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl space-y-3">
+            <h4 className="text-xs font-bold text-[var(--color-ink)]">
+              {isRTL ? 'الأرقام والتقويم' : 'Digits & Calendar'}
+            </h4>
+
+            {/* Digits format */}
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[var(--color-muted)]">{t('digitFormatSetting')}</span>
+              <div className="flex items-center gap-1 p-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg">
+                <button
+                  onClick={() => updateSettings({ digitFormat: 'western' })}
+                  className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors min-h-[32px] ${
+                    settings.digitFormat === 'western'
+                      ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
+                      : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+                  }`}
+                >
+                  123
+                </button>
+                <button
+                  onClick={() => updateSettings({ digitFormat: 'arabic' })}
+                  className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors min-h-[32px] ${
+                    settings.digitFormat === 'arabic'
+                      ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
+                      : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+                  }`}
+                >
+                  ١٢٣
+                </button>
+              </div>
+            </div>
+
+            {/* Decimal places */}
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">
+              <span className="text-xs text-[var(--color-muted)]">{t('decimalPlacesSetting')}</span>
+              <div className="flex items-center gap-1 p-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg">
+                {[0, 1, 2, 3].map((dec) => (
+                  <button
+                    key={dec}
+                    onClick={() => updateSettings({ decimalPlaces: dec })}
+                    className={`w-7 h-7 rounded-md text-xs font-semibold transition-colors min-h-[28px] ${
+                      settings.decimalPlaces === dec
+                        ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
+                        : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+                    }`}
+                  >
+                    {dec}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* First Day of the Month */}
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">
+              <span className="text-xs text-[var(--color-muted)]">{t('firstDayOfMonth')}</span>
+              <select
+                value={settings.firstDayOfMonth}
+                onChange={(e) => updateSettings({ firstDayOfMonth: parseInt(e.target.value) || 1 })}
+                className="px-2.5 py-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[36px]"
+              >
+                {Array.from({ length: 31 }, (_, i) => i + 1).map((day) => (
+                  <option key={day} value={day}>
+                    {isRTL ? `يوم ${day}` : `Day ${day}`}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* First Day of the Week */}
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">
+              <span className="text-xs text-[var(--color-muted)]">{t('firstDayOfWeek')}</span>
+              <select
+                value={settings.firstDayOfWeek}
+                onChange={(e) => updateSettings({ firstDayOfWeek: parseInt(e.target.value) || 6 })}
+                className="px-2.5 py-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[36px]"
+              >
+                <option value={6}>{t('saturday')}</option>
+                <option value={0}>{t('sunday')}</option>
+                <option value={1}>{t('monday')}</option>
+              </select>
+            </div>
+          </div>
+
+          {/* 3. Transaction & Display Features */}
+          <div className="p-4 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl space-y-3">
+            <h4 className="text-xs font-bold text-[var(--color-ink)]">
+              {isRTL ? 'سلوك العرض والمعاملات' : 'Display & Transactions Behavior'}
+            </h4>
+
+            {/* Default filter */}
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[var(--color-muted)]">{t('defaultFilterSetting')}</span>
+              <select
+                value={settings.defaultFilter}
+                onChange={(e) => updateSettings({ defaultFilter: e.target.value as any })}
+                className="px-2.5 py-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[36px]"
+              >
+                <option value="all">{t('filterAll')}</option>
+                <option value="expense">{t('filterExpense')}</option>
+                <option value="income">{t('filterIncome')}</option>
+              </select>
+            </div>
+
+            {/* Exclude debts from balance */}
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">
+              <span className="text-xs text-[var(--color-muted)]">{t('excludeDebtsSetting')}</span>
+              <input
+                type="checkbox"
+                checked={settings.excludeDebtsFromBalance}
+                onChange={(e) => updateSettings({ excludeDebtsFromBalance: e.target.checked })}
+                className="w-4 h-4 accent-[var(--color-accent)] rounded cursor-pointer"
+              />
+            </div>
+
+            {/* Show Current Balance */}
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">
+              <span className="text-xs text-[var(--color-muted)]">{t('showCurrentBalanceSetting')}</span>
+              <input
+                type="checkbox"
+                checked={settings.showCurrentBalance}
+                onChange={(e) => updateSettings({ showCurrentBalance: e.target.checked })}
+                className="w-4 h-4 accent-[var(--color-accent)] rounded cursor-pointer"
+              />
+            </div>
+
+            {/* Show Budget Indicator on Home */}
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">
+              <span className="text-xs text-[var(--color-muted)]">{t('showBudgetIndicatorSetting')}</span>
+              <input
+                type="checkbox"
+                checked={settings.showBudgetIndicator}
+                onChange={(e) => updateSettings({ showBudgetIndicator: e.target.checked })}
+                className="w-4 h-4 accent-[var(--color-accent)] rounded cursor-pointer"
+              />
+            </div>
+
+            {/* Show Calculator Keypad */}
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">
+              <span className="text-xs text-[var(--color-muted)]">{t('showCalculatorKeypadSetting')}</span>
+              <input
+                type="checkbox"
+                checked={settings.showCalculatorKeypad}
+                onChange={(e) => updateSettings({ showCalculatorKeypad: e.target.checked })}
+                className="w-4 h-4 accent-[var(--color-accent)] rounded cursor-pointer"
+              />
+            </div>
+
+            {/* Use last-used wallet by default */}
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">
+              <span className="text-xs text-[var(--color-muted)]">{t('useLastUsedWalletSetting')}</span>
+              <input
+                type="checkbox"
+                checked={settings.useLastUsedWallet}
+                onChange={(e) => updateSettings({ useLastUsedWallet: e.target.checked })}
+                className="w-4 h-4 accent-[var(--color-accent)] rounded cursor-pointer"
+              />
+            </div>
+
+            {/* Show priorities in stats only */}
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">
+              <span className="text-xs text-[var(--color-muted)]">{t('showPrioritiesInStatsOnlySetting')}</span>
+              <input
+                type="checkbox"
+                checked={settings.showPrioritiesInStatsOnly}
+                onChange={(e) => updateSettings({ showPrioritiesInStatsOnly: e.target.checked })}
+                className="w-4 h-4 accent-[var(--color-accent)] rounded cursor-pointer"
+              />
+            </div>
+
+            {/* Use updated live exchange rates */}
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">
+              <span className="text-xs text-[var(--color-muted)]">{t('useUpdatedExchangeRatesSetting')}</span>
+              <input
+                type="checkbox"
+                checked={settings.useUpdatedExchangeRates}
+                onChange={(e) => updateSettings({ useUpdatedExchangeRates: e.target.checked })}
+                className="w-4 h-4 accent-[var(--color-accent)] rounded cursor-pointer"
+              />
+            </div>
+
+            {/* Use rate at transaction time */}
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">
+              <span className="text-xs text-[var(--color-muted)]">{t('useRateAtTransactionTimeSetting')}</span>
+              <input
+                type="checkbox"
+                checked={settings.useRateAtTransactionTime}
+                onChange={(e) => updateSettings({ useRateAtTransactionTime: e.target.checked })}
+                className="w-4 h-4 accent-[var(--color-accent)] rounded cursor-pointer"
+              />
+            </div>
+          </div>
+
+          {/* 4. Security & App PIN Lock with Salted Hash */}
+          <div className="p-4 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl space-y-3">
+            <h4 className="text-xs font-bold text-[var(--color-ink)] flex items-center gap-1.5">
+              <Lock className="w-3.5 h-3.5 text-[var(--color-accent)]" />
+              <span>{isRTL ? 'الأمان وحماية التطبيق' : 'Security & PIN Lock'}</span>
+            </h4>
+
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[var(--color-muted)]">{t('appLockPinSetting')}</span>
+              <input
+                type="checkbox"
+                checked={settings.isAppLockEnabled}
+                onChange={(e) => {
+                  if (e.target.checked) {
+                    setShowPinInput(true);
+                  } else {
+                    updateSettings({ isAppLockEnabled: false, appPin: undefined, appPinSalt: undefined });
+                  }
+                }}
+                className="w-4 h-4 accent-[var(--color-accent)] rounded cursor-pointer"
+              />
+            </div>
+
+            {settings.isAppLockEnabled && (
+              <div className="text-[11px] text-[var(--color-accent)] font-medium">
+                {isRTL ? (
+                  <>
+                    رمز <bdi dir="ltr">PIN</bdi> مفعل حالياً (مشفر بتقنية <bdi dir="ltr">PBKDF2</bdi>)
+                  </>
+                ) : (
+                  'PIN is active (PBKDF2-SHA256 hashed)'
+                )}
+                <button
+                  onClick={() => setShowPinInput(true)}
+                  className="mx-2 text-[var(--color-ink)] underline"
+                >
+                  {isRTL ? 'تغيير الرمز' : 'Change PIN'}
+                </button>
+              </div>
+            )}
+
+            {showPinInput && (
+              <div className="p-3 bg-[var(--color-surface)] rounded-lg border border-[var(--color-line)] space-y-2">
+                <label className="text-xs text-[var(--color-ink)] block">
+                  {isRTL ? (
+                    <>
+                      أدخل 4 أرقام لرمز <bdi dir="ltr">PIN</bdi> الجديد:
+                    </>
+                  ) : (
+                    'Enter 4-digit PIN:'
+                  )}
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="password"
+                    maxLength={4}
+                    value={pinInput}
+                    onChange={(e) => setPinInput(e.target.value.replace(/\D/g, ''))}
+                    placeholder="••••"
+                    className="w-24 px-3 py-1.5 text-center font-mono tracking-widest bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-sm text-[var(--color-ink)] min-h-[36px]"
+                  />
+                  <button
+                    disabled={pinInput.length !== 4}
+                    onClick={handleSavePin}
+                    className="px-3 py-1.5 bg-[var(--color-accent)] hover:opacity-90 disabled:opacity-40 text-[var(--color-on-accent)] font-semibold rounded-lg text-xs min-h-[36px]"
+                  >
+                    {isRTL ? 'حفظ الرمز' : 'Save PIN'}
+                  </button>
+                  <button
+                    onClick={() => setShowPinInput(false)}
+                    className="px-2 py-1.5 text-[var(--color-muted)] hover:text-[var(--color-ink)] text-xs min-h-[36px]"
+                  >
+                    {isRTL ? 'إلغاء' : 'Cancel'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 5. Notification Settings */}
+          <div className="p-4 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="text-xs font-bold text-[var(--color-ink)] flex items-center gap-1.5">
+                <Bell className="w-3.5 h-3.5 text-[var(--color-accent)]" />
+                <span>{t('notificationSettings')}</span>
+              </h4>
+              {isWebNotificationSupported() && (
+                <span className="text-[10px] px-2 py-0.5 rounded bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-muted)]">
+                  {notifPerm === 'granted'
+                    ? isRTL
+                      ? 'إشعارات المتصفح مفعّلة'
+                      : 'Browser Active'
+                    : notifPerm === 'denied'
+                    ? isRTL
+                      ? 'محظورة من المتصفح'
+                      : 'Blocked'
+                    : isRTL
+                    ? 'غير مفعّلة'
+                    : 'Not Granted'}
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-[var(--color-muted)]">{t('dailyReminder')}</span>
+              <input
+                type="checkbox"
+                checked={settings.notificationsEnabled}
+                onChange={async (e) => {
+                  const checked = e.target.checked;
+                  updateSettings({ notificationsEnabled: checked });
+                  if (checked) {
+                    const perm = await requestBrowserNotificationPermission();
+                    setNotifPerm(perm);
+                  }
+                }}
+                className="w-4 h-4 accent-[var(--color-accent)] rounded cursor-pointer"
+              />
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">
+              <span className="text-xs text-[var(--color-muted)]">{t('debtReminder')}</span>
+              <input
+                type="checkbox"
+                checked={settings.debtRemindersEnabled ?? true}
+                onChange={(e) => updateSettings({ debtRemindersEnabled: e.target.checked })}
+                className="w-4 h-4 accent-[var(--color-accent)] rounded cursor-pointer"
+              />
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">
+              <span className="text-xs text-[var(--color-muted)]">{t('budgetAlerts')}</span>
+              <input
+                type="checkbox"
+                checked={settings.budgetAlertsEnabled ?? true}
+                onChange={(e) => updateSettings({ budgetAlertsEnabled: e.target.checked })}
+                className="w-4 h-4 accent-[var(--color-accent)] rounded cursor-pointer"
+              />
+            </div>
+          </div>
+
+          {/* 5b. Organization Settings & Accounting Period Lock */}
+          {isOrgWorkspace && activeOrganization && (
+            <div className="p-4 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold text-[var(--color-ink)] flex items-center gap-1.5">
+                  <Building2 className="w-3.5 h-3.5 text-[var(--color-accent)]" />
+                  <span>{isRTL ? 'إعدادات المؤسسة والضرائب' : 'Organization & Accounting'}</span>
+                </h4>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard?.writeText(activeOrganization.inviteCode);
+                    setCopiedInvite(true);
+                    setTimeout(() => setCopiedInvite(false), 2000);
+                  }}
+                  className="text-[10px] font-mono px-2 py-1 rounded bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-accent)] flex items-center gap-1"
+                >
+                  {copiedInvite ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                  <span>{activeOrganization.inviteCode}</span>
+                </button>
+              </div>
+
+              {canOrgManage && (
+                <>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[11px] text-[var(--color-muted)] mb-1">
+                        {t('vatRate')} (%)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="0.5"
+                        value={activeOrganization.vatRate ?? 14}
+                        onChange={(e) =>
+                          updateOrganizationSettings({ vatRate: Number(e.target.value) || 0 })
+                        }
+                        className="w-full px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[38px]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-[var(--color-muted)] mb-1">
+                        {t('taxNumber')}
+                      </label>
+                      <input
+                        type="text"
+                        dir="ltr"
+                        value={activeOrganization.taxNumber || ''}
+                        onChange={(e) => updateOrganizationSettings({ taxNumber: e.target.value })}
+                        placeholder="TRN-..."
+                        className="w-full px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[38px]"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] text-[var(--color-muted)] mb-1">
+                      {isRTL
+                        ? `حد اعتماد المصروف التلقائي (${activeOrganization.currency})`
+                        : `Auto-Approval Expense Limit (${activeOrganization.currency})`}
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={activeOrganization.approvalThreshold ?? 0}
+                      onChange={(e) =>
+                        updateOrganizationSettings({
+                          approvalThreshold: Number(e.target.value) || 0,
+                        })
+                      }
+                      className="w-full px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[38px]"
+                    />
+                  </div>
+
+                  <div className="pt-2 border-t border-[var(--color-line)] space-y-2">
+                    <label className="flex items-center gap-1.5 text-[11px] font-semibold text-[var(--color-ink)]">
+                      <LockKeyhole className="w-3.5 h-3.5 text-[var(--color-accent)]" />
+                      <span>{t('periodLock')}</span>
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="date"
+                        value={lockDateInput}
+                        onChange={(e) => setLockDateInput(e.target.value)}
+                        className="flex-1 px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[38px]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => lockAccountingPeriod(lockDateInput || undefined)}
+                        className="px-3 py-1.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-semibold min-h-[38px]"
+                      >
+                        {lockDateInput ? (isRTL ? 'قفل' : 'Lock') : isRTL ? 'فتح' : 'Unlock'}
+                      </button>
+                    </div>
+                    {activeOrganization.lockedUntilDate && (
+                      <p className="text-[10px] text-[var(--color-warning-text)]">
+                        {isRTL
+                          ? `الدفاتر مقفلة حتى تاريخ ${activeOrganization.lockedUntilDate}`
+                          : `Books locked through ${activeOrganization.lockedUntilDate}`}
+                      </p>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* 6. Danger Zone: Delete Data & Delete Account */}
+          <div className="p-4 bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/30 rounded-xl space-y-2.5">
+            <h4 className="text-xs font-bold text-[var(--color-expense)]">
+              {isRTL ? 'إدارة البيانات والحساب' : 'Data & Account Management'}
+            </h4>
+
+            <button
+              type="button"
+              onClick={() => setConfirmDeleteAll(true)}
+              className="w-full py-2.5 px-3 bg-[var(--color-expense)] text-white hover:opacity-90 font-semibold rounded-lg text-xs flex items-center justify-center gap-2 transition-opacity min-h-[44px]"
+            >
+              <Trash2 className="w-4 h-4" />
+              <span>{t('deleteAllData')}</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={isDeletingAccount}
+              onClick={() => {
+                setDeleteAccountError(null);
+                setConfirmDeleteAccount(true);
+              }}
+              className="w-full py-2.5 px-3 bg-[var(--color-surface)] border border-[var(--color-expense)]/40 text-[var(--color-expense)] hover:bg-[var(--color-expense)]/10 font-semibold rounded-lg text-xs flex items-center justify-center gap-2 transition-colors min-h-[44px] disabled:opacity-50"
+            >
+              <UserX className="w-4 h-4" />
+              <span>
+                {isRTL ? 'حذف حسابي وبياناتي السحابية' : 'Delete my account and cloud data'}
+              </span>
+            </button>
+
+            {deleteAccountError && (
+              <p className="text-[11px] text-[var(--color-expense)] font-medium">
+                {deleteAccountError}
+              </p>
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="p-4 border-t border-[var(--color-line)] bg-[var(--color-bg)]">
+          <button
+            onClick={onClose}
+            className="w-full py-2.5 bg-[var(--color-surface)] border border-[var(--color-line)] hover:bg-[var(--color-bg)] font-semibold rounded-lg text-xs text-[var(--color-ink)] min-h-[44px]"
+          >
+            {t('close')}
+          </button>
+        </div>
+      </div>
+
+      {/* Delete All Data Confirmation */}
+      <ConfirmationModal
+        isOpen={confirmDeleteAll}
+        onClose={() => setConfirmDeleteAll(false)}
+        onConfirm={() => {
+          resetAllData();
+          onClose();
+        }}
+        title={t('deleteAllData')}
+        message={t('deleteAllDataConfirm')}
+        confirmLabel={t('confirmDelete')}
+        cancelLabel={t('cancel')}
+      />
+
+      {/* Delete Account & Cloud Data Confirmation */}
+      <ConfirmationModal
+        isOpen={confirmDeleteAccount}
+        onClose={() => setConfirmDeleteAccount(false)}
+        onConfirm={async () => {
+          setIsDeletingAccount(true);
+          setDeleteAccountError(null);
+          const ok = await deleteAccountAndData();
+          setIsDeletingAccount(false);
+          if (ok) {
+            onClose();
+          } else {
+            setDeleteAccountError(
+              user?.isLoggedIn
+                ? isRTL
+                  ? 'تعذر حذف البيانات السحابية. تحقق من اتصالك وأعد تسجيل الدخول ثم حاول مجدداً.'
+                  : 'Failed to delete cloud account data. Please check your connection and try again.'
+                : isRTL
+                ? 'تعذر مسح البيانات.'
+                : 'Failed to clear account data.'
+            );
+          }
+        }}
+        title={isRTL ? 'حذف حسابي وبياناتي السحابية' : 'Delete my account and cloud data'}
+        message={
+          user?.isLoggedIn
+            ? isRTL
+              ? 'سيتم حذف حسابك على الخادم وجميع نسخك الاحتياطية السحابية واشتراكك وبيانات هذا الجهاز نهائياً ولا يمكن التراجع عن ذلك.'
+              : 'This permanently deletes your cloud account, cloud backups, usage records, and all local data on this device. This cannot be undone.'
+            : isRTL
+            ? 'سيتم مسح جميع البيانات المحلية والإعدادات من هذا الجهاز نهائياً.'
+            : 'This permanently clears all local data and settings from this device.'
+        }
+        confirmLabel={isRTL ? 'نعم، احذف الحساب والبيانات' : 'Delete Account & Data'}
+        cancelLabel={t('cancel')}
+      />
+    </div>
+  );
+};

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Sand paper background with rounded corners and hairline border -->
+  <rect width="512" height="512" rx="128" fill="#F5EFE3" />
+  <rect x="8" y="8" width="496" height="496" rx="120" fill="none" stroke="#E4DBC8" stroke-width="4" />
+
+  <!-- Flat Turquoise Wallet Shape -->
+  <g transform="translate(116, 136)">
+    <!-- Main Wallet Body -->
+    <rect x="0" y="40" width="280" height="190" rx="28" fill="#1E6F73" />
+    
+    <!-- Top Ledger Flap -->
+    <path d="M 0 40 Q 0 10 32 10 L 248 10 Q 280 10 280 40 L 280 85 L 0 85 Z" fill="#17595D" />
+
+    <!-- Thin divider stitch -->
+    <line x1="20" y1="50" x2="260" y2="50" stroke="#F5EFE3" stroke-width="2" stroke-opacity="0.35" stroke-dasharray="6 5" />
+
+    <!-- Clasp Tab -->
+    <path d="M 160 95 L 270 95 Q 280 95 280 108 L 280 162 Q 280 175 270 175 L 160 175 Q 140 175 140 135 Q 140 95 160 95 Z" fill="#12484B" stroke="#1E6F73" stroke-width="3" />
+
+    <!-- Sand Coin Emblem with Arabic 'R' (ر) -->
+    <circle cx="215" cy="135" r="24" fill="#FBF8F1" stroke="#E4DBC8" stroke-width="2" />
+    <text x="215" y="145" font-family="'Reem Kufi', 'IBM Plex Sans Arabic', sans-serif" font-size="28" font-weight="bold" fill="#1E6F73" text-anchor="middle">ر</text>
+  </g>
+</svg>
