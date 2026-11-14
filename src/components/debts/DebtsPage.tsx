@@ -22,6 +22,7 @@ import {
   calculateAgingReport,
   formatLocalDate,
 } from '../../services/calculations';
+import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../../services/numbers';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { MoneyText } from '../common/MoneyText';
 
@@ -127,7 +128,7 @@ export const DebtsPage: React.FC = () => {
   const handleSaveParty = (e: React.FormEvent) => {
     e.preventDefault();
     if (!canOrgWrite) return;
-    const bal = parseFloat(partyBalance);
+    const bal = parseLocalizedNumber(partyBalance);
     if (!partyName.trim() || Number.isNaN(bal) || bal < 0) return;
     const payload = {
       type: partyType,
@@ -178,8 +179,9 @@ export const DebtsPage: React.FC = () => {
 
   const handleSaveDebt = (e: React.FormEvent) => {
     e.preventDefault();
-    const tot = parseFloat(totalAmount);
+    const tot = parseLocalizedNumber(totalAmount);
     if (!personName.trim() || isNaN(tot) || tot <= 0) return;
+    const parsedInstallment = monthlyInstallment ? parseLocalizedNumber(monthlyInstallment) : NaN;
 
     const payload = {
       type: activeTab,
@@ -188,7 +190,7 @@ export const DebtsPage: React.FC = () => {
       paidAmount: editingDebt ? editingDebt.paidAmount : 0,
       currency,
       dueDate: dueDate || undefined,
-      monthlyInstallment: monthlyInstallment ? parseFloat(monthlyInstallment) : undefined,
+      monthlyInstallment: !isNaN(parsedInstallment) && parsedInstallment > 0 ? parsedInstallment : undefined,
       notes: notes.trim(),
       contactPhone: contactPhone.trim(),
     };
@@ -218,7 +220,7 @@ export const DebtsPage: React.FC = () => {
   const handleRecordPayment = (e: React.FormEvent) => {
     e.preventDefault();
     if (!paymentModalDebt) return;
-    const amountNum = parseFloat(paymentAmount);
+    const amountNum = parseLocalizedNumber(paymentAmount);
     if (isNaN(amountNum) || amountNum <= 0) return;
 
     recordDebtPayment(
@@ -616,12 +618,12 @@ export const DebtsPage: React.FC = () => {
                       {isRTL ? 'الرصيد المستحق' : 'Outstanding Balance'}
                     </label>
                     <input
-                      type="number"
-                      step="any"
-                      min="0"
+                      type="text"
+                      inputMode="decimal"
+                      dir="ltr"
                       required
                       value={partyBalance}
-                      onChange={(e) => setPartyBalance(e.target.value)}
+                      onChange={(e) => setPartyBalance(normalizeArabicPersianNumerals(e.target.value))}
                       className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-xs num-tabular min-h-[44px]"
                     />
                   </div>
@@ -1004,11 +1006,12 @@ export const DebtsPage: React.FC = () => {
                   {t('amount')}
                 </label>
                 <input
-                  type="number"
-                  step="any"
+                  type="text"
+                  inputMode="decimal"
+                  dir="ltr"
                   required
                   value={paymentAmount}
-                  onChange={(e) => setPaymentAmount(e.target.value)}
+                  onChange={(e) => setPaymentAmount(normalizeArabicPersianNumerals(e.target.value))}
                   placeholder="0.00"
                   className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px] num-tabular"
                 />
@@ -1157,11 +1160,12 @@ export const DebtsPage: React.FC = () => {
                     {isRTL ? 'إجمالي المبلغ' : 'Total Amount'}
                   </label>
                   <input
-                    type="number"
-                    step="any"
+                    type="text"
+                    inputMode="decimal"
+                    dir="ltr"
                     required
                     value={totalAmount}
-                    onChange={(e) => setTotalAmount(e.target.value)}
+                    onChange={(e) => setTotalAmount(normalizeArabicPersianNumerals(e.target.value))}
                     placeholder="0.00"
                     className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] num-tabular min-h-[44px]"
                   />
@@ -1199,11 +1203,12 @@ export const DebtsPage: React.FC = () => {
                     {isRTL ? 'القسط الشهري' : 'Monthly Installment'}
                   </label>
                   <input
-                    type="number"
-                    step="any"
+                    type="text"
+                    inputMode="decimal"
+                    dir="ltr"
                     value={monthlyInstallment}
-                    onChange={(e) => setMonthlyInstallment(e.target.value)}
-                    placeholder="اختياري"
+                    onChange={(e) => setMonthlyInstallment(normalizeArabicPersianNumerals(e.target.value))}
+                    placeholder={isRTL ? 'اختياري' : 'Optional'}
                     className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-xs text-[var(--color-ink)] num-tabular min-h-[44px]"
                   />
                 </div>

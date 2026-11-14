@@ -18,6 +18,7 @@ import { useApp } from '../../context/AppContext';
 import { Wallet, WalletType } from '../../types';
 import { IconRenderer } from '../common/IconRenderer';
 import { formatCurrencyAmount, calculateTotalBalance } from '../../services/calculations';
+import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../../services/numbers';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { PinLockModal } from '../common/PinLockModal';
 import { hashPin } from '../../services/security';
@@ -126,7 +127,8 @@ export const WalletsPage: React.FC = () => {
     e.preventDefault();
     if (!walletName.trim()) return;
 
-    const initBal = parseFloat(initialBalance) || 0;
+    const parsed = parseLocalizedNumber(initialBalance);
+    const initBal = Number.isNaN(parsed) ? 0 : parsed;
 
     if (editingWallet) {
       updateWallet(editingWallet.id, {
@@ -404,10 +406,11 @@ export const WalletsPage: React.FC = () => {
                     {t('initialBalance')}
                   </label>
                   <input
-                    type="number"
-                    step="any"
+                    type="text"
+                    inputMode="decimal"
+                    dir="ltr"
                     value={initialBalance}
-                    onChange={(e) => setInitialBalance(e.target.value)}
+                    onChange={(e) => setInitialBalance(normalizeArabicPersianNumerals(e.target.value))}
                     className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px] num-tabular"
                   />
                 </div>

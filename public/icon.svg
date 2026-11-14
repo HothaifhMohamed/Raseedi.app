@@ -1,24 +1,62 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <!-- Sand paper background with rounded corners and hairline border -->
-  <rect width="512" height="512" rx="128" fill="#F5EFE3" />
-  <rect x="8" y="8" width="496" height="496" rx="120" fill="none" stroke="#E4DBC8" stroke-width="4" />
+  <defs>
+    <linearGradient id="raseediBg" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#07383E" />
+      <stop offset="48%" stop-color="#0A5455" />
+      <stop offset="100%" stop-color="#0C7C6D" />
+    </linearGradient>
+    <linearGradient id="coinGold" x1="20%" y1="10%" x2="85%" y2="90%">
+      <stop offset="0%" stop-color="#E4A731" />
+      <stop offset="100%" stop-color="#D79825" />
+    </linearGradient>
+    <clipPath id="coinSlotClip">
+      <rect x="0" y="0" width="512" height="168" />
+    </clipPath>
+    <mask id="walletCutouts">
+      <rect width="512" height="512" fill="#FFFFFF" />
+      <!-- Horizontal top inner fold slot -->
+      <rect x="96" y="156" width="272" height="30" rx="15" fill="#000000" />
+      <!-- Center coin gap through top lip -->
+      <rect x="150" y="118" width="202" height="56" fill="#000000" />
+      <!-- Right-side clasp U-notch recess -->
+      <path
+        d="M 432 248 L 382 248 A 56 56 0 0 0 382 360 L 432 360 Z"
+        fill="#000000"
+      />
+      <!-- Diagonal upward growth arrow cutout -->
+      <path
+        d="M 52 440 L 154 334 L 200 374 L 266 304 L 288 324 L 202 414 L 154 374 L 74 458 Z"
+        fill="#000000"
+      />
+      <polygon points="214,284 318,256 298,358" fill="#000000" />
+    </mask>
+  </defs>
 
-  <!-- Flat Turquoise Wallet Shape -->
-  <g transform="translate(116, 136)">
-    <!-- Main Wallet Body -->
-    <rect x="0" y="40" width="280" height="190" rx="28" fill="#1E6F73" />
-    
-    <!-- Top Ledger Flap -->
-    <path d="M 0 40 Q 0 10 32 10 L 248 10 Q 280 10 280 40 L 280 85 L 0 85 Z" fill="#17595D" />
+  <!-- Rounded Teal Gradient Backdrop -->
+  <rect width="512" height="512" rx="108" fill="url(#raseediBg)" />
 
-    <!-- Thin divider stitch -->
-    <line x1="20" y1="50" x2="260" y2="50" stroke="#F5EFE3" stroke-width="2" stroke-opacity="0.35" stroke-dasharray="6 5" />
-
-    <!-- Clasp Tab -->
-    <path d="M 160 95 L 270 95 Q 280 95 280 108 L 280 162 Q 280 175 270 175 L 160 175 Q 140 175 140 135 Q 140 95 160 95 Z" fill="#12484B" stroke="#1E6F73" stroke-width="3" />
-
-    <!-- Sand Coin Emblem with Arabic 'R' (ر) -->
-    <circle cx="215" cy="135" r="24" fill="#FBF8F1" stroke="#E4DBC8" stroke-width="2" />
-    <text x="215" y="145" font-family="'Reem Kufi', 'IBM Plex Sans Arabic', sans-serif" font-size="28" font-weight="bold" fill="#1E6F73" text-anchor="middle">ر</text>
+  <!-- Gold Coin peeking out from wallet slot -->
+  <g clip-path="url(#coinSlotClip)">
+    <circle cx="251" cy="132" r="84" fill="url(#coinGold)" />
+    <circle cx="251" cy="132" r="66" fill="none" stroke="#C5861D" stroke-width="10" opacity="0.45" />
+    <path
+      d="M 192 168 A 66 66 0 0 1 304 98 A 59 59 0 0 0 206 168 Z"
+      fill="#F3CD77"
+      opacity="0.92"
+    />
   </g>
+
+  <!-- Unified Cream Wallet Silhouette with cutouts -->
+  <g mask="url(#walletCutouts)">
+    <path
+      d="M 98 128 L 364 128 Q 392 128 392 156 L 392 186 L 398 186 Q 432 186 432 222 L 432 426 Q 432 462 396 462 L 100 462 Q 64 462 64 426 L 64 162 Q 64 128 98 128 Z"
+      fill="#FAF0DD"
+    />
+  </g>
+
+  <!-- Wallet Clasp Tab -->
+  <path
+    d="M 382 264 L 440 264 Q 454 264 454 278 L 454 330 Q 454 344 440 344 L 382 344 A 40 40 0 0 1 382 264 Z"
+    fill="#FAF0DD"
+  />
 </svg>

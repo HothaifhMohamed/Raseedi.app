@@ -369,7 +369,7 @@ interface AppContextType {
   // Live Exchange Rates
   ratesLastUpdated: string | null;
   isRefreshingRates: boolean;
-  refreshExchangeRates: () => Promise<boolean>;
+  refreshExchangeRates: (force?: boolean) => Promise<boolean>;
 
   // Undo Notification
   undoAction: UndoAction | null;

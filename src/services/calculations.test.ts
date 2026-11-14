@@ -60,8 +60,8 @@ test('evaluateCalculatorExpression computes mathematical expressions correctly',
 test('convertCurrency converts accurately using rate table', () => {
   // USD to USD
   assert.equal(convertCurrency(100, 'USD', 'USD'), 100);
-  // EGP rate is ~50.2, USD is 1.0 -> 50.2 EGP = 1.00 USD
-  const inUSD = convertCurrency(50.2, 'EGP', 'USD');
+  // EGP baseline rate is 49.35, USD is 1.0 -> 49.35 EGP = 1.00 USD
+  const inUSD = convertCurrency(49.35, 'EGP', 'USD');
   assert.equal(inUSD, 1);
   // Custom rate override
   const custom = convertCurrency(100, 'USD', 'EGP', { EGP: 50 });

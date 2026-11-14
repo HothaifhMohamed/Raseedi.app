@@ -4,6 +4,7 @@
  * completely locally with zero network calls.
  */
 import { Category, TransactionType } from '../types';
+import { normalizeMixedNumericText } from './numbers';
 
 export interface DialectParseResult {
   amount: number;
@@ -13,39 +14,11 @@ export interface DialectParseResult {
   notes: string;
 }
 
-const ARABIC_INDIC_MAP: Record<string, string> = {
-  '٠': '0',
-  '١': '1',
-  '٢': '2',
-  '٣': '3',
-  '٤': '4',
-  '٥': '5',
-  '٦': '6',
-  '٧': '7',
-  '٨': '8',
-  '٩': '9',
-  '۰': '0',
-  '۱': '1',
-  '۲': '2',
-  '۳': '3',
-  '۴': '4',
-  '۵': '5',
-  '۶': '6',
-  '۷': '7',
-  '۸': '8',
-  '۹': '9',
-  '٫': '.',
-  '،': '',
-};
-
 /**
  * Convert Eastern Arabic / Persian digits to Western ASCII digits
  */
 export function normalizeDigits(input: string): string {
-  return input
-    .split('')
-    .map((ch) => (ch in ARABIC_INDIC_MAP ? ARABIC_INDIC_MAP[ch] : ch))
-    .join('');
+  return normalizeMixedNumericText(input);
 }
 
 /**

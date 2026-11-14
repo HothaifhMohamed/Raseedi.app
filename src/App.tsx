@@ -21,6 +21,8 @@ import { TransactionModal } from './components/TransactionModal';
 import { FilterModal } from './components/home/FilterModal';
 import { CurrencyPickerModal } from './components/common/CurrencyPickerModal';
 import { UpgradeModal } from './components/common/UpgradeModal';
+import { SettingsModal } from './components/more/SettingsModal';
+import { BackupModal } from './components/more/BackupModal';
 import { UndoSnackbar } from './components/common/UndoSnackbar';
 import { PinLockModal } from './components/common/PinLockModal';
 import { PWAInstallPrompt, OfflineIndicator } from './components/common/PWAInstallPrompt';
@@ -50,6 +52,10 @@ const MainLayout: React.FC = () => {
     currencyPickerSelectedCode,
     closeCurrencyPicker,
     onCurrencySelectCallback,
+    isSettingsOpen,
+    setIsSettingsOpen,
+    isBackupOpen,
+    setIsBackupOpen,
     isPro,
     t,
     isRTL,
@@ -211,6 +217,10 @@ const MainLayout: React.FC = () => {
 
         {/* Global Upgrade to PRO Modal */}
         <UpgradeModal />
+
+        {/* Global Settings & Backup Modals (accessible from Header overflow menu & More tab) */}
+        <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+        <BackupModal isOpen={isBackupOpen} onClose={() => setIsBackupOpen(false)} />
 
         {/* Unified Enterprise Workspace Hub Modal */}
         <OrganizationHubModal />

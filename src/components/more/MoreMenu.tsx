@@ -30,9 +30,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ReportsModal } from './ReportsModal';
-import { BackupModal } from './BackupModal';
 import { CategoriesManagerModal } from './CategoriesManagerModal';
-import { SettingsModal } from './SettingsModal';
 import { DebtsPage } from '../debts/DebtsPage';
 import { GoalsPage } from '../goals/GoalsPage';
 import { AdBanner } from '../common/AdBanner';
@@ -62,14 +60,14 @@ export const MoreMenu: React.FC = () => {
     updateSettings,
     isPro,
     setIsUpgradeModalOpen,
+    setIsBackupOpen,
+    setIsSettingsOpen,
     t,
     isRTL,
   } = useApp();
 
   const [reportsOpen, setReportsOpen] = useState(false);
-  const [backupOpen, setBackupOpen] = useState(false);
   const [categoriesOpen, setCategoriesOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [moneyCirclesOpen, setMoneyCirclesOpen] = useState(false);
   const [supportLegalTab, setSupportLegalTab] = useState<'support' | 'legal' | null>(null);
   const [activeSubModal, setActiveSubModal] = useState<string | null>(null);
@@ -525,7 +523,7 @@ export const MoreMenu: React.FC = () => {
 
           {/* Backup & Restore */}
           <button
-            onClick={() => setBackupOpen(true)}
+            onClick={() => setIsBackupOpen(true)}
             className="w-full p-3.5 flex items-center justify-between text-xs hover:bg-[var(--color-bg)] transition-colors text-start min-h-[44px]"
           >
             <div className="flex items-center gap-3">
@@ -555,7 +553,7 @@ export const MoreMenu: React.FC = () => {
         </h3>
         <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl overflow-hidden divide-y divide-[var(--color-line)]">
           <button
-            onClick={() => setSettingsOpen(true)}
+            onClick={() => setIsSettingsOpen(true)}
             className="w-full p-3.5 flex items-center justify-between text-xs hover:bg-[var(--color-bg)] transition-colors text-start min-h-[44px]"
           >
             <div className="flex items-center gap-3">
@@ -750,9 +748,7 @@ export const MoreMenu: React.FC = () => {
 
       {/* Modals */}
       <ReportsModal isOpen={reportsOpen} onClose={() => setReportsOpen(false)} />
-      <BackupModal isOpen={backupOpen} onClose={() => setBackupOpen(false)} />
       <CategoriesManagerModal isOpen={categoriesOpen} onClose={() => setCategoriesOpen(false)} />
-      <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <MoneyCirclesModal isOpen={moneyCirclesOpen} onClose={() => setMoneyCirclesOpen(false)} />
       <SupportAndLegalModal
         isOpen={supportLegalTab !== null}

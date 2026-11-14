@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Settings as SettingsIcon,
   Moon,
@@ -10,10 +10,20 @@ import {
   X,
   Building2,
   LockKeyhole,
+  Coins,
+  RefreshCw,
+  RotateCcw,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { hashPin } from '../../services/security';
+import {
+  CURRENCIES,
+  getCurrency,
+  getEffectiveCurrencyRate,
+  getLiveExchangeRatesRuntime,
+} from '../../services/currency';
+import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../../services/numbers';
 import {
   isWebNotificationSupported,
   requestBrowserNotificationPermission,
@@ -27,6 +37,7 @@ interface SettingsModalProps {
 export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
   const {
     settings,
+    wallets,
     user,
     isPro,
     updateSettings,
@@ -38,6 +49,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     canOrgManage,
     updateOrganizationSettings,
     lockAccountingPeriod,
+    ratesLastUpdated,
+    isRefreshingRates,
+    refreshExchangeRates,
     t,
     isRTL,
   } = useApp();
@@ -53,8 +67,109 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     isWebNotificationSupported() ? Notification.permission : 'unsupported'
   );
   const [lockDateInput, setLockDateInput] = useState(activeOrganization?.lockedUntilDate || '');
+  const [orgVatDraft, setOrgVatDraft] = useState(String(activeOrganization?.vatRate ?? 14));
+  const [orgThresholdDraft, setOrgThresholdDraft] = useState(
+    String(activeOrganization?.approvalThreshold ?? 0)
+  );
+  const [rateDrafts, setRateDrafts] = useState<Record<string, string>>({});
+  const [extraRateCodes, setExtraRateCodes] = useState<string[]>([]);
+  const [rateSyncFeedback, setRateSyncFeedback] = useState<{
+    text: string;
+    isError?: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setLockDateInput(activeOrganization?.lockedUntilDate || '');
+    setOrgVatDraft(String(activeOrganization?.vatRate ?? 14));
+    setOrgThresholdDraft(String(activeOrganization?.approvalThreshold ?? 0));
+    setRateDrafts({});
+    setRateSyncFeedback(null);
+  }, [isOpen, activeOrganization?.id, activeOrganization?.lockedUntilDate]);
+
+  const editableCurrencyCodes = useMemo(() => {
+    const base = ['EGP', 'SAR', 'AED', 'KWD', 'QAR', 'BHD', 'OMR', 'JOD', 'EUR', 'GBP', 'TRY'];
+    const set = new Set<string>([
+      settings.mainCurrency,
+      ...wallets.map((w) => w.currency),
+      ...Object.keys(settings.customExchangeRates || {}),
+      ...extraRateCodes,
+      ...base,
+    ]);
+    set.delete('USD'); // USD is always 1.0 base
+    return Array.from(set).filter(Boolean);
+  }, [settings.mainCurrency, settings.customExchangeRates, wallets, extraRateCodes]);
+
+  const availableAddRateCurrencies = useMemo(() => {
+    const existing = new Set(['USD', ...editableCurrencyCodes]);
+    return CURRENCIES.filter((c) => !existing.has(c.code));
+  }, [editableCurrencyCodes]);
 
   if (!isOpen) return null;
+
+  const liveRuntimeRates = getLiveExchangeRatesRuntime();
+  const hasCustomRates = Object.keys(settings.customExchangeRates || {}).length > 0;
+
+  const handleManualRateChange = (code: string, rawVal: string) => {
+    const normalized = normalizeArabicPersianNumerals(rawVal);
+    setRateDrafts((prev) => ({ ...prev, [code]: normalized }));
+    if (!normalized.trim()) {
+      const next = { ...(settings.customExchangeRates || {}) };
+      delete next[code];
+      updateSettings({ customExchangeRates: next });
+      return;
+    }
+    const parsed = parseLocalizedNumber(normalized);
+    if (!Number.isNaN(parsed) && parsed > 0) {
+      updateSettings({
+        customExchangeRates: {
+          ...(settings.customExchangeRates || {}),
+          [code]: parsed,
+        },
+      });
+    }
+  };
+
+  const handleResetSingleRate = (code: string) => {
+    setRateDrafts((prev) => {
+      const copy = { ...prev };
+      delete copy[code];
+      return copy;
+    });
+    if (settings.customExchangeRates?.[code] !== undefined) {
+      const next = { ...(settings.customExchangeRates || {}) };
+      delete next[code];
+      updateSettings({ customExchangeRates: next });
+    }
+  };
+
+  const handleResetAllCustomRates = () => {
+    setRateDrafts({});
+    updateSettings({ customExchangeRates: {} });
+  };
+
+  const handleRefreshRatesNow = async () => {
+    setRateSyncFeedback(null);
+    if (!settings.useUpdatedExchangeRates) {
+      updateSettings({ useUpdatedExchangeRates: true });
+    }
+    const ok = await refreshExchangeRates(true);
+    setRateDrafts({});
+    setRateSyncFeedback(
+      ok
+        ? {
+            text: isRTL
+              ? 'تم تحديث أسعار الصرف المباشرة وحفظها للعمل بدون إنترنت.'
+              : 'Live exchange rates updated and cached for offline use.',
+          }
+        : {
+            text: isRTL
+              ? 'تعذر الاتصال بخدمة الأسعار الآن — يتم استخدام آخر أسعار محفوظة أو الافتراضية.'
+              : 'Could not reach rate feed right now — using cached or fallback rates.',
+            isError: true,
+          }
+    );
+  };
 
   const handleSavePin = async () => {
     if (pinInput.length !== 4) return;
@@ -337,6 +452,177 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
             </div>
           </div>
 
+          {/* 3b. Exchange Rates & Currencies (Live Sync + Manual Override) */}
+          <div
+            data-testid="settings-exchange-rates-section"
+            className="p-4 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl space-y-3"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="text-xs font-bold text-[var(--color-ink)] flex items-center gap-1.5">
+                <Coins className="w-3.5 h-3.5 text-[var(--color-accent)]" />
+                <span>{isRTL ? 'أسعار الصرف والعملات' : 'Exchange Rates & Currencies'}</span>
+              </h4>
+              <span className="text-[10px] px-2 py-0.5 rounded bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-muted)]">
+                {liveRuntimeRates && settings.useUpdatedExchangeRates
+                  ? isRTL
+                    ? 'متزامنة مباشرة'
+                    : 'Live Synced'
+                  : isRTL
+                  ? 'أسعار محلية'
+                  : 'Local Rates'}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="text-[11px] text-[var(--color-muted)]">
+                {ratesLastUpdated
+                  ? isRTL
+                    ? `آخر تحديث: ${ratesLastUpdated}`
+                    : `Last updated: ${ratesLastUpdated}`
+                  : isRTL
+                  ? 'السعر مقابل 1 دولار أمريكي (USD)'
+                  : 'Rates relative to 1 USD'}
+              </div>
+              <button
+                type="button"
+                data-testid="refresh-rates-now-btn"
+                disabled={isRefreshingRates}
+                onClick={() => void handleRefreshRatesNow()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-[11px] font-semibold min-h-[34px] disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingRates ? 'animate-spin' : ''}`} />
+                <span>
+                  {isRefreshingRates
+                    ? isRTL
+                      ? 'جاري التحديث...'
+                      : 'Refreshing...'
+                    : isRTL
+                    ? 'تحديث أسعار العملات الآن'
+                    : 'Refresh Exchange Rates Now'}
+                </span>
+              </button>
+            </div>
+
+            {rateSyncFeedback && (
+              <div
+                className={`p-2 rounded-lg text-[11px] font-medium border ${
+                  rateSyncFeedback.isError
+                    ? 'bg-[var(--color-warning)]/12 border-[var(--color-warning)]/30 text-[var(--color-warning-text)]'
+                    : 'bg-[var(--color-income)]/10 border-[var(--color-income)]/30 text-[var(--color-income)]'
+                }`}
+              >
+                {rateSyncFeedback.text}
+              </div>
+            )}
+
+            <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">
+              <span className="text-[11px] font-semibold text-[var(--color-muted)]">
+                {isRTL ? 'تعديل يدوي لسعر الصرف (1 USD =)' : 'Manual Rate Overrides (1 USD =)'}
+              </span>
+              {hasCustomRates && (
+                <button
+                  type="button"
+                  onClick={handleResetAllCustomRates}
+                  className="inline-flex items-center gap-1 text-[10px] font-semibold text-[var(--color-accent)] hover:underline"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>{isRTL ? 'استعادة التلقائي' : 'Reset All'}</span>
+                </button>
+              )}
+            </div>
+
+            <div className="max-h-52 overflow-y-auto space-y-1.5 pe-0.5">
+              {editableCurrencyCodes.map((code) => {
+                const cur = getCurrency(code);
+                const effectiveRate = getEffectiveCurrencyRate(code, settings.customExchangeRates);
+                const isCustom =
+                  settings.customExchangeRates?.[code] !== undefined &&
+                  settings.customExchangeRates[code] > 0;
+                const displayVal =
+                  rateDrafts[code] !== undefined
+                    ? rateDrafts[code]
+                    : String(Number(effectiveRate.toFixed(4)));
+
+                return (
+                  <div
+                    key={code}
+                    className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)]"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-sm shrink-0">{cur.flag}</span>
+                      <div className="min-w-0">
+                        <div className="text-xs font-bold text-[var(--color-ink)] flex items-center gap-1">
+                          <span className="font-mono">{code}</span>
+                          {isCustom && (
+                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-[var(--color-accent)]/12 text-[var(--color-accent)] font-semibold">
+                              {isRTL ? 'يدوي' : 'Custom'}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-[var(--color-muted)] truncate">
+                          {isRTL ? cur.nameAr : cur.nameEn}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        dir="ltr"
+                        aria-label={`${code} rate`}
+                        value={displayVal}
+                        onChange={(e) => handleManualRateChange(code, e.target.value)}
+                        onBlur={() =>
+                          setRateDrafts((prev) => {
+                            const copy = { ...prev };
+                            delete copy[code];
+                            return copy;
+                          })
+                        }
+                        className="w-24 px-2 py-1 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-md text-xs font-bold text-center text-[var(--color-ink)] num-tabular min-h-[34px] focus:outline-none focus:border-[var(--color-accent)]"
+                      />
+                      {isCustom && (
+                        <button
+                          type="button"
+                          onClick={() => handleResetSingleRate(code)}
+                          title={isRTL ? 'استعادة السعر التلقائي' : 'Reset to auto rate'}
+                          className="p-1.5 rounded-md border border-[var(--color-line)] text-[var(--color-muted)] hover:text-[var(--color-ink)] min-h-[34px] min-w-[30px] flex items-center justify-center"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {availableAddRateCurrencies.length > 0 && (
+              <div className="pt-1">
+                <select
+                  value=""
+                  onChange={(e) => {
+                    const code = e.target.value;
+                    if (code) {
+                      setExtraRateCodes((prev) => (prev.includes(code) ? prev : [code, ...prev]));
+                    }
+                  }}
+                  className="w-full px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-muted)] min-h-[36px]"
+                >
+                  <option value="">
+                    {isRTL ? '+ إضافة عملة أخرى لتعديل سعرها...' : '+ Add another currency rate...'}
+                  </option>
+                  {availableAddRateCurrencies.map((c) => (
+                    <option key={c.code} value={c.code}>
+                      {c.flag} {c.code} — {isRTL ? c.nameAr : c.nameEn}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+
           {/* 4. Security & App PIN Lock with Salted Hash */}
           <div className="p-4 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl space-y-3">
             <h4 className="text-xs font-bold text-[var(--color-ink)] flex items-center gap-1.5">
@@ -392,9 +678,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                 <div className="flex items-center gap-2">
                   <input
                     type="password"
+                    inputMode="numeric"
                     maxLength={4}
                     value={pinInput}
-                    onChange={(e) => setPinInput(e.target.value.replace(/\D/g, ''))}
+                    onChange={(e) =>
+                      setPinInput(normalizeArabicPersianNumerals(e.target.value).replace(/\D/g, ''))
+                    }
                     placeholder="••••"
                     className="w-24 px-3 py-1.5 text-center font-mono tracking-widest bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-sm text-[var(--color-ink)] min-h-[36px]"
                   />
@@ -505,15 +794,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                         {t('vatRate')} (%)
                       </label>
                       <input
-                        type="number"
-                        min="0"
-                        max="100"
-                        step="0.5"
-                        value={activeOrganization.vatRate ?? 14}
-                        onChange={(e) =>
-                          updateOrganizationSettings({ vatRate: Number(e.target.value) || 0 })
-                        }
-                        className="w-full px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[38px]"
+                        type="text"
+                        inputMode="decimal"
+                        dir="ltr"
+                        value={orgVatDraft}
+                        onChange={(e) => {
+                          const norm = normalizeArabicPersianNumerals(e.target.value);
+                          setOrgVatDraft(norm);
+                          const parsed = parseLocalizedNumber(norm);
+                          if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 100) {
+                            updateOrganizationSettings({ vatRate: parsed });
+                          }
+                        }}
+                        className="w-full px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[38px] num-tabular"
                       />
                     </div>
                     <div>
@@ -538,15 +831,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                         : `Auto-Approval Expense Limit (${activeOrganization.currency})`}
                     </label>
                     <input
-                      type="number"
-                      min="0"
-                      value={activeOrganization.approvalThreshold ?? 0}
-                      onChange={(e) =>
-                        updateOrganizationSettings({
-                          approvalThreshold: Number(e.target.value) || 0,
-                        })
-                      }
-                      className="w-full px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[38px]"
+                      type="text"
+                      inputMode="decimal"
+                      dir="ltr"
+                      value={orgThresholdDraft}
+                      onChange={(e) => {
+                        const norm = normalizeArabicPersianNumerals(e.target.value);
+                        setOrgThresholdDraft(norm);
+                        const parsed = parseLocalizedNumber(norm);
+                        if (!Number.isNaN(parsed) && parsed >= 0) {
+                          updateOrganizationSettings({ approvalThreshold: parsed });
+                        }
+                      }}
+                      className="w-full px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[38px] num-tabular"
                     />
                   </div>
 

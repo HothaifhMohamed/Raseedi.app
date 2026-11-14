@@ -2,7 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { Building2, ChevronDown, User } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { getCurrency } from '../services/currency';
+import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../services/numbers';
 import { CurrencyPickerModal } from './common/CurrencyPickerModal';
+import { BrandLogo } from './common/BrandLogo';
 
 export const OnboardingModal: React.FC = () => {
   const {
@@ -63,12 +65,13 @@ export const OnboardingModal: React.FC = () => {
       createOrganization({
         name: orgName.trim() || (isRTL ? 'مؤسستي' : 'My Organization'),
         currency: selectedCurrency,
-        vatRate: Number(orgVatRate) >= 0 ? Number(orgVatRate) : 14,
+        vatRate: (parseLocalizedNumber(orgVatRate) >= 0 ? parseLocalizedNumber(orgVatRate) : 14),
         loadSampleData: orgLoadSample,
       });
       return;
     }
-    completeOnboarding(selectedCurrency, walletName, parseFloat(initialBalance) || 0);
+    const parsedBal = parseLocalizedNumber(initialBalance);
+    completeOnboarding(selectedCurrency, walletName, Number.isFinite(parsedBal) ? parsedBal : 0);
   };
 
   if (hasCompletedOnboarding) return null;
@@ -83,9 +86,7 @@ export const OnboardingModal: React.FC = () => {
         <div>
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] flex items-center justify-center font-bold text-sm">
-                ر
-              </div>
+              <BrandLogo className="w-8 h-8 rounded-lg shadow-xs shrink-0" />
               <span className="font-bold text-sm text-[var(--color-ink)]">{t('appName')}</span>
             </div>
 
@@ -257,10 +258,11 @@ export const OnboardingModal: React.FC = () => {
                     {t('initialBalance')} ({curr.code})
                   </label>
                   <input
-                    type="number"
-                    step="any"
+                    type="text"
+                    inputMode="decimal"
+                    dir="ltr"
                     value={initialBalance}
-                    onChange={(e) => setInitialBalance(e.target.value)}
+                    onChange={(e) => setInitialBalance(normalizeArabicPersianNumerals(e.target.value))}
                     placeholder="0.00"
                     className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs font-semibold text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px]"
                   />
@@ -301,12 +303,11 @@ export const OnboardingModal: React.FC = () => {
                     {t('vatRate')} (%)
                   </label>
                   <input
-                    type="number"
-                    min="0"
-                    max="100"
-                    step="0.5"
+                    type="text"
+                    inputMode="decimal"
+                    dir="ltr"
                     value={orgVatRate}
-                    onChange={(e) => setOrgVatRate(e.target.value)}
+                    onChange={(e) => setOrgVatRate(normalizeArabicPersianNumerals(e.target.value))}
                     className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs font-semibold text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px]"
                   />
                 </div>

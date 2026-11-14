@@ -13,6 +13,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { Template, TransactionType, PriorityLevel } from '../../types';
 import { formatCurrencyAmount } from '../../services/calculations';
+import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../../services/numbers';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { MoneyText } from '../common/MoneyText';
 
@@ -76,7 +77,7 @@ export const TemplatesTab: React.FC = () => {
 
   const handleSaveTemplate = (e: React.FormEvent) => {
     e.preventDefault();
-    const amountNum = parseFloat(tmplAmount);
+    const amountNum = parseLocalizedNumber(tmplAmount);
     if (!tmplName.trim() || isNaN(amountNum) || amountNum <= 0) return;
 
     const selectedWallet = wallets.find((w) => w.id === tmplWalletId) || wallets[0];
@@ -284,11 +285,12 @@ export const TemplatesTab: React.FC = () => {
                     {t('amount')}
                   </label>
                   <input
-                    type="number"
-                    step="any"
+                    type="text"
+                    inputMode="decimal"
+                    dir="ltr"
                     required
                     value={tmplAmount}
-                    onChange={(e) => setTmplAmount(e.target.value)}
+                    onChange={(e) => setTmplAmount(normalizeArabicPersianNumerals(e.target.value))}
                     placeholder="0.00"
                     className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] num-tabular min-h-[44px]"
                   />

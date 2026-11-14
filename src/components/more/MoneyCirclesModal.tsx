@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { calculateMoneyCircleSummary } from '../../services/calculations';
+import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../../services/numbers';
 import { MoneyText } from '../common/MoneyText';
 import { MoneyCircle } from '../../types';
 
@@ -87,9 +88,12 @@ export const MoneyCirclesModal: React.FC<MoneyCirclesModalProps> = ({ isOpen, on
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    const monthsNum = Math.max(2, Math.min(60, Math.floor(Number(totalMonths) || 10)));
-    const turnNum = Math.max(1, Math.min(monthsNum, Math.floor(Number(myTurnMonth) || 1)));
-    const shareNum = Math.max(0.01, Number(monthlyShare) || 0);
+    const parsedMonths = parseLocalizedNumber(totalMonths);
+    const parsedTurn = parseLocalizedNumber(myTurnMonth);
+    const parsedShare = parseLocalizedNumber(monthlyShare);
+    const monthsNum = Math.max(2, Math.min(60, Math.floor(Number.isNaN(parsedMonths) ? 10 : parsedMonths)));
+    const turnNum = Math.max(1, Math.min(monthsNum, Math.floor(Number.isNaN(parsedTurn) ? 1 : parsedTurn)));
+    const shareNum = Number.isNaN(parsedShare) ? 0 : Math.max(0.01, parsedShare);
     if (!name.trim() || shareNum <= 0) return;
 
     if (editing) {
@@ -207,14 +211,14 @@ export const MoneyCirclesModal: React.FC<MoneyCirclesModalProps> = ({ isOpen, on
 
               <div className="grid grid-cols-3 gap-2">
                 <input
-                  type="number"
+                  type="text"
+                  inputMode="decimal"
+                  dir="ltr"
                   required
-                  min="1"
-                  step="any"
                   value={monthlyShare}
-                  onChange={(e) => setMonthlyShare(e.target.value)}
+                  onChange={(e) => setMonthlyShare(normalizeArabicPersianNumerals(e.target.value))}
                   placeholder={t('monthlyShare')}
-                  className="col-span-2 px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px]"
+                  className="col-span-2 px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px] num-tabular"
                 />
                 <button
                   type="button"
@@ -231,13 +235,13 @@ export const MoneyCirclesModal: React.FC<MoneyCirclesModalProps> = ({ isOpen, on
                     {t('totalMonths')}
                   </label>
                   <input
-                    type="number"
-                    min="2"
-                    max="60"
+                    type="text"
+                    inputMode="numeric"
+                    dir="ltr"
                     required
                     value={totalMonths}
-                    onChange={(e) => setTotalMonths(e.target.value)}
-                    className="w-full px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px]"
+                    onChange={(e) => setTotalMonths(normalizeArabicPersianNumerals(e.target.value).replace(/\D/g, ''))}
+                    className="w-full px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px] num-tabular"
                   />
                 </div>
                 <div>
@@ -245,13 +249,13 @@ export const MoneyCirclesModal: React.FC<MoneyCirclesModalProps> = ({ isOpen, on
                     {t('myTurnMonth')}
                   </label>
                   <input
-                    type="number"
-                    min="1"
-                    max={Number(totalMonths) || 60}
+                    type="text"
+                    inputMode="numeric"
+                    dir="ltr"
                     required
                     value={myTurnMonth}
-                    onChange={(e) => setMyTurnMonth(e.target.value)}
-                    className="w-full px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px]"
+                    onChange={(e) => setMyTurnMonth(normalizeArabicPersianNumerals(e.target.value).replace(/\D/g, ''))}
+                    className="w-full px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px] num-tabular"
                   />
                 </div>
               </div>

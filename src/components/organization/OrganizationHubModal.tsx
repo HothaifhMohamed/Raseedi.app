@@ -50,6 +50,7 @@ import {
   roundCurrency,
 } from '../../services/calculations';
 import { normalizeApprovalStatus } from '../../services/entitlements';
+import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../../services/numbers';
 import { resolveOrgAttachmentUrl } from '../../services/firebase';
 import { MoneyText } from '../common/MoneyText';
 import {
@@ -434,7 +435,7 @@ export const OrganizationHubModal: React.FC = () => {
       name: ccNameAr.trim(),
       nameAr: ccNameAr.trim(),
       nameEn: ccNameEn.trim() || ccNameAr.trim(),
-      budgetAllocated: Number(ccBudget) || 0,
+      budgetAllocated: Math.max(0, parseLocalizedNumber(ccBudget) || 0),
       isActive: true,
     };
     if (editingCC) {
@@ -479,7 +480,7 @@ export const OrganizationHubModal: React.FC = () => {
       phone: partyPhone.trim() || undefined,
       taxId: partyTaxId.trim() || undefined,
       currency,
-      balance: Math.max(0, Number(partyBalance) || 0),
+      balance: Math.max(0, parseLocalizedNumber(partyBalance) || 0),
       dueDate: partyDueDate || undefined,
       notes: partyNotes.trim() || undefined,
     };
@@ -494,7 +495,7 @@ export const OrganizationHubModal: React.FC = () => {
   const handleConfirmPartySettlement = (e: React.FormEvent) => {
     e.preventDefault();
     if (!settleParty || isOrgReadOnly) return;
-    const amt = Number(settleAmount);
+    const amt = parseLocalizedNumber(settleAmount);
     if (!Number.isFinite(amt) || amt <= 0) return;
 
     const remaining = Math.max(
@@ -662,7 +663,7 @@ export const OrganizationHubModal: React.FC = () => {
       : isRTL
       ? 'عهدة موظف'
       : 'Employee Petty Cash';
-    const amount = Number(pettyInitialBalance) || 0;
+    const amount = Math.max(0, parseLocalizedNumber(pettyInitialBalance) || 0);
 
     addWallet({
       name: pettyName.trim() || defaultName,
@@ -687,10 +688,12 @@ export const OrganizationHubModal: React.FC = () => {
   const handleSaveOrgSettings = (e: React.FormEvent) => {
     e.preventDefault();
     if (isOrgReadOnly || !canOrgManage) return;
+    const parsedVat = parseLocalizedNumber(orgVatInput);
+    const parsedThreshold = parseLocalizedNumber(orgThresholdInput);
     updateOrganizationSettings({
-      vatRate: Math.max(0, Math.min(50, Number(orgVatInput) || 0)),
+      vatRate: Math.max(0, Math.min(50, Number.isNaN(parsedVat) ? 0 : parsedVat)),
       taxNumber: orgTaxNumInput.trim() || undefined,
-      approvalThreshold: Math.max(0, Number(orgThresholdInput) || 0),
+      approvalThreshold: Math.max(0, Number.isNaN(parsedThreshold) ? 0 : parsedThreshold),
     });
     lockAccountingPeriod(orgLockDateInput.trim() || undefined);
     setSettingsSavedBanner(true);
@@ -1160,13 +1163,13 @@ export const OrganizationHubModal: React.FC = () => {
                       <option value="branch">{t('ccBranch')}</option>
                     </select>
                     <input
-                      type="number"
-                      min="0"
-                      step="any"
+                      type="text"
+                      inputMode="decimal"
+                      dir="ltr"
                       value={ccBudget}
-                      onChange={(e) => setCcBudget(e.target.value)}
+                      onChange={(e) => setCcBudget(normalizeArabicPersianNumerals(e.target.value))}
                       placeholder={isRTL ? 'الموازنة المرصودة' : 'Allocated Budget'}
-                      className="px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px]"
+                      className="px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px] num-tabular"
                     />
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -1448,13 +1451,13 @@ export const OrganizationHubModal: React.FC = () => {
                   </div>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                     <input
-                      type="number"
-                      min="0"
-                      step="any"
+                      type="text"
+                      inputMode="decimal"
+                      dir="ltr"
                       value={partyBalance}
-                      onChange={(e) => setPartyBalance(e.target.value)}
+                      onChange={(e) => setPartyBalance(normalizeArabicPersianNumerals(e.target.value))}
                       placeholder={isRTL ? 'الرصيد المفتوح' : 'Open Balance'}
-                      className="px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px]"
+                      className="px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px] num-tabular"
                     />
                     <input
                       type="date"
@@ -1520,14 +1523,14 @@ export const OrganizationHubModal: React.FC = () => {
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <input
-                      type="number"
+                      type="text"
+                      inputMode="decimal"
+                      dir="ltr"
                       required
-                      min="0.01"
-                      step="any"
                       value={settleAmount}
-                      onChange={(e) => setSettleAmount(e.target.value)}
+                      onChange={(e) => setSettleAmount(normalizeArabicPersianNumerals(e.target.value))}
                       placeholder={isRTL ? 'المبلغ المدفوع / المحصّل' : 'Settlement Amount'}
-                      className="px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px]"
+                      className="px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px] num-tabular"
                     />
                     <select
                       value={settleWalletId}
@@ -2070,27 +2073,33 @@ export const OrganizationHubModal: React.FC = () => {
                               className="px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[38px]"
                             />
                             <input
-                              type="number"
-                              min="0"
+                              type="text"
+                              inputMode="decimal"
+                              dir="ltr"
                               value={editingMemberLimit.limit}
                               onChange={(e) =>
-                                setEditingMemberLimit({ ...editingMemberLimit, limit: e.target.value })
+                                setEditingMemberLimit({
+                                  ...editingMemberLimit,
+                                  limit: normalizeArabicPersianNumerals(e.target.value),
+                                })
                               }
                               placeholder={isRTL ? 'سقف الصرف (فارغ = بلا سقف)' : 'Spending limit'}
-                              className="px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[38px]"
+                              className="px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[38px] num-tabular"
                             />
                             <div className="flex items-center gap-1.5">
                               <button
                                 type="button"
                                 disabled={isBusy}
-                                onClick={() =>
+                                onClick={() => {
+                                  const parsedLim = editingMemberLimit.limit.trim()
+                                    ? parseLocalizedNumber(editingMemberLimit.limit)
+                                    : null;
                                   void handleMemberManage(member.uid, 'set_spending_limit', {
-                                    spendingLimit: editingMemberLimit.limit.trim()
-                                      ? Number(editingMemberLimit.limit)
-                                      : null,
+                                    spendingLimit:
+                                      parsedLim !== null && !Number.isNaN(parsedLim) ? parsedLim : null,
                                     department: editingMemberLimit.department.trim(),
-                                  })
-                                }
+                                  });
+                                }}
                                 className="flex-1 py-1.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[38px]"
                               >
                                 {t('save')}
@@ -2164,14 +2173,16 @@ export const OrganizationHubModal: React.FC = () => {
                         ))}
                       </select>
                       <input
-                        type="number"
-                        min="0"
-                        step="any"
+                        type="text"
+                        inputMode="decimal"
+                        dir="ltr"
                         required
                         value={pettyInitialBalance}
-                        onChange={(e) => setPettyInitialBalance(e.target.value)}
+                        onChange={(e) =>
+                          setPettyInitialBalance(normalizeArabicPersianNumerals(e.target.value))
+                        }
                         placeholder={isRTL ? 'مبلغ العهدة الافتتاحي' : 'Custody Amount'}
-                        className="px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px]"
+                        className="px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[44px] num-tabular"
                       />
                     </div>
                     <div className="flex items-center gap-2">
@@ -2703,14 +2714,13 @@ export const OrganizationHubModal: React.FC = () => {
                         {t('vatRate')} (%)
                       </label>
                       <input
-                        type="number"
-                        min="0"
-                        max="50"
-                        step="0.5"
+                        type="text"
+                        inputMode="decimal"
+                        dir="ltr"
                         disabled={!canOrgManage}
                         value={orgVatInput}
-                        onChange={(e) => setOrgVatInput(e.target.value)}
-                        className="w-full px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg min-h-[44px]"
+                        onChange={(e) => setOrgVatInput(normalizeArabicPersianNumerals(e.target.value))}
+                        className="w-full px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg min-h-[44px] num-tabular"
                       />
                     </div>
                     <div>
@@ -2718,13 +2728,13 @@ export const OrganizationHubModal: React.FC = () => {
                         {isRTL ? 'سقف الاعتماد التلقائي للمصروفات' : 'Approval Threshold'} ({currency})
                       </label>
                       <input
-                        type="number"
-                        min="0"
-                        step="any"
+                        type="text"
+                        inputMode="decimal"
+                        dir="ltr"
                         disabled={!canOrgManage}
                         value={orgThresholdInput}
-                        onChange={(e) => setOrgThresholdInput(e.target.value)}
-                        className="w-full px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg min-h-[44px]"
+                        onChange={(e) => setOrgThresholdInput(normalizeArabicPersianNumerals(e.target.value))}
+                        className="w-full px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg min-h-[44px] num-tabular"
                       />
                     </div>
                     <div>

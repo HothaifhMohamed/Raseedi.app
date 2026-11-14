@@ -30,6 +30,8 @@ import {
   requestBrowserNotificationPermission,
 } from '../services/notifications';
 import { AppNotificationItem, OrganizationIndustry, OrganizationRole } from '../types';
+import { BrandLogo } from './common/BrandLogo';
+import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../services/numbers';
 
 export const Navbar: React.FC = () => {
   const {
@@ -210,13 +212,15 @@ export const Navbar: React.FC = () => {
     setIsSubmittingOrg(true);
     setCreateOrgError(null);
     try {
+      const vatParsed = parseLocalizedNumber(newOrgVat);
+      const thresholdParsed = parseLocalizedNumber(newOrgThreshold);
       await createOrganization({
         name: trimmed,
         currency: newOrgCurrency,
         industry: newOrgIndustry,
-        vatRate: Number(newOrgVat) >= 0 ? Number(newOrgVat) : 14,
+        vatRate: Number.isFinite(vatParsed) && vatParsed >= 0 ? vatParsed : 14,
         taxNumber: newOrgTaxNumber.trim() || undefined,
-        approvalThreshold: Number(newOrgThreshold) >= 0 ? Number(newOrgThreshold) : 1000,
+        approvalThreshold: Number.isFinite(thresholdParsed) && thresholdParsed >= 0 ? thresholdParsed : 1000,
         loadSampleData: newOrgSample,
       });
       setNewOrgName('');
@@ -271,9 +275,7 @@ export const Navbar: React.FC = () => {
       >
         {/* Left / Start: Brand Logo + Workspace Switcher */}
         <div className="flex items-center gap-2 min-w-0">
-          <div className="w-8 h-8 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] flex items-center justify-center font-title font-bold text-base shadow-sm shrink-0">
-            <span>ر</span>
-          </div>
+          <BrandLogo className="w-8 h-8 rounded-lg shadow-sm shrink-0" title={t('appName')} />
 
           <div className="relative min-w-0" ref={workspaceRef}>
             <button
@@ -451,9 +453,9 @@ export const Navbar: React.FC = () => {
 
             {isNotifOpen && (
               <div
-                className={`absolute top-full mt-1.5 ${
-                  isRTL ? 'left-0' : 'right-0'
-                } w-72 sm:w-80 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-150`}
+                className={`fixed inset-x-4 top-16 max-w-sm mx-auto sm:mx-0 sm:inset-x-auto sm:absolute sm:top-full sm:mt-1.5 ${
+                  isRTL ? 'sm:left-0' : 'sm:right-0'
+                } sm:w-80 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-150`}
               >
                 <div className="px-3 py-2.5 border-b border-[var(--color-line)] flex items-center justify-between bg-[var(--color-bg)]">
                   <span className="text-xs font-bold text-[var(--color-ink)]">
@@ -888,13 +890,12 @@ export const Navbar: React.FC = () => {
                     {t('vatRate')} (%)
                   </label>
                   <input
-                    type="number"
-                    min="0"
-                    max="100"
-                    step="0.5"
+                    type="text"
+                    inputMode="decimal"
+                    dir="ltr"
                     disabled={!user?.isLoggedIn || isSubmittingOrg}
                     value={newOrgVat}
-                    onChange={(e) => setNewOrgVat(e.target.value)}
+                    onChange={(e) => setNewOrgVat(normalizeArabicPersianNumerals(e.target.value))}
                     className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[44px] disabled:opacity-60"
                   />
                 </div>
@@ -920,11 +921,12 @@ export const Navbar: React.FC = () => {
                     {isRTL ? 'سقف الاعتماد التلقائي' : 'Approval Threshold'}
                   </label>
                   <input
-                    type="number"
-                    min="0"
+                    type="text"
+                    inputMode="decimal"
+                    dir="ltr"
                     disabled={!user?.isLoggedIn || isSubmittingOrg}
                     value={newOrgThreshold}
-                    onChange={(e) => setNewOrgThreshold(e.target.value)}
+                    onChange={(e) => setNewOrgThreshold(normalizeArabicPersianNumerals(e.target.value))}
                     className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[44px] disabled:opacity-60"
                   />
                 </div>

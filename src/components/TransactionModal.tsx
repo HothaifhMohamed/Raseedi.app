@@ -39,6 +39,11 @@ import {
 } from '../services/calculations';
 import { resolveOrgAttachmentUrl, uploadOrgReceiptAttachment } from '../services/firebase';
 import { parseDialectQuickEntry } from '../services/dialectParser';
+import {
+  normalizeArabicPersianNumerals,
+  normalizeMixedNumericText,
+  parseLocalizedNumber,
+} from '../services/numbers';
 import { prepareReceiptImageDataUrl, ReceiptScanError, scanReceiptWithAI } from '../services/receiptScanner';
 
 const QUICK_CAT_COLORS = ['#1E6F73', '#B5523B', '#5E7F3A', '#C99A2E', '#6A5243', '#545E75'];
@@ -437,7 +442,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     return evaluateCalculatorExpression(amountExpr).result;
   }, [amountExpr]);
 
-  const parsedVatRate = Math.max(0, Number(vatRateInput) || 0);
+  const parsedVatRate = Math.max(0, parseLocalizedNumber(vatRateInput) || 0);
   const vatPreview = useMemo(() => {
     if (!isOrgWorkspace || !enableVat || type === 'transfer' || evaluatedAmount <= 0) {
       return null;
@@ -502,7 +507,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
 
   const parsedTransferFee = useMemo(() => {
     if (type !== 'transfer') return 0;
-    const raw = parseFloat(transferFeeInput);
+    const raw = parseLocalizedNumber(transferFeeInput);
     if (isNaN(raw) || raw <= 0) return 0;
     return roundCurrency(raw, currency);
   }, [type, transferFeeInput, currency]);
@@ -513,7 +518,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     if (splitMode === 'half') {
       return roundCurrency(total / 2, currency);
     }
-    const rawVal = parseFloat(splitValueInput);
+    const rawVal = parseLocalizedNumber(splitValueInput);
     if (isNaN(rawVal) || rawVal <= 0) return 0;
     if (splitMode === 'percent') {
       const pct = Math.min(100, Math.max(0, rawVal));
@@ -950,7 +955,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                   <input
                     type="text"
                     value={quickText}
-                    onChange={(e) => setQuickText(e.target.value)}
+                    onChange={(e) => setQuickText(normalizeMixedNumericText(e.target.value))}
                     placeholder={
                       isRTL
                         ? 'إدخال سريع: غدا 50 • بنزين ٢٠٠ • راتب 8000'
@@ -1180,8 +1185,9 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
               <div className="flex items-center gap-2">
                 <input
                   type="text"
+                  inputMode="decimal"
                   value={amountExpr}
-                  onChange={(e) => setAmountExpr(e.target.value)}
+                  onChange={(e) => setAmountExpr(normalizeArabicPersianNumerals(e.target.value))}
                   placeholder="0.00"
                   className="flex-1 px-3.5 py-2.5 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-lg font-bold text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:outline-none focus:border-[var(--color-accent)] num-tabular min-h-[48px]"
                   dir="ltr"
@@ -1245,11 +1251,10 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                   </span>
                 </label>
                 <input
-                  type="number"
-                  step="any"
-                  min="0"
+                  type="text"
+                  inputMode="decimal"
                   value={transferFeeInput}
-                  onChange={(e) => setTransferFeeInput(e.target.value)}
+                  onChange={(e) => setTransferFeeInput(normalizeArabicPersianNumerals(e.target.value))}
                   placeholder="0.00"
                   dir="ltr"
                   className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-xs text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:outline-none focus:border-[var(--color-accent)] num-tabular min-h-[44px]"
@@ -1563,12 +1568,10 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                   <div className="space-y-2 pt-1.5 border-t border-[var(--color-line)]">
                     <div className="flex items-center gap-2">
                       <input
-                        type="number"
-                        min="0"
-                        max="100"
-                        step="0.5"
+                        type="text"
+                        inputMode="decimal"
                         value={vatRateInput}
-                        onChange={(e) => setVatRateInput(e.target.value)}
+                        onChange={(e) => setVatRateInput(normalizeArabicPersianNumerals(e.target.value))}
                         className="w-20 px-2 py-1 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs font-bold text-center min-h-[34px]"
                       />
                       <span className="text-xs text-[var(--color-muted)]">%</span>
@@ -1955,11 +1958,10 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                                 : `Friend share (${currency})`}
                             </label>
                             <input
-                              type="number"
-                              step="any"
-                              min="0"
+                              type="text"
+                              inputMode="decimal"
                               value={splitValueInput}
-                              onChange={(e) => setSplitValueInput(e.target.value)}
+                              onChange={(e) => setSplitValueInput(normalizeArabicPersianNumerals(e.target.value))}
                               placeholder={splitMode === 'percent' ? '30' : '100'}
                               className="w-full px-2.5 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] num-tabular min-h-[40px]"
                               dir="ltr"
@@ -2020,10 +2022,13 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                           {isRTL ? 'كل كم فترة؟' : 'Every X intervals'}
                         </label>
                         <input
-                          type="number"
-                          min="1"
+                          type="text"
+                          inputMode="numeric"
                           value={interval}
-                          onChange={(e) => setInterval(Math.max(1, parseInt(e.target.value) || 1))}
+                          onChange={(e) => {
+                            const norm = normalizeArabicPersianNumerals(e.target.value).replace(/\D/g, '');
+                            setInterval(Math.max(1, parseInt(norm, 10) || 1));
+                          }}
                           className="w-full px-2 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] num-tabular"
                         />
                       </div>

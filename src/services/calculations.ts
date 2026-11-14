@@ -25,8 +25,9 @@ import {
   fromMinor,
   toMinor,
 } from './currency';
+import { normalizeArabicPersianNumerals } from './numbers';
 
-export { roundCurrency, fromMinor, toMinor };
+export { roundCurrency, fromMinor, toMinor, normalizeArabicPersianNumerals };
 
 /**
  * Convert numbers to Eastern Arabic numerals (١٢٣)
@@ -133,8 +134,8 @@ function tokenizeMathExpression(expr: string): CalcToken[] | null {
 export function evaluateCalculatorExpression(rawExpr: string): { result: number; error: boolean } {
   if (!rawExpr || !rawExpr.trim()) return { result: 0, error: false };
 
-  // Normalize visual symbols first
-  const normalizedInput = rawExpr
+  // Normalize Arabic/Persian digits and decimal separators first, then visual operators
+  const normalizedInput = normalizeArabicPersianNumerals(rawExpr)
     .replace(/×/g, '*')
     .replace(/÷/g, '/')
     .replace(/−/g, '-')

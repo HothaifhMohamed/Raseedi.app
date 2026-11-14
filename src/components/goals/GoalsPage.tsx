@@ -17,6 +17,7 @@ import { IconRenderer } from '../common/IconRenderer';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { MoneyText } from '../common/MoneyText';
 import { getCurrencyDecimals, roundCurrency } from '../../services/currency';
+import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../../services/numbers';
 
 const GOAL_ICONS = ['Target', 'Trophy', 'Car', 'Home', 'Plane', 'ShieldCheck', 'Smartphone', 'GraduationCap', 'Heart'];
 const GOAL_COLORS = [
@@ -87,8 +88,9 @@ export const GoalsPage: React.FC = () => {
 
   const handleSaveGoal = (e: React.FormEvent) => {
     e.preventDefault();
-    const target = parseFloat(targetAmount);
-    const curr = parseFloat(currentAmount) || 0;
+    const target = parseLocalizedNumber(targetAmount);
+    const parsedCurr = parseLocalizedNumber(currentAmount);
+    const curr = Number.isNaN(parsedCurr) ? 0 : parsedCurr;
     if (!goalName.trim() || isNaN(target) || target <= 0) return;
 
     const payload = {
@@ -114,7 +116,7 @@ export const GoalsPage: React.FC = () => {
   const handleContributionSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!contributeGoal) return;
-    const amountNum = parseFloat(actionAmount);
+    const amountNum = parseLocalizedNumber(actionAmount);
     if (isNaN(amountNum) || amountNum <= 0) return;
 
     contributeToGoal(
@@ -330,13 +332,14 @@ export const GoalsPage: React.FC = () => {
                 <div>
                   <label className="block text-xs font-semibold text-[var(--color-muted)] mb-1">{t('targetAmount')}</label>
                   <input
-                    type="number"
-                    step="any"
+                    type="text"
+                    inputMode="decimal"
+                    dir="ltr"
                     required
                     value={targetAmount}
-                    onChange={(e) => setTargetAmount(e.target.value)}
+                    onChange={(e) => setTargetAmount(normalizeArabicPersianNumerals(e.target.value))}
                     placeholder="0.00"
-                    className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px]"
+                    className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px] num-tabular"
                   />
                 </div>
 
@@ -358,12 +361,13 @@ export const GoalsPage: React.FC = () => {
                 <div>
                   <label className="block text-xs font-semibold text-[var(--color-muted)] mb-1">{t('currentSaved')}</label>
                   <input
-                    type="number"
-                    step="any"
+                    type="text"
+                    inputMode="decimal"
+                    dir="ltr"
                     value={currentAmount}
-                    onChange={(e) => setCurrentAmount(e.target.value)}
+                    onChange={(e) => setCurrentAmount(normalizeArabicPersianNumerals(e.target.value))}
                     placeholder="0.00"
-                    className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px]"
+                    className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px] num-tabular"
                   />
                 </div>
 
@@ -455,13 +459,14 @@ export const GoalsPage: React.FC = () => {
               <div>
                 <label className="block text-xs font-semibold text-[var(--color-muted)] mb-1">{t('amount')}</label>
                 <input
-                  type="number"
-                  step="any"
+                  type="text"
+                  inputMode="decimal"
+                  dir="ltr"
                   required
                   value={actionAmount}
-                  onChange={(e) => setActionAmount(e.target.value)}
+                  onChange={(e) => setActionAmount(normalizeArabicPersianNumerals(e.target.value))}
                   placeholder="0.00"
-                  className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px]"
+                  className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px] num-tabular"
                 />
               </div>
 

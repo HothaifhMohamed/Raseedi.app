@@ -1,13 +1,12 @@
 import React from 'react';
 import { Loader2 } from 'lucide-react';
+import { BrandLogo } from './common/BrandLogo';
 
 export const SplashScreen: React.FC = () => {
   return (
     <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-[var(--color-bg)] text-[var(--color-ink)] p-6 select-none">
       {/* Brand Emblem */}
-      <div className="w-20 h-20 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] flex items-center justify-center mb-4 shadow-sm">
-        <span className="font-title font-bold text-3xl">ر</span>
-      </div>
+      <BrandLogo className="w-20 h-20 rounded-2xl mb-4 shadow-sm" />
 
       <h1 className="font-title text-2xl font-bold text-[var(--color-ink)] tracking-tight mb-1">
         رَصِيدِي
