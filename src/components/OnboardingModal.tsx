@@ -54,7 +54,7 @@ export const OnboardingModal: React.FC = () => {
 
   const curr = getCurrency(selectedCurrency);
 
-  const handleFinish = () => {
+  const handleFinish = async () => {
     updateSettings({ mainCurrency: selectedCurrency });
     if (accountMode === 'organization') {
       completeOnboarding(
@@ -62,7 +62,7 @@ export const OnboardingModal: React.FC = () => {
         isRTL ? 'المحفظة الشخصية' : 'Personal Cash',
         0
       );
-      createOrganization({
+      await createOrganization({
         name: orgName.trim() || (isRTL ? 'مؤسستي' : 'My Organization'),
         currency: selectedCurrency,
         vatRate: (parseLocalizedNumber(orgVatRate) >= 0 ? parseLocalizedNumber(orgVatRate) : 14),

@@ -10,9 +10,15 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { createOrgOnServer } from '../../services/firebase';
+import {
+  auth,
+  createOrgOnServer,
+  saveCloudBackup,
+} from '../../services/firebase';
 import { migrateLegacyOrgToCloud } from '../../services/orgCloud';
+import { loadOrgWorkspaces } from '../../services/db';
 import { formatLocalDate } from '../../services/calculations';
+import { OrgWorkspaceData } from '../../types';
 
 export const OrgMigrationWizardModal: React.FC = () => {
   const {
@@ -20,6 +26,17 @@ export const OrgMigrationWizardModal: React.FC = () => {
     isOrgMigrationModalOpen,
     dismissLegacyOrgMigration,
     completeLegacyOrgMigration,
+    setOrgMigrationSuccessMessage,
+    transactions,
+    wallets,
+    categories,
+    budgets,
+    debts,
+    goals,
+    templates,
+    moneyCircles,
+    settings,
+    hasCompletedOnboarding,
     user,
     signInWithGoogleAccount,
     switchWorkspace,
@@ -43,20 +60,24 @@ export const OrgMigrationWizardModal: React.FC = () => {
   if (!isOrgMigrationModalOpen || legacyLocalOrgs.length === 0) return null;
 
   const downloadSafetyJson = () => {
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      source: 'raseedi_legacy_local_orgs',
-      organizations: legacyLocalOrgs,
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `raseedi-legacy-orgs-safety-${formatLocalDate()}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    try {
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        source: 'raseedi_legacy_local_orgs',
+        organizations: legacyLocalOrgs,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `raseedi-legacy-orgs-safety-${formatLocalDate()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+      // ignore download errors
+    }
   };
 
   const toggleSelect = (id: string) => {
@@ -94,7 +115,8 @@ export const OrgMigrationWizardModal: React.FC = () => {
     setIsMigrating(true);
     downloadSafetyJson();
 
-    const migratedLegacyIds: string[] = [];
+    const serverMigratedIds: string[] = [];
+    const fallbackTargets: OrgWorkspaceData[] = [];
     let lastCreatedOrgId = '';
     try {
       for (const ws of targets) {
@@ -112,37 +134,94 @@ export const OrgMigrationWizardModal: React.FC = () => {
             1,
         });
 
-        const created = await createOrgOnServer({
-          name: org.name,
-          currency: org.currency || org.mainCurrency || 'EGP',
-          industry: org.industry || 'general',
-          vatRate: Number.isFinite(org.vatRate) ? org.vatRate : 14,
-          approvalThreshold: Number.isFinite(org.approvalThreshold) ? org.approvalThreshold : 5000,
-          taxNumber: org.taxNumber,
-          skipStarterSeed: true,
-        });
+        try {
+          const created = await createOrgOnServer({
+            name: org.name,
+            currency: org.currency || org.mainCurrency || 'EGP',
+            industry: org.industry || 'general',
+            vatRate: Number.isFinite(org.vatRate) ? org.vatRate : 14,
+            approvalThreshold: Number.isFinite(org.approvalThreshold) ? org.approvalThreshold : 5000,
+            taxNumber: org.taxNumber,
+            skipStarterSeed: true,
+          });
 
-        await migrateLegacyOrgToCloud(
-          created.orgId,
-          ws,
-          { uid: user.id, name: user.name || user.email || 'Owner' },
-          (done, total) => {
-            setProgress({ currentOrgName: org.name, done, total });
-          }
-        );
+          await migrateLegacyOrgToCloud(
+            created.orgId,
+            ws,
+            { uid: user.id, name: user.name || user.email || 'Owner' },
+            (done, total) => {
+              setProgress({ currentOrgName: org.name, done, total });
+            }
+          );
 
-        migratedLegacyIds.push(org.id);
-        lastCreatedOrgId = created.orgId;
+          serverMigratedIds.push(org.id);
+          lastCreatedOrgId = created.orgId;
+        } catch {
+          // Server endpoint unavailable (e.g. static Vercel hosting) -> queue for direct Firestore user Cloud Backup
+          fallbackTargets.push(ws);
+        }
       }
 
-      await completeLegacyOrgMigration(migratedLegacyIds);
-      setDoneCount(migratedLegacyIds.length);
+      if (fallbackTargets.length > 0) {
+        const stored = await loadOrgWorkspaces();
+        const now = Date.now();
+        const mergedOrgMap: Record<string, OrgWorkspaceData> = {
+          ...(stored.workspaces || {}),
+        };
+        for (const ws of fallbackTargets) {
+          const id = ws.organization.id;
+          mergedOrgMap[id] = {
+            ...ws,
+            organization: {
+              ...ws.organization,
+              localFirstMode: true,
+              cloudBackedUpAt: now,
+              updatedAt: now,
+            },
+          };
+          lastCreatedOrgId = id;
+        }
+
+        const uid = auth.currentUser?.uid || user.id;
+        await saveCloudBackup(uid, {
+          transactions,
+          wallets,
+          categories,
+          budgets,
+          debts,
+          goals,
+          templates,
+          moneyCircles,
+          orgWorkspaces: mergedOrgMap,
+          activeWorkspace: lastCreatedOrgId || 'personal',
+          settings,
+          hasCompletedOnboarding,
+        });
+
+        await completeLegacyOrgMigration(
+          fallbackTargets.map((w) => w.organization.id),
+          { keepLocalWorkspaces: true }
+        );
+      }
+
+      if (serverMigratedIds.length > 0) {
+        await completeLegacyOrgMigration(serverMigratedIds);
+      }
+
+      const totalMigrated = serverMigratedIds.length + fallbackTargets.length;
+      setDoneCount(totalMigrated);
+      setOrgMigrationSuccessMessage(
+        isRTL
+          ? 'تم حفظ وترحيل بيانات المؤسسة في نسختك السحابية بنجاح!'
+          : 'Organization data saved to your Cloud Backup successfully!'
+      );
       if (lastCreatedOrgId) {
         switchWorkspace(lastCreatedOrgId);
       }
+      dismissLegacyOrgMigration();
     } catch (err) {
-      if (migratedLegacyIds.length > 0) {
-        await completeLegacyOrgMigration(migratedLegacyIds);
+      if (serverMigratedIds.length > 0) {
+        await completeLegacyOrgMigration(serverMigratedIds);
       }
       setError(
         err instanceof Error

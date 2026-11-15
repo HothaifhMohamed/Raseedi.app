@@ -108,7 +108,8 @@ export function subscribeAdConsentChanges(callback: () => void): () => void {
 export const AdConsentBanner: React.FC = () => {
   const { isPro, isRTL } = useApp();
   const [choice, setChoice] = useState<AdConsentChoice>(() => getAdConsentChoice());
-  const adSenseClient = import.meta.env.VITE_ADSENSE_CLIENT_ID?.trim();
+  const adSenseClient =
+    import.meta.env.VITE_ADSENSE_CLIENT_ID?.trim() || 'ca-pub-7802456807447662';
   const isEea = isEeaOrUkUser();
 
   useEffect(() => {

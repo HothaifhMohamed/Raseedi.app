@@ -402,6 +402,11 @@ export async function fetchCloudBackupMeta(
   uid: string
 ): Promise<{ updatedAtMs: number; chunkCount: number; source: 'chunked' | 'legacy' } | null> {
   try {
+    const userSnap = await getDoc(doc(db, 'users', uid));
+    if (!userSnap.exists()) {
+      return null;
+    }
+
     const metaSnap = await getDoc(doc(db, 'users', uid, 'backup', 'meta'));
     if (metaSnap.exists()) {
       const data = metaSnap.data() as Partial<CloudBackupMeta>;
@@ -429,9 +434,28 @@ export async function fetchCloudBackupMeta(
   }
 }
 
+function compactOrgWorkspacesForMeta(
+  orgWorkspaces: Record<string, OrgWorkspaceData>
+): Record<string, OrgWorkspaceData> {
+  const entries = Object.entries(orgWorkspaces).slice(0, 50);
+  const out: Record<string, OrgWorkspaceData> = {};
+  for (const [id, ws] of entries) {
+    if (!ws || !ws.organization) continue;
+    out[id] = {
+      ...ws,
+      transactions: (ws.transactions || []).slice(0, 200),
+      auditLogs: (ws.auditLogs || []).slice(0, 50),
+    };
+  }
+  return out;
+}
+
 export async function saveCloudBackup(
   uid: string,
-  data: Omit<AppDatabaseData, 'user'>
+  data: Omit<AppDatabaseData, 'user'> & {
+    orgWorkspaces?: Record<string, OrgWorkspaceData>;
+    activeWorkspace?: string;
+  }
 ): Promise<{ syncedAt: number; updatedAtMs: number; skippedAttachmentsCount: number }> {
   const metaPath = `users/${uid}/backup/meta`;
   const metaRef = doc(db, 'users', uid, 'backup', 'meta');
@@ -449,11 +473,26 @@ export async function saveCloudBackup(
   });
 
   // Measure actual UTF-8 byte lengths so every chunk and meta document stays well under 800KB.
-  // Personal Cloud Backup stores strictly Personal Workspace data; Cloud Organizations live in /organizations/{orgId}.
   const chunks = buildSafeSizeChunks(sanitizedTransactions, 780_000).slice(0, 99);
   const updatedAtMs = Date.now();
 
-  const metaFields = stripUndefinedDeep({
+  const rawOrgEntries =
+    data.orgWorkspaces &&
+    typeof data.orgWorkspaces === 'object' &&
+    !Array.isArray(data.orgWorkspaces)
+      ? Object.entries(data.orgWorkspaces).slice(0, 50)
+      : [];
+  const hasOrgWorkspaces = rawOrgEntries.length > 0;
+  const cleanActiveWorkspace =
+    typeof data.activeWorkspace === 'string' && data.activeWorkspace.trim().length > 0
+      ? data.activeWorkspace.trim().slice(0, 128)
+      : undefined;
+
+  let orgWorkspacesToSave = hasOrgWorkspaces
+    ? stripUndefinedDeep(Object.fromEntries(rawOrgEntries))
+    : undefined;
+
+  let metaFields = stripUndefinedDeep({
     uid,
     schemaVersion: 2,
     chunkCount: chunks.length,
@@ -465,20 +504,31 @@ export async function saveCloudBackup(
     goals: (data.goals || []).slice(0, 200),
     templates: (data.templates || []).slice(0, 300),
     moneyCircles: (data.moneyCircles || []).slice(0, 200),
+    ...(orgWorkspacesToSave ? { orgWorkspaces: orgWorkspacesToSave } : {}),
+    ...(cleanActiveWorkspace ? { activeWorkspace: cleanActiveWorkspace } : {}),
     settings: { ...data.settings, isPro: false },
     hasCompletedOnboarding: Boolean(data.hasCompletedOnboarding),
     updatedAtMs,
   });
+
+  if (getUtf8JsonByteLength(metaFields) > 850_000 && orgWorkspacesToSave) {
+    orgWorkspacesToSave = stripUndefinedDeep(compactOrgWorkspacesForMeta(orgWorkspacesToSave));
+    metaFields = stripUndefinedDeep({
+      ...metaFields,
+      orgWorkspaces: orgWorkspacesToSave,
+    });
+  }
 
   if (getUtf8JsonByteLength(metaFields) > 850_000) {
     throw new Error('BACKUP_META_TOO_LARGE');
   }
 
   try {
-    const [userSnap, existingMetaSnap] = await Promise.all([getDoc(userRef), getDoc(metaRef)]);
+    const userSnap = await getDoc(userRef);
     if (!userSnap.exists() && auth.currentUser?.uid === uid) {
       await ensureUserProfile(auth.currentUser);
     }
+    const existingMetaSnap = await getDoc(metaRef);
 
     const previousChunkCount = existingMetaSnap.exists()
       ? Math.max(0, Number((existingMetaSnap.data() as Partial<CloudBackupMeta>)?.chunkCount || 0))
@@ -512,6 +562,12 @@ export async function saveCloudBackup(
         goals: metaFields.goals,
         templates: metaFields.templates,
         moneyCircles: metaFields.moneyCircles,
+        ...(metaFields.orgWorkspaces !== undefined
+          ? { orgWorkspaces: metaFields.orgWorkspaces }
+          : {}),
+        ...(metaFields.activeWorkspace !== undefined
+          ? { activeWorkspace: metaFields.activeWorkspace }
+          : {}),
         settings: metaFields.settings,
         hasCompletedOnboarding: metaFields.hasCompletedOnboarding,
         updatedAtMs: metaFields.updatedAtMs,
@@ -563,9 +619,34 @@ export async function saveCloudBackup(
   return { syncedAt: updatedAtMs, updatedAtMs, skippedAttachmentsCount };
 }
 
+export async function syncOrganizationMetaToCloud(
+  uid: string,
+  personalData: Omit<AppDatabaseData, 'user'>,
+  orgWorkspaces: Record<string, OrgWorkspaceData>,
+  activeWorkspace?: string
+): Promise<boolean> {
+  try {
+    if (!uid || !auth.currentUser || auth.currentUser.uid !== uid) return false;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
+    await saveCloudBackup(uid, {
+      ...personalData,
+      orgWorkspaces,
+      activeWorkspace: activeWorkspace || 'personal',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchCloudBackup(uid: string): Promise<CloudBackupPayload | null> {
   const metaPath = `users/${uid}/backup/meta`;
   try {
+    const userSnap = await getDoc(doc(db, 'users', uid));
+    if (!userSnap.exists()) {
+      return null;
+    }
+
     const metaSnap = await getDoc(doc(db, 'users', uid, 'backup', 'meta'));
     if (metaSnap.exists()) {
       const meta = metaSnap.data() as CloudBackupMeta;
@@ -703,18 +784,64 @@ export async function startBusinessTrialWithServer(orgId?: string): Promise<{
   };
 }
 
+let cachedCloudAdminReady: { value: boolean; checkedAt: number } | null = null;
+
+export async function isCloudAdminReady(forceRefresh = false): Promise<boolean> {
+  const now = Date.now();
+  if (!forceRefresh && cachedCloudAdminReady && now - cachedCloudAdminReady.checkedAt < 60_000) {
+    return cachedCloudAdminReady.value;
+  }
+  try {
+    const response = await fetch('/api/health', { method: 'GET' });
+    if (!response.ok) {
+      cachedCloudAdminReady = { value: false, checkedAt: now };
+      return false;
+    }
+    const payload = (await response.json().catch(() => ({}))) as { cloudAdminReady?: boolean };
+    const ready = payload.cloudAdminReady === true;
+    cachedCloudAdminReady = { value: ready, checkedAt: now };
+    return ready;
+  } catch {
+    cachedCloudAdminReady = { value: false, checkedAt: now };
+    return false;
+  }
+}
+
 export async function fetchScanQuotaFromServer(orgId?: string): Promise<ScanQuotaInfo | null> {
   const currentUser = auth.currentUser;
   if (!currentUser) return null;
-  const idToken = await currentUser.getIdToken();
-  const url = orgId ? `/api/scan-quota?orgId=${encodeURIComponent(orgId)}` : '/api/scan-quota';
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-    },
-  });
-  if (!response.ok) return null;
-  return (await response.json()) as ScanQuotaInfo;
+  try {
+    const idToken = await currentUser.getIdToken();
+    const url = orgId ? `/api/scan-quota?orgId=${encodeURIComponent(orgId)}` : '/api/scan-quota';
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+      },
+    });
+    if (response.ok) {
+      return (await response.json()) as ScanQuotaInfo;
+    }
+  } catch {
+    // Fall back to direct user profile entitlement check (e.g. static Vercel hosting)
+  }
+
+  try {
+    const profile = await fetchUserProfile(currentUser.uid);
+    const tier = resolvePlanTierFromProfile(profile);
+    const limit = tier === 'business_pro' ? 500 : tier === 'personal_pro' ? 200 : 5;
+    return {
+      month: new Date().toISOString().slice(0, 7),
+      used: 0,
+      limit,
+      remaining: limit,
+      isPro: tier !== 'free',
+      planTier: tier,
+      expiresAt: profile?.expiresAt ?? null,
+      proExpiresAt: profile?.proExpiresAt ?? profile?.expiresAt ?? null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -731,6 +858,10 @@ export async function createOrgOnServer(params: {
   skipStarterSeed?: boolean;
   preferredOrgId?: string;
 }): Promise<{ ok: true; orgId: string; organization: Organization }> {
+  const adminReady = await isCloudAdminReady();
+  if (!adminReady) {
+    throw new Error('CLOUD_ADMIN_UNAVAILABLE');
+  }
   const idToken = await getRequiredIdToken();
   const response = await fetch('/api/org/create', {
     method: 'POST',

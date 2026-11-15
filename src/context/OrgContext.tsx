@@ -61,9 +61,15 @@ export interface OrgContextValue {
 
   legacyLocalOrgs: OrgWorkspaceData[];
   isOrgMigrationModalOpen: boolean;
+  orgMigrationSuccessMessage: string | null;
+  clearOrgMigrationSuccessMessage: () => void;
+  setOrgMigrationSuccessMessage: (msg: string | null) => void;
   openOrgMigrationModal: () => void;
   dismissLegacyOrgMigration: () => void;
-  completeLegacyOrgMigration: (migratedOrgIds: string[]) => Promise<void>;
+  completeLegacyOrgMigration: (
+    migratedOrgIds: string[],
+    options?: { keepLocalWorkspaces?: boolean }
+  ) => Promise<void>;
   queueLegacyOrgsForMigration: (workspaces: Record<string, OrgWorkspaceData>) => void;
 
   approveOrgTransaction: (txId: string) => void;

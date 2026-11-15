@@ -36,7 +36,8 @@ export const AdBanner: React.FC<AdBannerProps> = ({
   const [adLoadFailed, setAdLoadFailed] = useState(false);
   const [hasConsent, setHasConsent] = useState<boolean>(() => hasAdSenseConsent());
 
-  const adSenseClient = import.meta.env.VITE_ADSENSE_CLIENT_ID?.trim() || '';
+  const adSenseClient =
+    import.meta.env.VITE_ADSENSE_CLIENT_ID?.trim() || 'ca-pub-7802456807447662';
   const resolvedSlot = adSlot?.trim() || import.meta.env.VITE_ADSENSE_SLOT_ID?.trim() || '0000000000';
   const canTryAdSense = Boolean(adSenseClient) && isOnline && !adLoadFailed && hasConsent;
 

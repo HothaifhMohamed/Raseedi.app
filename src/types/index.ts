@@ -247,6 +247,8 @@ export interface Organization {
   aiScansMonth?: string;
   aiScansLimit?: number;
   extraSeats?: number;
+  localFirstMode?: boolean;
+  cloudBackedUpAt?: number;
   createdAt: number;
   updatedAt: number;
 }

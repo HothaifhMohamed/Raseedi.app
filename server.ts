@@ -10,6 +10,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { initializeApp, getApps, cert, App as FirebaseAdminApp } from 'firebase-admin/app';
 import { getAuth, DecodedIdToken } from 'firebase-admin/auth';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
+import scanInvoiceHandler from './api/scan-invoice';
 import { PRICING_CONFIG } from './src/config/pricing';
 import {
   DAY_MS,
@@ -26,6 +27,10 @@ import type {
   OrganizationRole,
   Wallet,
 } from './src/types';
+import {
+  fetchFirestoreDocumentWithToken,
+  isFirestorePermissionDeniedError,
+} from './src/services/firestoreRest';
 
 dotenv.config();
 
@@ -113,6 +118,41 @@ const adminDb = firebaseConfig.firestoreDatabaseId
 
 interface AuthenticatedRequest extends Request {
   authUser?: DecodedIdToken;
+}
+
+let adminDbReady = true;
+
+function extractBearerToken(req: Request): string {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return '';
+  return authHeader.slice('Bearer '.length).trim();
+}
+
+async function probeAdminDbAccess(): Promise<boolean> {
+  try {
+    await adminDb.collection('users').limit(1).get();
+    adminDbReady = true;
+    return true;
+  } catch (err) {
+    if (isFirestorePermissionDeniedError(err)) {
+      adminDbReady = false;
+      console.info(
+        'Firebase Admin Firestore permissions unavailable in runtime; using user-token & local-first fallbacks.'
+      );
+      return false;
+    }
+    return adminDbReady;
+  }
+}
+
+function respondCloudAdminUnavailable(res: Response, fallbackMessage?: string): void {
+  res.status(503).json({
+    error: 'CLOUD_ADMIN_UNAVAILABLE',
+    fallback: 'local_first',
+    message:
+      fallbackMessage ||
+      'خدمة الإدارة السحابية غير مفعلة على هذا الخادم؛ يتم الحفظ محلياً وفي نسختك السحابية.',
+  });
 }
 
 interface CategorySummary {
@@ -354,6 +394,7 @@ async function requireFirebaseAuth(
 }
 
 async function createApp() {
+  await probeAdminDbAccess();
   const app = express();
   app.set('trust proxy', 1);
 
@@ -417,23 +458,128 @@ async function createApp() {
   });
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, service: 'raseedi-server' });
+    res.json({ ok: true, service: 'raseedi-server', cloudAdminReady: adminDbReady });
   });
+
+  app.all('/api/scan-invoice', scanIpLimiter, express.json({ limit: '3mb' }), (req, res) => {
+    void scanInvoiceHandler(req, res);
+  });
+
+  const resolveScanQuotaViaUserToken = async (
+    uid: string,
+    orgId: string,
+    month: string,
+    idToken: string
+  ): Promise<{
+    status: number;
+    body: Record<string, unknown>;
+  }> => {
+    if (orgId) {
+      const [orgDoc, memberDoc, quotaDoc] = await Promise.all([
+        fetchFirestoreDocumentWithToken({
+          projectId: firebaseConfig.projectId,
+          databaseId: firebaseConfig.firestoreDatabaseId,
+          documentPath: `organizations/${orgId}`,
+          idToken,
+        }),
+        fetchFirestoreDocumentWithToken({
+          projectId: firebaseConfig.projectId,
+          databaseId: firebaseConfig.firestoreDatabaseId,
+          documentPath: `organizations/${orgId}/members/${uid}`,
+          idToken,
+        }),
+        fetchFirestoreDocumentWithToken({
+          projectId: firebaseConfig.projectId,
+          databaseId: firebaseConfig.firestoreDatabaseId,
+          documentPath: `organizations/${orgId}/scanQuotas/${month}`,
+          idToken,
+        }),
+      ]);
+
+      if (orgDoc.exists && memberDoc.exists && memberDoc.data?.status === 'active') {
+        const subState = computeOrgSubscriptionState(orgDoc.data as Record<string, unknown>);
+        const usedFromDoc = quotaDoc.exists ? Number(quotaDoc.data?.count || 0) : 0;
+        const usedFromOrg =
+          orgDoc.data?.aiScansMonth === month ? Number(orgDoc.data?.aiScansUsed || 0) : 0;
+        const used = Math.max(0, usedFromDoc || usedFromOrg);
+        return {
+          status: 200,
+          body: {
+            month,
+            used,
+            limit: subState.monthlyScanLimit,
+            remaining: Math.max(0, subState.monthlyScanLimit - used),
+            isPro: !subState.isReadOnly,
+            planTier: subState.planTier,
+            expiresAt: subState.expiresAt,
+            proExpiresAt: subState.expiresAt,
+            orgId,
+          },
+        };
+      }
+
+      if (orgDoc.forbidden || (memberDoc.exists && memberDoc.data?.status !== 'active')) {
+        return {
+          status: 403,
+          body: { error: 'FORBIDDEN', message: 'لست عضواً نشطاً في هذه المؤسسة.' },
+        };
+      }
+    }
+
+    const [userDoc, quotaDoc] = await Promise.all([
+      fetchFirestoreDocumentWithToken({
+        projectId: firebaseConfig.projectId,
+        databaseId: firebaseConfig.firestoreDatabaseId,
+        documentPath: `users/${uid}`,
+        idToken,
+      }),
+      fetchFirestoreDocumentWithToken({
+        projectId: firebaseConfig.projectId,
+        databaseId: firebaseConfig.firestoreDatabaseId,
+        documentPath: `users/${uid}/scanQuotas/${month}`,
+        idToken,
+      }),
+    ]);
+
+    const entitlement = resolveUserEntitlement(userDoc.exists ? userDoc.data : undefined);
+    const used = quotaDoc.exists ? Math.max(0, Number(quotaDoc.data?.count || 0)) : 0;
+    return {
+      status: 200,
+      body: {
+        month,
+        used,
+        limit: entitlement.scanLimit,
+        remaining: Math.max(0, entitlement.scanLimit - used),
+        isPro: entitlement.isPro,
+        planTier: entitlement.planTier,
+        expiresAt: entitlement.expiresAt,
+        proExpiresAt: entitlement.expiresAt,
+      },
+    };
+  };
 
   app.get(
     '/api/scan-quota',
     requireFirebaseAuth,
     async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const uid = req.authUser!.uid;
-        const orgId = typeof req.query.orgId === 'string' ? req.query.orgId.trim() : '';
-        const month = getUtcMonthKey();
+      const uid = req.authUser!.uid;
+      const orgId = typeof req.query.orgId === 'string' ? req.query.orgId.trim() : '';
+      const month = getUtcMonthKey();
+      const idToken = extractBearerToken(req);
 
+      if (orgId && !VALID_ORG_ID_REGEX.test(orgId)) {
+        res.status(400).json({ error: 'INVALID_ORG_ID', message: 'معرف المؤسسة غير صالح.' });
+        return;
+      }
+
+      if (!adminDbReady) {
+        const restResult = await resolveScanQuotaViaUserToken(uid, orgId, month, idToken);
+        res.status(restResult.status).json(restResult.body);
+        return;
+      }
+
+      try {
         if (orgId) {
-          if (!VALID_ORG_ID_REGEX.test(orgId)) {
-            res.status(400).json({ error: 'INVALID_ORG_ID', message: 'معرف المؤسسة غير صالح.' });
-            return;
-          }
           const [orgSnap, memberSnap, quotaSnap] = await Promise.all([
             adminDb.collection('organizations').doc(orgId).get(),
             adminDb.collection('organizations').doc(orgId).collection('members').doc(uid).get(),
@@ -476,6 +622,12 @@ async function createApp() {
           proExpiresAt: entitlement.expiresAt,
         });
       } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          const restResult = await resolveScanQuotaViaUserToken(uid, orgId, month, idToken);
+          res.status(restResult.status).json(restResult.body);
+          return;
+        }
         console.error('Quota lookup error:', err);
         res.status(500).json({ error: 'QUOTA_LOOKUP_FAILED' });
       }
@@ -700,7 +852,7 @@ async function createApp() {
         });
 
         const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
+          model: 'gemini-4-hydrogen',
           contents: [
             {
               role: 'user',
@@ -791,6 +943,11 @@ Return JSON matching the schema with:
               { merge: true }
             )
             .catch(() => {});
+        }
+        if (isFirestorePermissionDeniedError(error)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(res);
+          return;
         }
         console.error('Receipt scan error:', error);
         res.status(500).json({
@@ -1110,6 +1267,11 @@ Return JSON matching the schema with:
           ...(result.seatLimit !== undefined ? { seatLimit: result.seatLimit } : {}),
         });
       } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(res);
+          return;
+        }
         console.error('Redeem code error:', err);
         res.status(500).json({
           error: 'REDEEM_FAILED',
@@ -1223,6 +1385,11 @@ Return JSON matching the schema with:
           proExpiresAt: result.expiresAt,
         });
       } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(res);
+          return;
+        }
         console.error('Business trial error:', err);
         res.status(500).json({
           error: 'TRIAL_START_FAILED',
@@ -1283,6 +1450,14 @@ Return JSON matching the schema with:
           ? preferredOrgId.trim()
           : `org-${crypto.randomUUID().slice(0, 12)}`;
       const now = Date.now();
+
+      if (!adminDbReady) {
+        respondCloudAdminUnavailable(
+          res,
+          'تم حفظ المؤسسة محلياً وفي نسختك السحابية لعدم توفر صلاحيات الإدارة على الخادم.'
+        );
+        return;
+      }
 
       try {
         const txResult = await adminDb.runTransaction(async (tx) => {
@@ -1518,6 +1693,14 @@ Return JSON matching the schema with:
           },
         });
       } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(
+            res,
+            'تم حفظ المؤسسة محلياً وفي نسختك السحابية لعدم توفر صلاحيات الإدارة على الخادم.'
+          );
+          return;
+        }
         console.error('Org create error:', err);
         res.status(500).json({
           error: 'ORG_CREATE_FAILED',
@@ -1634,6 +1817,11 @@ Return JSON matching the schema with:
           code: rawCode,
         });
       } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(res);
+          return;
+        }
         console.error('Create invite error:', err);
         res.status(500).json({ error: 'INVITE_CREATE_FAILED', message: 'تعذر إنشاء الدعوة حالياً.' });
       }
@@ -1679,6 +1867,11 @@ Return JSON matching the schema with:
         });
         res.json({ ok: true, invites });
       } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(res);
+          return;
+        }
         console.error('List invites error:', err);
         res.status(500).json({ error: 'INVITES_LIST_FAILED' });
       }
@@ -1728,6 +1921,11 @@ Return JSON matching the schema with:
         await batch.commit();
         res.json({ ok: true });
       } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(res);
+          return;
+        }
         console.error('Revoke invite error:', err);
         res.status(500).json({ error: 'INVITE_REVOKE_FAILED' });
       }
@@ -1913,6 +2111,11 @@ Return JSON matching the schema with:
           alreadyMember: outcome.alreadyMember,
         });
       } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(res);
+          return;
+        }
         console.error('Org join error:', err);
         res.status(500).json({ error: 'ORG_JOIN_FAILED', message: 'تعذر إتمام الانضمام حالياً.' });
       }
@@ -2056,6 +2259,11 @@ Return JSON matching the schema with:
         }
         res.json({ ok: true });
       } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(res);
+          return;
+        }
         console.error('Manage member error:', err);
         res.status(500).json({ error: 'MEMBER_UPDATE_FAILED', message: 'تعذر تحديث بيانات العضو.' });
       }
@@ -2122,6 +2330,11 @@ Return JSON matching the schema with:
         }
         res.json({ ok: true });
       } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(res);
+          return;
+        }
         console.error('Transfer ownership error:', err);
         res.status(500).json({ error: 'TRANSFER_OWNERSHIP_FAILED', message: 'تعذر نقل الملكية حالياً.' });
       }
@@ -2176,6 +2389,11 @@ Return JSON matching the schema with:
         await adminDb.recursiveDelete(orgRef);
         res.json({ ok: true });
       } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(res);
+          return;
+        }
         console.error('Delete org error:', err);
         res.status(500).json({ error: 'ORG_DELETE_FAILED', message: 'تعذر حذف المؤسسة حالياً.' });
       }
@@ -2242,6 +2460,11 @@ Return JSON matching the schema with:
         }
         res.json({ ok: true });
       } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(res);
+          return;
+        }
         console.error('Account deletion error:', err);
         res.status(500).json({
           error: 'DELETE_ACCOUNT_FAILED',

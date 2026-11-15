@@ -9,13 +9,9 @@ function conditionalAdsTxtPlugin(): Plugin {
   return {
     name: 'conditional-ads-txt',
     closeBundle() {
-      const client = process.env.VITE_ADSENSE_CLIENT_ID?.trim();
+      const client = process.env.VITE_ADSENSE_CLIENT_ID?.trim() || 'ca-pub-7802456807447662';
       const outAdsPath = path.resolve(__dirname, 'dist', 'ads.txt');
-      if (!fs.existsSync(outAdsPath)) return;
-      if (!client) {
-        fs.unlinkSync(outAdsPath);
-        return;
-      }
+      if (!fs.existsSync(path.dirname(outAdsPath))) return;
       const pubId = client.replace(/^ca-/, '');
       const content = `# Google AdSense Authorized Digital Sellers (ads.txt) for Raseedi\ngoogle.com, ${pubId}, DIRECT, f08c47fec0942fa0\n`;
       fs.writeFileSync(outAdsPath, content, 'utf8');
