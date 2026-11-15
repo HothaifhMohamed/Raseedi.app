@@ -56,7 +56,7 @@ export interface Wallet {
   isLocked?: boolean;
   pin?: string;
   pinSalt?: string;
-  order: number;
+  order?: number;
   walletType?: WalletType;
   custodianMemberUid?: string;
   updatedAt?: number;

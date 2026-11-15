@@ -170,6 +170,11 @@ import {
   safeReadSessionNav,
   safeWriteSessionNav,
 } from '../services/navigation';
+import {
+  assignSequentialWalletOrder,
+  getNextWalletOrder,
+  sortWalletsByOrder,
+} from '../services/walletOrder';
 
 export interface FilterState {
   type: 'all' | 'income' | 'expense';
@@ -455,6 +460,7 @@ interface AppContextType {
 
   addWallet: (data: Omit<Wallet, 'id'>) => Wallet;
   updateWallet: (id: string, data: Partial<Wallet>) => void;
+  reorderWallets: (orderedWallets: Wallet[]) => void;
   getWalletDependencies: (id: string) => WalletDependencies;
   deleteWallet: (id: string) => void;
   migrateAndDeleteWallet: (walletId: string, targetWalletId: string) => void;
@@ -840,7 +846,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   );
 
   const transactions = isOrgWorkspace ? orgTransactions : personalTransactions;
-  const wallets = isOrgWorkspace ? activeOrgWalletsList : personalWallets;
+  const wallets = useMemo(
+    () => sortWalletsByOrder(isOrgWorkspace ? activeOrgWalletsList : personalWallets),
+    [isOrgWorkspace, activeOrgWalletsList, personalWallets]
+  );
   const categories = isOrgWorkspace
     ? isUsingLocalOrgMode
       ? activeLocalOrgWs?.categories || []
@@ -1204,11 +1213,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         lastKnownCloudUpdatedAtMs: backup.updatedAtMs || prevSettings.lastKnownCloudUpdatedAtMs || Date.now(),
       };
       // Respect user deletions post-onboarding: never force DEFAULT_* when onboarded
-      const resolvedWallets = backup.wallets?.length
-        ? backup.wallets
-        : resolvedOnboarded
-        ? []
-        : DEFAULT_WALLETS;
+      const resolvedWallets = sortWalletsByOrder(
+        backup.wallets?.length
+          ? backup.wallets
+          : resolvedOnboarded
+          ? []
+          : DEFAULT_WALLETS
+      );
       const resolvedCategories = backup.categories?.length
         ? backup.categories
         : resolvedOnboarded
@@ -1768,11 +1779,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       ]);
 
       const onboarded = Boolean(data.hasCompletedOnboarding);
-      const resolvedWallets = data.wallets?.length
-        ? data.wallets
-        : onboarded
-        ? []
-        : DEFAULT_WALLETS;
+      const resolvedWallets = sortWalletsByOrder(
+        data.wallets?.length
+          ? data.wallets
+          : onboarded
+          ? []
+          : DEFAULT_WALLETS
+      );
       const resolvedCategories = data.categories?.length
         ? data.categories
         : onboarded
@@ -4865,7 +4878,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         initialBalanceMinor: toMinor(data.initialBalance, data.currency),
         balanceMinor: toMinor(data.initialBalance, data.currency),
         isArchived: false,
-        order: wallets.length + 1,
+        order: getNextWalletOrder(wallets),
       };
       if (isOrgWorkspace && activeOrganization) {
         if (!canOrgWrite) return newWallet;
@@ -4896,7 +4909,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return newWallet;
     },
     [
-      wallets.length,
+      wallets,
       isOrgWorkspace,
       isUsingLocalOrgMode,
       activeOrganization,
@@ -4955,6 +4968,59 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       getOrgActor,
       mutateLocalOrgWorkspace,
       personalWallets,
+      savePersonalState,
+    ]
+  );
+
+  const reorderWallets = useCallback(
+    (orderedWallets: Wallet[]) => {
+      const normalized = assignSequentialWalletOrder(orderedWallets).map((w) => ({
+        ...w,
+        updatedAt: Date.now(),
+      }));
+
+      if (isOrgWorkspace && activeOrganization) {
+        if (!canOrgWrite) return;
+        if (isUsingLocalOrgMode) {
+          const actor = getOrgActor();
+          mutateLocalOrgWorkspace(activeOrganization.id, (ws) => ({
+            ...ws,
+            wallets: normalized,
+            auditLogs: appendLocalOrgAuditLog(
+              ws,
+              'update',
+              'wallet',
+              activeOrganization.id,
+              actor,
+              'إعادة ترتيب المحافظ والخزائن'
+            ),
+          }));
+          return;
+        }
+
+        const prevOrderById = new Map(activeCloudWallets.map((w) => [w.id, w.order]));
+        setActiveCloudWallets(normalized);
+        normalized.forEach((w) => {
+          if (prevOrderById.get(w.id) !== w.order) {
+            void upsertOrgWalletCloud(activeOrganization.id, w, false, getOrgActor()).catch((err) =>
+              setOrgActionError(err instanceof Error ? err.message : 'Wallet reorder failed')
+            );
+          }
+        });
+        return;
+      }
+
+      setPersonalWallets(normalized);
+      savePersonalState({ wallets: normalized });
+    },
+    [
+      isOrgWorkspace,
+      activeOrganization,
+      canOrgWrite,
+      isUsingLocalOrgMode,
+      getOrgActor,
+      mutateLocalOrgWorkspace,
+      activeCloudWallets,
       savePersonalState,
     ]
   );
@@ -6452,6 +6518,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
         addWallet,
         updateWallet,
+        reorderWallets,
         getWalletDependencies,
         deleteWallet,
         migrateAndDeleteWallet,

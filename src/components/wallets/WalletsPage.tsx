@@ -13,11 +13,15 @@ import {
   Sparkles,
   Archive,
   AlertTriangle,
+  ArrowUp,
+  ArrowDown,
+  ArrowUpDown,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { Wallet, WalletType } from '../../types';
 import { IconRenderer } from '../common/IconRenderer';
 import { formatCurrencyAmount, calculateTotalBalance } from '../../services/calculations';
+import { reorderWalletsBySwap, sortWalletsByOrder } from '../../services/walletOrder';
 import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../../services/numbers';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { PinLockModal } from '../common/PinLockModal';
@@ -45,6 +49,7 @@ export const WalletsPage: React.FC = () => {
     orgMembers,
     addWallet,
     updateWallet,
+    reorderWallets,
     getWalletDependencies,
     deleteWallet,
     migrateAndDeleteWallet,
@@ -59,6 +64,7 @@ export const WalletsPage: React.FC = () => {
   } = useApp();
 
   const [hiddenBalances, setHiddenBalances] = useState<Record<string, boolean>>({});
+  const [isReorderMode, setIsReorderMode] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingWallet, setEditingWallet] = useState<Wallet | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -86,13 +92,26 @@ export const WalletsPage: React.FC = () => {
   const [custodianMemberUid, setCustodianMemberUid] = useState('');
   const [excludeFromTotal, setExcludeFromTotal] = useState(false);
 
+  const sortedWallets = useMemo(() => sortWalletsByOrder(wallets), [wallets]);
+
+  React.useEffect(() => {
+    if (sortedWallets.length <= 1 && isReorderMode) {
+      setIsReorderMode(false);
+    }
+  }, [sortedWallets.length, isReorderMode]);
+
+  const handleMoveWallet = (index: number, direction: 'up' | 'down') => {
+    const nextOrdered = reorderWalletsBySwap(sortedWallets, index, direction);
+    reorderWallets(nextOrdered);
+  };
+
   // Total balance across all wallets
   const totalBalance = useMemo(() => {
-    return calculateTotalBalance(wallets, settings.mainCurrency, settings.customExchangeRates, {
+    return calculateTotalBalance(sortedWallets, settings.mainCurrency, settings.customExchangeRates, {
       excludeDebts: settings.excludeDebtsFromBalance,
       debts,
     });
-  }, [wallets, settings.mainCurrency, settings.customExchangeRates, settings.excludeDebtsFromBalance, debts]);
+  }, [sortedWallets, settings.mainCurrency, settings.customExchangeRates, settings.excludeDebtsFromBalance, debts]);
 
   const toggleHideWalletBalance = (wId: string) => {
     setHiddenBalances((prev) => ({ ...prev, [wId]: !prev[wId] }));
@@ -267,9 +286,46 @@ export const WalletsPage: React.FC = () => {
         </div>
       )}
 
+      {/* Wallets List Header & Reorder Toggle */}
+      <div className="flex items-center justify-between gap-2 px-0.5">
+        <span className="text-xs font-semibold text-[var(--color-muted)]">
+          {isReorderMode
+            ? isRTL
+              ? 'استخدم الأسهم لإعادة ترتيب المحافظ'
+              : 'Tap arrows to reorder wallets'
+            : `${isRTL ? 'المحافظ' : 'Wallets'} (${sortedWallets.length})`}
+        </span>
+
+        {sortedWallets.length > 1 && (
+          <button
+            type="button"
+            onClick={() => setIsReorderMode((prev) => !prev)}
+            aria-pressed={isReorderMode}
+            data-testid="toggle-reorder-wallets"
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors min-h-[38px] ${
+              isReorderMode
+                ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)] shadow-xs'
+                : 'bg-[var(--color-surface)] text-[var(--color-ink)] border-[var(--color-line)] hover:border-[var(--color-accent)]/50'
+            }`}
+          >
+            {isReorderMode ? (
+              <>
+                <Check className="w-3.5 h-3.5" />
+                <span>{isRTL ? 'تم الترتيب' : 'Done'}</span>
+              </>
+            ) : (
+              <>
+                <ArrowUpDown className="w-3.5 h-3.5 text-[var(--color-accent)]" />
+                <span>{isRTL ? 'تعديل الترتيب' : 'Reorder'}</span>
+              </>
+            )}
+          </button>
+        )}
+      </div>
+
       {/* Wallets Cards List */}
-      <div className="space-y-3">
-        {wallets.map((w) => {
+      <div className="space-y-3" data-testid="wallets-card-list">
+        {sortedWallets.map((w, index) => {
           const isHidden = hiddenBalances[w.id];
           const isLocked = w.isLocked && lockedWalletIds.includes(w.id);
           const cardColor = w.color?.startsWith('#') ? w.color : '#3A605B';
@@ -277,18 +333,25 @@ export const WalletsPage: React.FC = () => {
           return (
             <div
               key={w.id}
-              onClick={() => handleCardClick(w)}
-              className="relative overflow-hidden rounded-xl p-4.5 border border-[var(--color-line)] pattern-wallet-lines shadow-sm cursor-pointer hover:opacity-95 transition-all text-white select-none min-h-[100px]"
+              data-wallet-id={w.id}
+              onClick={() => {
+                if (!isReorderMode) handleCardClick(w);
+              }}
+              className={`relative overflow-hidden rounded-xl p-4.5 border border-[var(--color-line)] pattern-wallet-lines shadow-sm transition-all text-white select-none min-h-[100px] ${
+                isReorderMode
+                  ? 'cursor-default ring-1 ring-[var(--color-accent)]/40'
+                  : 'cursor-pointer hover:opacity-95'
+              }`}
               style={{ backgroundColor: cardColor }}
             >
               <div className="relative z-10">
                 {/* Top Row: Icon + Name + Action Icons */}
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-2.5">
+                <div className="flex items-center justify-between mb-3 gap-2">
+                  <div className="flex items-center gap-2.5 min-w-0">
                     <div className="w-9 h-9 rounded-lg bg-black/20 flex items-center justify-center shrink-0">
                       <IconRenderer name={w.icon || 'Wallet'} className="w-4.5 h-4.5 text-white" />
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <h3 className="text-sm font-bold tracking-tight leading-tight flex items-center gap-1.5 flex-wrap">
                         <span>{w.name}</span>
                         {w.excludeFromTotal && (
@@ -313,39 +376,73 @@ export const WalletsPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-                    {/* Hide Balance Eye */}
-                    <button
-                      type="button"
-                      onClick={() => toggleHideWalletBalance(w.id)}
-                      className="p-1.5 text-white/80 hover:text-white rounded-lg bg-black/20 min-h-[36px] min-w-[36px] flex items-center justify-center"
-                      aria-label="Toggle wallet balance"
-                    >
-                      {isHidden ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
+                  {isReorderMode ? (
+                    <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                      <span className="text-[11px] font-mono font-bold px-2 py-1 rounded-lg bg-black/25 text-white/95 num-tabular">
+                        #{index + 1}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleMoveWallet(index, 'up')}
+                        disabled={index === 0}
+                        aria-label={isRTL ? `نقل ${w.name} لأعلى` : `Move ${w.name} up`}
+                        className={`p-2 rounded-lg bg-black/30 min-h-[40px] min-w-[40px] flex items-center justify-center transition ${
+                          index === 0
+                            ? 'opacity-35 cursor-not-allowed'
+                            : 'hover:bg-black/45 active:scale-95 text-white'
+                        }`}
+                      >
+                        <ArrowUp className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleMoveWallet(index, 'down')}
+                        disabled={index === sortedWallets.length - 1}
+                        aria-label={isRTL ? `نقل ${w.name} لأسفل` : `Move ${w.name} down`}
+                        className={`p-2 rounded-lg bg-black/30 min-h-[40px] min-w-[40px] flex items-center justify-center transition ${
+                          index === sortedWallets.length - 1
+                            ? 'opacity-35 cursor-not-allowed'
+                            : 'hover:bg-black/45 active:scale-95 text-white'
+                        }`}
+                      >
+                        <ArrowDown className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                      {/* Hide Balance Eye */}
+                      <button
+                        type="button"
+                        onClick={() => toggleHideWalletBalance(w.id)}
+                        className="p-1.5 text-white/80 hover:text-white rounded-lg bg-black/20 min-h-[36px] min-w-[36px] flex items-center justify-center"
+                        aria-label="Toggle wallet balance"
+                      >
+                        {isHidden ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
 
-                    {/* Lock / Unlock Icon */}
-                    <button
-                      type="button"
-                      onClick={(e) => handleToggleLock(w, e)}
-                      className={`p-1.5 rounded-lg transition min-h-[36px] min-w-[36px] flex items-center justify-center ${
-                        w.isLocked ? 'bg-[var(--color-warning)] text-[#1C1A17]' : 'bg-black/20 text-white/80 hover:text-white'
-                      }`}
-                      title={w.isLocked ? (isRTL ? 'المحفظة محمية' : 'Wallet locked') : (isRTL ? 'قفل المحفظة برمز' : 'Set PIN lock')}
-                    >
-                      {w.isLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
-                    </button>
+                      {/* Lock / Unlock Icon */}
+                      <button
+                        type="button"
+                        onClick={(e) => handleToggleLock(w, e)}
+                        className={`p-1.5 rounded-lg transition min-h-[36px] min-w-[36px] flex items-center justify-center ${
+                          w.isLocked ? 'bg-[var(--color-warning)] text-[#1C1A17]' : 'bg-black/20 text-white/80 hover:text-white'
+                        }`}
+                        title={w.isLocked ? (isRTL ? 'المحفظة محمية' : 'Wallet locked') : (isRTL ? 'قفل المحفظة برمز' : 'Set PIN lock')}
+                      >
+                        {w.isLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+                      </button>
 
-                    {/* Edit Wallet */}
-                    <button
-                      type="button"
-                      onClick={(e) => handleOpenEdit(w, e)}
-                      className="p-1.5 text-white/80 hover:text-white rounded-lg bg-black/20 min-h-[36px] min-w-[36px] flex items-center justify-center"
-                      aria-label="Edit wallet"
-                    >
-                      <Edit2 className="w-4 h-4" />
-                    </button>
-                  </div>
+                      {/* Edit Wallet */}
+                      <button
+                        type="button"
+                        onClick={(e) => handleOpenEdit(w, e)}
+                        className="p-1.5 text-white/80 hover:text-white rounded-lg bg-black/20 min-h-[36px] min-w-[36px] flex items-center justify-center"
+                        aria-label="Edit wallet"
+                      >
+                        <Edit2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {/* Bottom Row: Balance & Currency */}
