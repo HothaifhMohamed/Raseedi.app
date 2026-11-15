@@ -3,7 +3,7 @@
  * Auto Column Mapper, Validator & Duplicate Detector
  */
 import * as XLSX from 'xlsx';
-import { Category, Transaction, TransactionType } from '../types';
+import { Category, Transaction, TransactionType, Wallet } from '../types';
 import { normalizeArabicText, normalizeDigits } from './dialectParser';
 import { normalizeArabicPersianNumerals } from './numbers';
 
@@ -13,6 +13,7 @@ export interface CsvColumnMapping {
   typeIndex: number; // -1 if unmapped (optional: defaults to expense unless negative or income keyword)
   categoryIndex: number; // -1 if unmapped
   notesIndex: number; // -1 if unmapped
+  walletIndex?: number; // -1 or undefined if unmapped (optional: uses target wallet fallback)
 }
 
 export interface CsvParsedTable {
@@ -43,6 +44,8 @@ export interface CsvPreviewRow {
   type: TransactionType;
   categoryId: string;
   categoryLabel: string;
+  walletId?: string;
+  walletName?: string;
   notes: string;
   isDuplicate: boolean;
   isValid: boolean;
@@ -478,6 +481,77 @@ export function parseImportFileBuffer(params: {
   }
 }
 
+const ARABIC_MONTH_TO_ENGLISH: ReadonlyArray<[RegExp, string]> = [
+  [/يناير/g, 'Jan'],
+  [/فبراير/g, 'Feb'],
+  [/مارس/g, 'Mar'],
+  [/[أاإآ]بريل/g, 'Apr'],
+  [/مايو/g, 'May'],
+  [/يوني[وهة]/g, 'Jun'],
+  [/يولي[وهة]/g, 'Jul'],
+  [/[أاإآ]غسطس/g, 'Aug'],
+  [/سبتمبر/g, 'Sep'],
+  [/[أاإآ]كتوبر/g, 'Oct'],
+  [/نوفمبر/g, 'Nov'],
+  [/ديسمبر/g, 'Dec'],
+];
+
+const ENGLISH_MONTH_INDEX: Record<string, number> = {
+  jan: 1,
+  january: 1,
+  feb: 2,
+  february: 2,
+  mar: 3,
+  march: 3,
+  apr: 4,
+  april: 4,
+  may: 5,
+  jun: 6,
+  june: 6,
+  jul: 7,
+  july: 7,
+  aug: 8,
+  august: 8,
+  sep: 9,
+  sept: 9,
+  september: 9,
+  oct: 10,
+  october: 10,
+  nov: 11,
+  november: 11,
+  dec: 12,
+  december: 12,
+};
+
+/**
+ * Translates complex Arabic date strings (e.g. "15 نوفمبر، 2026 06:57 PM")
+ * into standard English date strings parseable by `new Date()` / `Date.parse()`.
+ */
+export function parseArabicDate(dateString: string): string {
+  if (!dateString) return '';
+
+  let cleaned = normalizeDigits(String(dateString))
+    // Replace Arabic comma with English comma
+    .replace(/\u060C/g, ',')
+    // Strip optional Arabic weekday prefixes (e.g. "الأحد، ")
+    .replace(
+      /(?:^|\s)(?:الأحد|الاحد|الإثنين|الاثنين|الثلاثاء|الأربعاء|الاربعاء|الخميس|الجمعة|الجمعه|السبت)\s*,?/g,
+      ' '
+    )
+    // Normalize standalone Arabic AM/PM markers
+    .replace(/(?:^|\s)(?:صباحاً|صباحا|ص)(?=\s|$)/g, ' AM')
+    .replace(/(?:^|\s)(?:مساءً|مساء|م)(?=\s|$)/g, ' PM');
+
+  for (const [pattern, engShort] of ARABIC_MONTH_TO_ENGLISH) {
+    cleaned = cleaned.replace(pattern, engShort);
+  }
+
+  return cleaned
+    .replace(/\s*,\s*/g, ', ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /**
  * Smart column mapping detection from Arabic or English header names
  */
@@ -488,6 +562,7 @@ export function autoDetectCsvMapping(headers: string[]): CsvColumnMapping {
     typeIndex: -1,
     categoryIndex: -1,
     notesIndex: -1,
+    walletIndex: -1,
   };
 
   headers.forEach((h, idx) => {
@@ -505,6 +580,7 @@ export function autoDetectCsvMapping(headers: string[]): CsvColumnMapping {
         norm.includes('قيمه') ||
         norm.includes('سعر') ||
         norm.includes('تكلفه') ||
+        norm.includes('cost') ||
         norm.includes('amount') ||
         norm.includes('value') ||
         norm.includes('total') ||
@@ -512,6 +588,15 @@ export function autoDetectCsvMapping(headers: string[]): CsvColumnMapping {
         norm.includes('sum'))
     ) {
       mapping.amountIndex = idx;
+    } else if (
+      mapping.walletIndex === -1 &&
+      (norm.includes('محفظه') ||
+        norm.includes('الي (المحفظه)') ||
+        norm.includes('الى (المحفظه)') ||
+        norm.includes('wallet') ||
+        norm.includes('account'))
+    ) {
+      mapping.walletIndex = idx;
     } else if (
       mapping.typeIndex === -1 &&
       (norm.includes('نوع') || norm.includes('حركه') || norm.includes('type') || norm.includes('kind'))
@@ -539,7 +624,9 @@ export function autoDetectCsvMapping(headers: string[]): CsvColumnMapping {
   });
 
   // Fallback heuristics only if headers weren't recognized AND indices aren't already claimed
-  const usedIndices = new Set(Object.values(mapping).filter((v) => v >= 0));
+  const usedIndices = new Set(
+    Object.values(mapping).filter((v): v is number => typeof v === 'number' && v >= 0)
+  );
   if (mapping.dateIndex === -1 && headers.length >= 1 && !usedIndices.has(0)) {
     mapping.dateIndex = 0;
     usedIndices.add(0);
@@ -553,7 +640,7 @@ export function autoDetectCsvMapping(headers: string[]): CsvColumnMapping {
 }
 
 /**
- * Normalize date string, Date object, or Excel serial number to YYYY-MM-DD strictly.
+ * Normalize date string, Arabic date string, Date object, or Excel serial number to YYYY-MM-DD strictly.
  * Rejects invalid calendar dates such as 2025-02-30 or month 13.
  */
 export function normalizeCsvDate(raw: string | number | Date): string | null {
@@ -561,14 +648,12 @@ export function normalizeCsvDate(raw: string | number | Date): string | null {
     return formatUtcYmd(raw);
   }
 
-  const cleaned = normalizeDigits(String(raw ?? ''))
-    .trim()
-    .split(/[T\s]/)[0];
-  if (!cleaned) return null;
+  const normalized = parseArabicDate(String(raw ?? ''));
+  if (!normalized) return null;
 
   // Excel serial number (e.g., 45788 -> 2025-05-11), valid between 1970 and 2100
-  if (/^\d{4,5}(\.\d+)?$/.test(cleaned)) {
-    const serial = Math.floor(Number(cleaned));
+  if (/^\d{4,5}(\.\d+)?$/.test(normalized)) {
+    const serial = Math.floor(Number(normalized));
     if (serial >= 25569 && serial <= 73050) {
       const utcMs = (serial - 25569) * 86400 * 1000;
       return formatUtcYmd(new Date(utcMs));
@@ -576,8 +661,8 @@ export function normalizeCsvDate(raw: string | number | Date): string | null {
     return null;
   }
 
-  // YYYY-MM-DD or YYYY/MM/DD
-  const isoMatch = cleaned.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+  // YYYY-MM-DD or YYYY/MM/DD (with optional T/space time suffix)
+  const isoMatch = normalized.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[T\s].*)?$/);
   if (isoMatch) {
     const y = Number(isoMatch[1]);
     const m = Number(isoMatch[2]);
@@ -586,8 +671,8 @@ export function normalizeCsvDate(raw: string | number | Date): string | null {
     return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
   }
 
-  // DD/MM/YYYY or DD-MM-YYYY
-  const dmyMatch = cleaned.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+  // DD/MM/YYYY or DD-MM-YYYY (with optional space time suffix)
+  const dmyMatch = normalized.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?:[T\s].*)?$/);
   if (dmyMatch) {
     const d = Number(dmyMatch[1]);
     const m = Number(dmyMatch[2]);
@@ -596,14 +681,53 @@ export function normalizeCsvDate(raw: string | number | Date): string | null {
     return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
   }
 
-  // Reject purely alphabetic or malformed short strings
-  if (!/\d{4}/.test(cleaned)) return null;
+  // DD Mon, YYYY [optional time] (e.g. "15 Nov, 2026 06:57 PM")
+  const dMonYMatch = normalized.match(
+    /^(\d{1,2})[-\s]+([A-Za-z]+)\s*,?\s*(\d{4})(?:\s.*)?$/
+  );
+  if (dMonYMatch) {
+    const d = Number(dMonYMatch[1]);
+    const m = ENGLISH_MONTH_INDEX[dMonYMatch[2].toLowerCase()];
+    const y = Number(dMonYMatch[3]);
+    if (!m || !isValidCalendarYmd(y, m, d)) return null;
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }
 
-  const parsed = new Date(cleaned);
-  if (!isNaN(parsed.getTime())) {
-    return formatUtcYmd(
-      new Date(Date.UTC(parsed.getFullYear(), parsed.getMonth(), parsed.getDate()))
-    );
+  // Mon DD, YYYY [optional time] (e.g. "Nov 15, 2026 06:57 PM")
+  const monDYMatch = normalized.match(
+    /^([A-Za-z]+)\s+(\d{1,2})\s*,?\s*(\d{4})(?:\s.*)?$/
+  );
+  if (monDYMatch) {
+    const m = ENGLISH_MONTH_INDEX[monDYMatch[1].toLowerCase()];
+    const d = Number(monDYMatch[2]);
+    const y = Number(monDYMatch[3]);
+    if (!m || !isValidCalendarYmd(y, m, d)) return null;
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }
+
+  // YYYY Mon DD (e.g. "2026 Nov 15")
+  const yMonDMatch = normalized.match(
+    /^(\d{4})[-\s]+([A-Za-z]+)[-\s]+(\d{1,2})(?:\s.*)?$/
+  );
+  if (yMonDMatch) {
+    const y = Number(yMonDMatch[1]);
+    const m = ENGLISH_MONTH_INDEX[yMonDMatch[2].toLowerCase()];
+    const d = Number(yMonDMatch[3]);
+    if (!m || !isValidCalendarYmd(y, m, d)) return null;
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }
+
+  // Reject strings without a 4-digit year
+  if (!/\d{4}/.test(normalized)) return null;
+
+  const parsedMs = Date.parse(normalized);
+  if (!Number.isNaN(parsedMs)) {
+    const parsed = new Date(parsedMs);
+    const y = parsed.getFullYear();
+    const m = parsed.getMonth() + 1;
+    const d = parsed.getDate();
+    if (!isValidCalendarYmd(y, m, d)) return null;
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
   }
 
   return null;
@@ -669,13 +793,14 @@ export function mapCsvRowsToTransactions(params: {
   mapping: CsvColumnMapping;
   categories: Category[];
   existingTransactions: Transaction[];
+  wallets?: Wallet[];
 }): {
   previewRows: CsvPreviewRow[];
   validCount: number;
   invalidCount: number;
   duplicateCount: number;
 } {
-  const { rows, mapping, categories, existingTransactions } = params;
+  const { rows, mapping, categories, existingTransactions, wallets = [] } = params;
 
   // Pre-index existing transactions in O(N) for fast duplicate detection even at 5,000+ rows
   const existingKeys = new Set<string>();
@@ -690,6 +815,7 @@ export function mapCsvRowsToTransactions(params: {
   let validCount = 0;
   let invalidCount = 0;
   let duplicateCount = 0;
+  const walletColIdx = mapping.walletIndex ?? -1;
 
   const previewRows: CsvPreviewRow[] = rows.map((row, idx) => {
     const rawDate = mapping.dateIndex >= 0 ? row[mapping.dateIndex] || '' : '';
@@ -697,6 +823,7 @@ export function mapCsvRowsToTransactions(params: {
     const rawType = mapping.typeIndex >= 0 ? row[mapping.typeIndex] || '' : '';
     const rawCat = mapping.categoryIndex >= 0 ? row[mapping.categoryIndex] || '' : '';
     const rawNotes = mapping.notesIndex >= 0 ? row[mapping.notesIndex] || '' : '';
+    const rawWallet = walletColIdx >= 0 ? row[walletColIdx] || '' : '';
 
     const normalizedDate = normalizeCsvDate(rawDate);
     const parsedAmount = parseImportAmount(rawAmount);
@@ -734,6 +861,21 @@ export function mapCsvRowsToTransactions(params: {
       if (found) matchedCat = found;
     }
 
+    // Match optional wallet column
+    let matchedWalletId: string | undefined;
+    let matchedWalletName: string | undefined;
+    if (rawWallet.trim() && wallets.length > 0) {
+      const normW = normalizeArabicText(rawWallet);
+      const foundWallet = wallets.find((w) => {
+        const wNorm = normalizeArabicText(w.name);
+        return wNorm === normW || wNorm.includes(normW) || normW.includes(wNorm);
+      });
+      if (foundWallet) {
+        matchedWalletId = foundWallet.id;
+        matchedWalletName = foundWallet.name;
+      }
+    }
+
     const isValid = Boolean(normalizedDate && parsedAmount && amount > 0);
     const key = normalizedDate && isValid ? buildDuplicateKey(normalizedDate, amount, type) : '';
     const isDuplicate = Boolean(isValid && key && existingKeys.has(key));
@@ -762,6 +904,8 @@ export function mapCsvRowsToTransactions(params: {
       type,
       categoryId: matchedCat?.id || 'cat-other',
       categoryLabel: matchedCat?.nameAr || rawCat || 'أخرى',
+      walletId: matchedWalletId,
+      walletName: matchedWalletName || (rawWallet.trim() || undefined),
       notes: rawNotes.trim(),
       isDuplicate,
       isValid,

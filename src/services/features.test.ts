@@ -25,10 +25,11 @@ import {
   autoDetectCsvMapping,
   mapCsvRowsToTransactions,
   normalizeCsvDate,
+  parseArabicDate,
   parseImportAmount,
 } from './csvImport';
 import { DEFAULT_CATEGORIES, validateBackupSchema } from './db';
-import { Budget, Debt, Transaction } from '../types';
+import { Budget, Debt, Transaction, Wallet } from '../types';
 
 test('safe-to-spend: computes remaining / days left and negative warning state', () => {
   const refDate = new Date('2025-05-22T12:00:00'); // May has 31 days -> 10 days left (22..31 inclusive)
@@ -525,4 +526,86 @@ test('excel & csv import: parses .xlsx/.xls to JSON records, auto-detects Arabic
   assert.equal(parseImportAmount('100abc'), null);
   assert.equal(parseImportAmount('0'), null);
 });
+
+test('arabic date parsing & expanded auto-mapping: parses Arabic months, التكلفة/cost/القيمة, and المحفظة', () => {
+  // 1. Arabic month + Arabic comma + time -> valid English date string & YYYY-MM-DD
+  const cleaned = parseArabicDate('15 نوفمبر، 2026 06:57 PM');
+  assert.equal(cleaned, '15 Nov, 2026 06:57 PM');
+  assert.equal(Number.isNaN(Date.parse(cleaned)), false);
+  assert.equal(normalizeCsvDate('15 نوفمبر، 2026 06:57 PM'), '2026-11-15');
+
+  // Other Arabic months, variants, Arabic digits, weekday prefix & Arabic AM/PM
+  assert.equal(normalizeCsvDate('١٠ مايو، ٢٠٢٦ ٠٩:٣٠ ص'), '2026-05-10');
+  assert.equal(normalizeCsvDate('الأحد، 3 يناير، 2025'), '2025-01-03');
+  assert.equal(normalizeCsvDate('20 أغسطس 2026'), '2026-08-20');
+  assert.equal(normalizeCsvDate('1 ديسمبر، 2026'), '2026-12-01');
+  assert.equal(normalizeCsvDate('5 يونية، 2026'), '2026-06-05');
+  assert.equal(normalizeCsvDate('9 ابريل، 2026'), '2026-04-09');
+  // Reject impossible Arabic calendar dates
+  assert.equal(normalizeCsvDate('30 فبراير، 2026'), null);
+
+  // 2. Auto-detect "التكلفة", "cost", "القيمة", "الى (المحفظة)", "المحفظة"
+  const m1 = autoDetectCsvMapping(['التاريخ', 'التكلفة', 'الى (المحفظة)', 'الملاحظات']);
+  assert.equal(m1.dateIndex, 0);
+  assert.equal(m1.amountIndex, 1);
+  assert.equal(m1.walletIndex, 2);
+  assert.equal(m1.notesIndex, 3);
+
+  const m2 = autoDetectCsvMapping(['Date', 'Cost', 'المحفظة']);
+  assert.equal(m2.dateIndex, 0);
+  assert.equal(m2.amountIndex, 1);
+  assert.equal(m2.walletIndex, 2);
+
+  const m3 = autoDetectCsvMapping(['التاريخ', 'القيمة', 'Wallet']);
+  assert.equal(m3.dateIndex, 0);
+  assert.equal(m3.amountIndex, 1);
+  assert.equal(m3.walletIndex, 2);
+
+  // 3. End-to-end mapping of exported expense sheet with Arabic date + التكلفة + الى (المحفظة)
+  const wallets: Wallet[] = [
+    {
+      id: 'w-cash',
+      name: 'المحفظة النقدية',
+      currency: 'EGP',
+      initialBalance: 2000,
+      balance: 2000,
+      color: '#10b981',
+      icon: 'wallet',
+      isArchived: false,
+      order: 0,
+    },
+    {
+      id: 'w-bank',
+      name: 'بنك مصر',
+      currency: 'EGP',
+      initialBalance: 5000,
+      balance: 5000,
+      color: '#3b82f6',
+      icon: 'landmark',
+      isArchived: false,
+      order: 1,
+    },
+  ];
+
+  const mapped = mapCsvRowsToTransactions({
+    rows: [
+      ['15 نوفمبر، 2026 06:57 PM', '280', 'بنك مصر', 'فاتورة إنترنت'],
+      ['١٠ فبراير، ٢٠٢٦ ٠٩:١٥ م', '١٥٠٫٥٠ ج.م', 'المحفظة النقدية', 'قهوة'],
+    ],
+    mapping: m1,
+    categories: DEFAULT_CATEGORIES,
+    existingTransactions: [],
+    wallets,
+  });
+
+  assert.equal(mapped.validCount, 2);
+  assert.equal(mapped.invalidCount, 0);
+  assert.equal(mapped.previewRows[0].date, '2026-11-15');
+  assert.equal(mapped.previewRows[0].amount, 280);
+  assert.equal(mapped.previewRows[0].walletId, 'w-bank');
+  assert.equal(mapped.previewRows[1].date, '2026-02-10');
+  assert.equal(mapped.previewRows[1].amount, 150.5);
+  assert.equal(mapped.previewRows[1].walletId, 'w-cash');
+});
+
 

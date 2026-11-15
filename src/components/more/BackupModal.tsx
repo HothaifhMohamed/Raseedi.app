@@ -104,6 +104,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     typeIndex: -1,
     categoryIndex: -1,
     notesIndex: -1,
+    walletIndex: -1,
   });
   const [targetWalletId, setTargetWalletId] = useState(wallets[0]?.id || '');
   const [skipDuplicates, setSkipDuplicates] = useState(true);
@@ -438,8 +439,9 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
       mapping: csvMapping,
       categories,
       existingTransactions: transactions,
+      wallets,
     });
-  }, [csvRows, csvMapping, categories, transactions]);
+  }, [csvRows, csvMapping, categories, transactions, wallets]);
 
   const rowsReadyToImport = useMemo(() => {
     return csvPreviewResult.previewRows.filter(
@@ -448,21 +450,25 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
   }, [csvPreviewResult.previewRows, skipDuplicates]);
 
   const handleConfirmCsvImport = () => {
-    const wallet = wallets.find((w) => w.id === targetWalletId) || wallets[0];
-    if (!wallet || rowsReadyToImport.length === 0) return;
+    const fallbackWallet = wallets.find((w) => w.id === targetWalletId) || wallets[0];
+    if (!fallbackWallet || rowsReadyToImport.length === 0) return;
 
-    const batch = rowsReadyToImport.map((r) => ({
-      type: r.type,
-      amount: r.amount,
-      currency: wallet.currency,
-      date: r.date,
-      time: '12:00',
-      categoryId: r.categoryId,
-      walletId: wallet.id,
-      notes: r.notes,
-      priority: 'normal' as const,
-      doesNotAffectBalance: false,
-    }));
+    const batch = rowsReadyToImport.map((r) => {
+      const rowWallet =
+        (r.walletId && wallets.find((w) => w.id === r.walletId)) || fallbackWallet;
+      return {
+        type: r.type,
+        amount: r.amount,
+        currency: rowWallet.currency,
+        date: r.date,
+        time: '12:00',
+        categoryId: r.categoryId,
+        walletId: rowWallet.id,
+        notes: r.notes,
+        priority: 'normal' as const,
+        doesNotAffectBalance: false,
+      };
+    });
 
     const skippedInvalid = csvPreviewResult.invalidCount;
     const skippedDup = skipDuplicates ? csvPreviewResult.duplicateCount : 0;
@@ -1221,6 +1227,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                       [
                         { key: 'dateIndex', label: isRTL ? 'التاريخ *' : 'Date *' },
                         { key: 'amountIndex', label: isRTL ? 'المبلغ *' : 'Amount *' },
+                        { key: 'walletIndex', label: isRTL ? 'المحفظة (اختياري)' : 'Wallet (Optional)' },
                         { key: 'typeIndex', label: isRTL ? 'النوع (اختياري)' : 'Type (Optional)' },
                         { key: 'categoryIndex', label: isRTL ? 'التصنيف (اختياري)' : 'Category (Optional)' },
                         { key: 'notesIndex', label: isRTL ? 'الملاحظات (اختياري)' : 'Notes (Optional)' },
@@ -1230,7 +1237,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                         <span className="text-[var(--color-muted)] shrink-0">{field.label}</span>
                         <select
                           data-testid={`map-select-${field.key}`}
-                          value={csvMapping[field.key]}
+                          value={csvMapping[field.key] ?? -1}
                           onChange={(e) =>
                             setCsvMapping((prev) => ({
                               ...prev,
@@ -1334,6 +1341,11 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                               <th className="px-2.5 py-1.5 font-semibold text-start">
                                 {isRTL ? 'التصنيف' : 'Category'}
                               </th>
+                              {(csvMapping.walletIndex ?? -1) >= 0 && (
+                                <th className="px-2.5 py-1.5 font-semibold text-start">
+                                  {isRTL ? 'المحفظة' : 'Wallet'}
+                                </th>
+                              )}
                               <th className="px-2.5 py-1.5 font-semibold text-start">
                                 {isRTL ? 'الملاحظات' : 'Notes'}
                               </th>
@@ -1379,6 +1391,11 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                                 <td className="px-2.5 py-1.5 max-w-[95px] truncate">
                                   {row.categoryLabel}
                                 </td>
+                                {(csvMapping.walletIndex ?? -1) >= 0 && (
+                                  <td className="px-2.5 py-1.5 max-w-[95px] truncate text-[var(--color-muted)]">
+                                    {row.walletName || '—'}
+                                  </td>
+                                )}
                                 <td className="px-2.5 py-1.5 max-w-[120px] truncate text-[var(--color-muted)]">
                                   {row.notes || '—'}
                                 </td>
