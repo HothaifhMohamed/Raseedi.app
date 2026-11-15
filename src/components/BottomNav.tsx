@@ -24,10 +24,8 @@ export const BottomNav: React.FC = () => {
   };
 
   const handleNavClick = (nav: 'home' | 'budget' | 'wallets' | 'more') => {
+    setActiveWalletId(null);
     setActiveNav(nav);
-    if (nav !== 'wallets') {
-      setActiveWalletId(null);
-    }
   };
 
   return (

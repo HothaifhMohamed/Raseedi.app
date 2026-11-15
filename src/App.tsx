@@ -5,6 +5,7 @@
 
 import React from 'react';
 import { AppProvider, useApp } from './context/AppContext';
+import { useModalBackHandler } from './hooks/useModalBackHandler';
 import { Navbar } from './components/Navbar';
 import { BottomNav } from './components/BottomNav';
 import { SplashScreen } from './components/SplashScreen';
@@ -44,6 +45,8 @@ const MainLayout: React.FC = () => {
     unlockApp,
     activeNav,
     activeWalletId,
+    wallets,
+    lockedWalletIds,
     homeTab,
     setHomeTab,
     isAddModalOpen,
@@ -53,11 +56,17 @@ const MainLayout: React.FC = () => {
     currencyPickerSelectedCode,
     closeCurrencyPicker,
     onCurrencySelectCallback,
+    isFilterOpen,
+    setIsFilterOpen,
     isSettingsOpen,
     setIsSettingsOpen,
     openAdminPanelRequested,
     isBackupOpen,
     setIsBackupOpen,
+    isUpgradeModalOpen,
+    setIsUpgradeModalOpen,
+    isOrgHubOpen,
+    setIsOrgHubOpen,
     isPro,
     t,
     isRTL,
@@ -95,6 +104,24 @@ const MainLayout: React.FC = () => {
     script.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(adSenseClient)}`;
     document.head.appendChild(script);
   }, [isPro, hasConsentForAds]);
+
+  const isMainShellReady = !isLoading && !isAppLocked && hasCompletedOnboarding;
+  useModalBackHandler(isMainShellReady && isAddModalOpen, () => setIsAddModalOpen(false), 'add-tx');
+  useModalBackHandler(isMainShellReady && isFilterOpen, () => setIsFilterOpen(false), 'filters');
+  useModalBackHandler(isMainShellReady && isSettingsOpen, () => setIsSettingsOpen(false), 'settings');
+  useModalBackHandler(isMainShellReady && isBackupOpen, () => setIsBackupOpen(false), 'backup');
+  useModalBackHandler(isMainShellReady && isUpgradeModalOpen, () => setIsUpgradeModalOpen(false), 'upgrade');
+  useModalBackHandler(isMainShellReady && isOrgHubOpen, () => setIsOrgHubOpen(false), 'org-hub');
+  useModalBackHandler(
+    isMainShellReady && currencyPickerOpen && Boolean(onCurrencySelectCallback),
+    closeCurrencyPicker,
+    'currency-picker'
+  );
+
+  const activeWalletIsLocked = Boolean(
+    activeWalletId &&
+      wallets.some((w) => w.id === activeWalletId && w.isLocked && w.pin && lockedWalletIds.includes(w.id))
+  );
 
   // Show splash screen while loading
   if (isLoading) {
@@ -190,9 +217,13 @@ const MainLayout: React.FC = () => {
           {/* BUDGET VIEW */}
           {activeNav === 'budget' && <BudgetPage />}
 
-          {/* WALLETS VIEW (If a wallet is selected, render WalletDetailPage full page) */}
+          {/* WALLETS VIEW (If a wallet is selected and unlocked, render WalletDetailPage full page) */}
           {activeNav === 'wallets' && (
-            activeWalletId ? <WalletDetailPage walletId={activeWalletId} /> : <WalletsPage />
+            activeWalletId && !activeWalletIsLocked ? (
+              <WalletDetailPage walletId={activeWalletId} />
+            ) : (
+              <WalletsPage />
+            )
           )}
 
           {/* MORE VIEW */}

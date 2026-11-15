@@ -23,6 +23,7 @@ import { ConfirmationModal } from '../common/ConfirmationModal';
 import { PinLockModal } from '../common/PinLockModal';
 import { hashPin } from '../../services/security';
 import { MoneyText } from '../common/MoneyText';
+import { useModalBackHandler } from '../../hooks/useModalBackHandler';
 
 const SOLID_MUTED_PALETTE = [
   { id: 'teal', label: 'تركواز ترابي', hex: '#3A605B' },
@@ -68,6 +69,12 @@ export const WalletsPage: React.FC = () => {
   const [pinModalTargetWallet, setPinModalTargetWallet] = useState<Wallet | null>(null);
   const [settingPinForWallet, setSettingPinForWallet] = useState<Wallet | null>(null);
   const [newWalletPin, setNewWalletPin] = useState('');
+
+  useModalBackHandler(isEditModalOpen, () => setIsEditModalOpen(false), 'wallet-edit');
+  useModalBackHandler(pinModalTargetWallet !== null, () => setPinModalTargetWallet(null), 'wallet-pin-verify');
+  useModalBackHandler(settingPinForWallet !== null, () => setSettingPinForWallet(null), 'wallet-pin-set');
+  useModalBackHandler(confirmDeleteId !== null, () => setConfirmDeleteId(null), 'wallet-confirm-delete');
+  useModalBackHandler(dependencyWalletId !== null, () => setDependencyWalletId(null), 'wallet-dependencies');
 
   // Form State for Add / Edit Wallet
   const [walletName, setWalletName] = useState('');

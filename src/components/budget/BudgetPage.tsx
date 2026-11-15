@@ -21,6 +21,7 @@ import {
 import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../../services/numbers';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { MoneyText } from '../common/MoneyText';
+import { useModalBackHandler } from '../../hooks/useModalBackHandler';
 
 export const BudgetPage: React.FC = () => {
   const {
@@ -41,6 +42,9 @@ export const BudgetPage: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingBudget, setEditingBudget] = useState<Budget | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  useModalBackHandler(isModalOpen, () => setIsModalOpen(false), 'budget-edit');
+  useModalBackHandler(confirmDeleteId !== null, () => setConfirmDeleteId(null), 'budget-confirm-delete');
 
   // Form State
   const [budgetName, setBudgetName] = useState('');

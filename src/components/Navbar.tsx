@@ -33,6 +33,7 @@ import {
 import { AppNotificationItem, OrganizationIndustry, OrganizationRole } from '../types';
 import { BrandLogo } from './common/BrandLogo';
 import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../services/numbers';
+import { useModalBackHandler } from '../hooks/useModalBackHandler';
 
 export const Navbar: React.FC = () => {
   const {
@@ -109,6 +110,16 @@ export const Navbar: React.FC = () => {
   const [isSigningInOrg, setIsSigningInOrg] = useState(false);
   const [notifPermission, setNotifPermission] = useState<string>(() =>
     isWebNotificationSupported() ? Notification.permission : 'unsupported'
+  );
+
+  useModalBackHandler(showCreateOrg, () => setShowCreateOrg(false), 'navbar-create-org');
+  useModalBackHandler(
+    showJoinOrg,
+    () => {
+      setShowJoinOrg(false);
+      clearPendingJoinCode();
+    },
+    'navbar-join-org'
   );
 
   useEffect(() => {

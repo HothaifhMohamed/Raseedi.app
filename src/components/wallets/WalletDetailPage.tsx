@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { MoneyText } from '../common/MoneyText';
+import { useModalBackHandler } from '../../hooks/useModalBackHandler';
 
 interface WalletDetailPageProps {
   walletId: string;
@@ -28,7 +29,7 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
     transactions,
     categories,
     settings,
-    setActiveWalletId,
+    navigateBackFromWallet,
     setEditingTransaction,
     setIsAddModalOpen,
     deleteTransaction,
@@ -54,6 +55,9 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
   const [activeMenuTxId, setActiveMenuTxId] = useState<string | null>(null);
   const [visibleLimit, setVisibleLimit] = useState(60);
   const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useModalBackHandler(showMoveModal, () => setShowMoveModal(false), 'wallet-detail-move');
+  useModalBackHandler(showCategoryModal, () => setShowCategoryModal(false), 'wallet-detail-category');
 
   // Close dropdown menu on click outside
   useEffect(() => {
@@ -135,7 +139,7 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
           {isRTL ? 'المحفظة غير موجودة' : 'Wallet not found'}
         </p>
         <button
-          onClick={() => setActiveWalletId(null)}
+          onClick={navigateBackFromWallet}
           className="px-4 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl text-xs font-medium min-h-[44px]"
         >
           {isRTL ? 'العودة للمحافظ' : 'Back to Wallets'}
@@ -156,7 +160,7 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
       <div className="sticky top-0 z-20 bg-[var(--color-bg)] border-b border-[var(--color-line)] px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <button
-            onClick={() => setActiveWalletId(null)}
+            onClick={navigateBackFromWallet}
             className="w-10 h-10 rounded-xl border border-[var(--color-line)] bg-[var(--color-surface)] flex items-center justify-center text-[var(--color-ink)] hover:bg-[var(--color-bg)] transition-colors min-h-[44px] min-w-[44px]"
             aria-label={isRTL ? 'رجوع' : 'Back'}
           >

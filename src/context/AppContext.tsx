@@ -157,6 +157,19 @@ import {
   buildAppNotifications,
   dispatchBrowserNotification,
 } from '../services/notifications';
+import {
+  AppNavView,
+  HomeSubTab,
+  RaseediHistoryState,
+  RouteState,
+  areRoutesEqual,
+  buildUrlWithHash,
+  normalizeRouteState,
+  parseHashRoute,
+  resolveInitialRoute,
+  safeReadSessionNav,
+  safeWriteSessionNav,
+} from '../services/navigation';
 
 export interface FilterState {
   type: 'all' | 'income' | 'expense';
@@ -311,12 +324,15 @@ interface AppContextType {
   openOrgHub: (tab?: OrgHubTab) => void;
 
   // Active View / Modals
-  activeNav: 'home' | 'budget' | 'wallets' | 'more';
-  setActiveNav: (nav: 'home' | 'budget' | 'wallets' | 'more') => void;
+  activeNav: AppNavView;
+  setActiveNav: (nav: AppNavView) => void;
   activeWalletId: string | null;
   setActiveWalletId: (id: string | null) => void;
-  homeTab: 'transactions' | 'statistics' | 'templates';
-  setHomeTab: (tab: 'transactions' | 'statistics' | 'templates') => void;
+  homeTab: HomeSubTab;
+  setHomeTab: (tab: HomeSubTab) => void;
+  navigateBackFromWallet: () => void;
+  registerModalBackHandler: (modalId: string, onClose: () => void) => void;
+  unregisterModalBackHandler: (modalId: string) => void;
   isAddModalOpen: boolean;
   setIsAddModalOpen: (open: boolean) => void;
   editingTransaction: Transaction | null;
@@ -572,10 +588,116 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [ratesLastUpdated, setRatesLastUpdated] = useState<string | null>(null);
   const [isRefreshingRates, setIsRefreshingRates] = useState(false);
 
-  // Nav & Tabs & Modals
-  const [activeNav, setActiveNav] = useState<'home' | 'budget' | 'wallets' | 'more'>('home');
-  const [activeWalletId, setActiveWalletId] = useState<string | null>(null);
-  const [homeTab, setHomeTab] = useState<'transactions' | 'statistics' | 'templates'>('transactions');
+  // Nav & Tabs & Modals (initialized from URL hash / sessionStorage so refreshes preserve view)
+  const initialRouteRef = React.useRef<RouteState | null>(null);
+  if (initialRouteRef.current === null) {
+    initialRouteRef.current =
+      typeof window !== 'undefined'
+        ? resolveInitialRoute(window.location.hash, safeReadSessionNav())
+        : { activeNav: 'home', homeTab: 'transactions', activeWalletId: null };
+  }
+  const [activeNav, setActiveNavState] = useState<AppNavView>(initialRouteRef.current.activeNav);
+  const [activeWalletId, setActiveWalletIdState] = useState<string | null>(
+    initialRouteRef.current.activeWalletId
+  );
+  const [homeTab, setHomeTabState] = useState<HomeSubTab>(initialRouteRef.current.homeTab);
+
+  // History API coordination refs
+  const currentSyncedRouteRef = React.useRef<RouteState>(initialRouteRef.current);
+  const historyTrailRef = React.useRef<RouteState[]>([initialRouteRef.current]);
+  const historyDepthRef = React.useRef<number>(0);
+  const hasMountedHistoryRef = React.useRef<boolean>(false);
+  const isApplyingPopStateRef = React.useRef<boolean>(false);
+  const pendingBackSkipsRef = React.useRef<number>(0);
+  const pendingHistoryActionsRef = React.useRef<Array<() => void>>([]);
+  const modalBackStackRef = React.useRef<Array<{ id: string; onClose: () => void }>>([]);
+  const poppedByBrowserRef = React.useRef<Set<string>>(new Set());
+
+  const setActiveNav = useCallback((nav: AppNavView) => {
+    setActiveNavState(nav);
+    if (nav !== 'wallets') {
+      setActiveWalletIdState(null);
+    }
+  }, []);
+
+  const setActiveWalletId = useCallback((id: string | null) => {
+    if (id) {
+      setActiveNavState('wallets');
+    }
+    setActiveWalletIdState(id);
+  }, []);
+
+  const setHomeTab = useCallback((tab: HomeSubTab) => {
+    setHomeTabState(tab);
+  }, []);
+
+  const flushOrRunHistoryAction = useCallback((action: () => void) => {
+    if (pendingBackSkipsRef.current > 0) {
+      pendingHistoryActionsRef.current.push(action);
+      return;
+    }
+    action();
+  }, []);
+
+  const registerModalBackHandler = useCallback(
+    (modalId: string, onClose: () => void) => {
+      if (typeof window === 'undefined') return;
+      const existingIdx = modalBackStackRef.current.findIndex((m) => m.id === modalId);
+      if (existingIdx >= 0) {
+        modalBackStackRef.current[existingIdx] = { id: modalId, onClose };
+        return;
+      }
+      modalBackStackRef.current.push({ id: modalId, onClose });
+      flushOrRunHistoryAction(() => {
+        if (!modalBackStackRef.current.some((m) => m.id === modalId)) return;
+        const currentState = window.history.state as RaseediHistoryState | null;
+        if (currentState?.raseediModalId === modalId) return;
+        const nextDepth = historyDepthRef.current + 1;
+        historyDepthRef.current = nextDepth;
+        const currentRoute = currentSyncedRouteRef.current;
+        const nextUrl = buildUrlWithHash(window.location.pathname, window.location.search, currentRoute);
+        window.history.pushState(
+          {
+            raseediNav: currentRoute,
+            raseediDepth: nextDepth,
+            raseediModalId: modalId,
+          } satisfies RaseediHistoryState,
+          '',
+          nextUrl
+        );
+      });
+    },
+    [flushOrRunHistoryAction]
+  );
+
+  const unregisterModalBackHandler = useCallback((modalId: string) => {
+    const idx = modalBackStackRef.current.findIndex((m) => m.id === modalId);
+    if (idx >= 0) {
+      modalBackStackRef.current.splice(idx, 1);
+    }
+    if (poppedByBrowserRef.current.has(modalId)) {
+      poppedByBrowserRef.current.delete(modalId);
+      return;
+    }
+    if (typeof window === 'undefined') return;
+    const currentState = window.history.state as RaseediHistoryState | null;
+    if (currentState?.raseediModalId === modalId) {
+      pendingBackSkipsRef.current += 1;
+      window.history.back();
+    }
+  }, []);
+
+  const navigateBackFromWallet = useCallback(() => {
+    if (typeof window !== 'undefined' && historyDepthRef.current > 0) {
+      const prevRoute = historyTrailRef.current[historyDepthRef.current - 1];
+      if (prevRoute && prevRoute.activeNav === 'wallets' && prevRoute.activeWalletId === null) {
+        window.history.back();
+        return;
+      }
+    }
+    setActiveWalletIdState(null);
+  }, []);
+
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -1742,6 +1864,159 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
     void init();
   }, [processRecurringTransactions]);
+
+  // Browser History API (popstate + hashchange) listener with full cleanup
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    if (!hasMountedHistoryRef.current) {
+      hasMountedHistoryRef.current = true;
+      const initialRoute = currentSyncedRouteRef.current;
+      const existingState = window.history.state as RaseediHistoryState | null;
+      const initialDepth =
+        typeof existingState?.raseediDepth === 'number' ? existingState.raseediDepth : 0;
+      historyDepthRef.current = initialDepth;
+      safeWriteSessionNav(initialRoute);
+      window.history.replaceState(
+        {
+          raseediNav: initialRoute,
+          raseediDepth: initialDepth,
+        } satisfies RaseediHistoryState,
+        '',
+        buildUrlWithHash(window.location.pathname, window.location.search, initialRoute)
+      );
+    }
+
+    const handlePopState = (event: PopStateEvent) => {
+      const eventState = event.state as RaseediHistoryState | null;
+
+      if (pendingBackSkipsRef.current > 0) {
+        pendingBackSkipsRef.current -= 1;
+        if (typeof eventState?.raseediDepth === 'number') {
+          historyDepthRef.current = eventState.raseediDepth;
+        }
+        if (pendingBackSkipsRef.current === 0 && pendingHistoryActionsRef.current.length > 0) {
+          const queued = pendingHistoryActionsRef.current.splice(0);
+          queued.forEach((fn) => fn());
+        }
+        return;
+      }
+
+      // Close topmost open modal if Back popped its history entry
+      const topModal = modalBackStackRef.current[modalBackStackRef.current.length - 1];
+      if (topModal && eventState?.raseediModalId !== topModal.id) {
+        modalBackStackRef.current.pop();
+        poppedByBrowserRef.current.add(topModal.id);
+        if (typeof eventState?.raseediDepth === 'number') {
+          historyDepthRef.current = eventState.raseediDepth;
+        }
+        topModal.onClose();
+        return;
+      }
+
+      const parsedHash = parseHashRoute(window.location.hash);
+      const targetRoute = normalizeRouteState(
+        eventState?.raseediNav ||
+          (parsedHash
+            ? {
+                ...currentSyncedRouteRef.current,
+                ...parsedHash,
+                activeWalletId: parsedHash.activeWalletId ?? null,
+              }
+            : { activeNav: 'home', homeTab: 'transactions', activeWalletId: null })
+      );
+
+      if (typeof eventState?.raseediDepth === 'number') {
+        historyDepthRef.current = eventState.raseediDepth;
+        if (historyTrailRef.current.length > eventState.raseediDepth + 1) {
+          historyTrailRef.current = historyTrailRef.current.slice(0, eventState.raseediDepth + 1);
+        }
+      }
+
+      if (!areRoutesEqual(targetRoute, currentSyncedRouteRef.current)) {
+        isApplyingPopStateRef.current = true;
+        currentSyncedRouteRef.current = targetRoute;
+        safeWriteSessionNav(targetRoute);
+        setActiveNavState(targetRoute.activeNav);
+        setHomeTabState(targetRoute.homeTab);
+        setActiveWalletIdState(targetRoute.activeWalletId);
+      }
+    };
+
+    const handleHashChange = () => {
+      if (pendingBackSkipsRef.current > 0) return;
+      const parsedHash = parseHashRoute(window.location.hash);
+      if (!parsedHash) return;
+
+      const targetRoute = normalizeRouteState({
+        ...currentSyncedRouteRef.current,
+        ...parsedHash,
+        activeWalletId: parsedHash.activeWalletId ?? null,
+      });
+
+      if (!areRoutesEqual(targetRoute, currentSyncedRouteRef.current)) {
+        while (modalBackStackRef.current.length > 0) {
+          const m = modalBackStackRef.current.pop();
+          if (m) {
+            poppedByBrowserRef.current.add(m.id);
+            m.onClose();
+          }
+        }
+        isApplyingPopStateRef.current = true;
+        currentSyncedRouteRef.current = targetRoute;
+        safeWriteSessionNav(targetRoute);
+        setActiveNavState(targetRoute.activeNav);
+        setHomeTabState(targetRoute.homeTab);
+        setActiveWalletIdState(targetRoute.activeWalletId);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    window.addEventListener('hashchange', handleHashChange);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+      window.removeEventListener('hashchange', handleHashChange);
+    };
+  }, []);
+
+  // Push history entries & persist route state whenever active view changes
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const nextRoute = normalizeRouteState({ activeNav, homeTab, activeWalletId });
+
+    if (activeNav !== 'wallets' && activeWalletId !== null) {
+      setActiveWalletIdState(null);
+    }
+
+    if (isApplyingPopStateRef.current) {
+      isApplyingPopStateRef.current = false;
+      currentSyncedRouteRef.current = nextRoute;
+      safeWriteSessionNav(nextRoute);
+      return;
+    }
+
+    if (areRoutesEqual(nextRoute, currentSyncedRouteRef.current)) {
+      return;
+    }
+
+    currentSyncedRouteRef.current = nextRoute;
+    safeWriteSessionNav(nextRoute);
+
+    flushOrRunHistoryAction(() => {
+      const nextDepth = historyDepthRef.current + 1;
+      historyDepthRef.current = nextDepth;
+      historyTrailRef.current = [...historyTrailRef.current.slice(0, nextDepth), nextRoute];
+      const nextUrl = buildUrlWithHash(window.location.pathname, window.location.search, nextRoute);
+      window.history.pushState(
+        {
+          raseediNav: nextRoute,
+          raseediDepth: nextDepth,
+        } satisfies RaseediHistoryState,
+        '',
+        nextUrl
+      );
+    });
+  }, [activeNav, homeTab, activeWalletId, flushOrRunHistoryAction]);
 
   // Refresh or disable live exchange rates when setting toggles
   useEffect(() => {
@@ -6073,6 +6348,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setActiveWalletId,
         homeTab,
         setHomeTab,
+        navigateBackFromWallet,
+        registerModalBackHandler,
+        unregisterModalBackHandler,
         isAddModalOpen,
         setIsAddModalOpen,
         editingTransaction,

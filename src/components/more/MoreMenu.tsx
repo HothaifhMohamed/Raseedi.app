@@ -38,6 +38,7 @@ import { AdBanner } from '../common/AdBanner';
 import { SupportAndLegalModal } from './SupportAndLegalModal';
 import { MoneyCirclesModal } from './MoneyCirclesModal';
 import { SUPPORT_CONFIG } from '../../constants/support';
+import { useModalBackHandler } from '../../hooks/useModalBackHandler';
 
 export const MoreMenu: React.FC = () => {
   const {
@@ -75,6 +76,12 @@ export const MoreMenu: React.FC = () => {
   const [moneyCirclesOpen, setMoneyCirclesOpen] = useState(false);
   const [supportLegalTab, setSupportLegalTab] = useState<'support' | 'legal' | null>(null);
   const [activeSubModal, setActiveSubModal] = useState<string | null>(null);
+
+  useModalBackHandler(reportsOpen, () => setReportsOpen(false), 'more-reports');
+  useModalBackHandler(categoriesOpen, () => setCategoriesOpen(false), 'more-categories');
+  useModalBackHandler(moneyCirclesOpen, () => setMoneyCirclesOpen(false), 'more-money-circles');
+  useModalBackHandler(supportLegalTab !== null, () => setSupportLegalTab(null), 'more-support-legal');
+  useModalBackHandler(activeSubModal !== null, () => setActiveSubModal(null), 'more-submodal');
 
   // Computed Groups list with totals
   const groupsList = React.useMemo(() => {
