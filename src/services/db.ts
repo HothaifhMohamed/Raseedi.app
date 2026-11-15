@@ -1010,7 +1010,7 @@ export function generateDemoSeedData(mainCurrency = 'EGP'): Partial<AppDatabaseD
       initialBalance: 1200,
       balance: 1200,
       color: '#6A5243',
-      icon: 'PiggyBank',
+      icon: 'Vault',
       isArchived: false,
       order: 3,
     },

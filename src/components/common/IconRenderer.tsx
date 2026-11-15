@@ -8,8 +8,9 @@ interface IconRendererProps {
 }
 
 export const IconRenderer: React.FC<IconRendererProps> = ({ name, className = 'w-5 h-5', size = 20 }) => {
+  const resolvedName = name === 'Safe' || name === 'PiggyBank' ? 'Vault' : name;
   // Look up icon dynamically in Lucide
-  const IconComponent = (LucideIcons as unknown as Record<string, React.FC<LucideIcons.LucideProps>>)[name] || LucideIcons.Layers;
+  const IconComponent = (LucideIcons as unknown as Record<string, React.FC<LucideIcons.LucideProps>>)[resolvedName] || LucideIcons.Layers;
 
   return <IconComponent className={className} size={size} />;
 };

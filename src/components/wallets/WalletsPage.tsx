@@ -27,7 +27,7 @@ import { PinLockModal } from '../common/PinLockModal';
 import { hashPin } from '../../services/security';
 import { MoneyText } from '../common/MoneyText';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
-import { HairlineEmptyState, HairlineFigure } from '../common/HairlineVisuals';
+import { HairlineEmptyState } from '../common/HairlineVisuals';
 
 const SOLID_MUTED_PALETTE = [
   { id: 'teal', label: 'تركواز ترابي', hex: '#3A605B' },
@@ -38,7 +38,7 @@ const SOLID_MUTED_PALETTE = [
   { id: 'charcoal', label: 'فحمي ناعم', hex: '#4E555C' },
 ];
 
-const WALLET_ICONS = ['Wallet', 'CreditCard', 'PiggyBank', 'Landmark', 'Banknote', 'Coins', 'Safe'];
+const WALLET_ICONS = ['Wallet', 'CreditCard', 'Landmark', 'Banknote', 'Coins', 'Vault'];
 
 export const WalletsPage: React.FC = () => {
   const {
@@ -145,7 +145,9 @@ export const WalletsPage: React.FC = () => {
     setWalletCurrency(w.currency);
     setInitialBalance(String(w.initialBalance));
     setWalletColor(w.color?.startsWith('#') ? w.color : SOLID_MUTED_PALETTE[0].hex);
-    setWalletIcon(w.icon || 'Wallet');
+    setWalletIcon(
+      !w.icon ? 'Wallet' : w.icon === 'PiggyBank' || w.icon === 'Safe' ? 'Vault' : w.icon
+    );
     setWalletType(w.walletType || 'standard');
     setCustodianMemberUid(w.custodianMemberUid || '');
     setExcludeFromTotal(Boolean(w.excludeFromTotal));
@@ -360,29 +362,19 @@ export const WalletsPage: React.FC = () => {
               onClick={() => {
                 if (!isReorderMode) handleCardClick(w);
               }}
-              className={`group relative overflow-hidden rounded-xl p-4.5 border border-[var(--color-line)] pattern-wallet-lines shadow-sm transition-all text-white select-none min-h-[100px] ${
+              className={`relative rounded-xl p-4.5 border border-black/10 transition-opacity text-white select-none min-h-[100px] ${
                 isReorderMode
                   ? 'cursor-default ring-1 ring-[var(--color-accent)]/40'
                   : 'cursor-pointer hover:opacity-95'
               }`}
               style={{ backgroundColor: cardColor }}
             >
-              <div className="relative z-10">
-                {/* Top Row: Interactive Hairline 3D Vault/Padlock + Name + Action Icons */}
+              <div>
+                {/* Top Row: Lucide Icon + Name + Action Icons */}
                 <div className="flex items-center justify-between mb-3 gap-2">
                   <div className="flex items-center gap-2.5 min-w-0">
-                    <div
-                      className="w-12 shrink-0 transition-transform duration-300 group-hover:scale-105 group-active:scale-95"
-                      title={w.isLocked ? (isRTL ? 'محفظة مقفلة' : 'Locked wallet') : w.name}
-                    >
-                      <HairlineFigure
-                        figure={w.isLocked ? 'padlock' : 'vault'}
-                        surface="wallet"
-                        plateColor={cardColor}
-                        intensity={0.8}
-                        stroke={1.15}
-                        label={w.name}
-                      />
+                    <div className="w-10 h-10 rounded-xl bg-black/20 flex items-center justify-center shrink-0">
+                      <IconRenderer name={w.icon || 'Wallet'} className="w-5 h-5 text-white" />
                     </div>
                     <div className="min-w-0">
                       <h3 className="text-sm font-bold tracking-tight leading-tight flex items-center gap-1.5 flex-wrap">

@@ -200,12 +200,12 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
       </div>
 
       <div className="p-4 space-y-4">
-        {/* Wallet Hero Balance Card (Solid Muted + 6% Pattern) */}
+        {/* Wallet Hero Balance Card (Clean Flat Solid Design) */}
         <div
-          className="relative overflow-hidden rounded-xl p-5 border border-[var(--color-line)] pattern-wallet-lines text-white shadow-sm"
+          className="rounded-xl p-5 border border-black/10 text-white"
           style={{ backgroundColor: wallet.color?.startsWith('#') ? wallet.color : '#3A605B' }}
         >
-          <div className="relative z-10">
+          <div>
             <span className="text-xs opacity-80 block mb-1">
               {isRTL ? 'رصيد المحفظة الحالي' : 'Current Wallet Balance'}
             </span>
