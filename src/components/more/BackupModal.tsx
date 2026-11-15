@@ -32,7 +32,7 @@ import {
   isEncryptedBackupPayload,
 } from '../../services/security';
 import {
-  parseCsvText,
+  parseImportFileBuffer,
   autoDetectCsvMapping,
   mapCsvRowsToTransactions,
   CsvColumnMapping,
@@ -90,10 +90,14 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
   const [decryptPassword, setDecryptPassword] = useState('');
   const [isProcessingJson, setIsProcessingJson] = useState(false);
 
-  // CSV Import Wizard state
+  // Excel / CSV Import Wizard state
   const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
   const [csvRows, setCsvRows] = useState<string[][]>([]);
+  const [csvRecords, setCsvRecords] = useState<Record<string, string>[]>([]);
   const [csvFileName, setCsvFileName] = useState('');
+  const [importSheetNames, setImportSheetNames] = useState<string[]>([]);
+  const [importActiveSheet, setImportActiveSheet] = useState<string>('');
+  const [previewMode, setPreviewMode] = useState<'mapped' | 'raw'>('mapped');
   const [csvMapping, setCsvMapping] = useState<CsvColumnMapping>({
     dateIndex: -1,
     amountIndex: -1,
@@ -105,6 +109,9 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
   const [skipDuplicates, setSkipDuplicates] = useState(true);
   const [isRefreshingHistory, setIsRefreshingHistory] = useState(false);
   const [restoringHistoryId, setRestoringHistoryId] = useState<string | null>(null);
+  const importFileBytesRef = useRef<{ bytes: Uint8Array; fileName: string; mimeType: string } | null>(
+    null
+  );
 
   useEffect(() => {
     if (!isOpen || activeTab !== 'json' || !user?.isLoggedIn) return;
@@ -349,38 +356,83 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     }
   };
 
-  // CSV Import Handlers
-  const handleCsvFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const resetImportPreviewState = () => {
+    setCsvHeaders([]);
+    setCsvRows([]);
+    setCsvRecords([]);
+    setCsvFileName('');
+    setImportSheetNames([]);
+    setImportActiveSheet('');
+    importFileBytesRef.current = null;
+  };
+
+  // Excel (.xlsx / .xls) & CSV Import Handlers
+  const applyParsedImportData = (
+    bytes: Uint8Array,
+    fileName: string,
+    mimeType: string,
+    sheetName?: string
+  ) => {
+    const result = parseImportFileBuffer({
+      bytes,
+      fileName,
+      mimeType,
+      sheetName,
+    });
+
+    if (!result.ok) {
+      resetImportPreviewState();
+      setMessage({
+        text: isRTL ? result.errorAr : result.errorEn,
+        error: true,
+      });
+      return;
+    }
+
+    importFileBytesRef.current = { bytes, fileName, mimeType };
+    setCsvFileName(fileName);
+    setCsvHeaders(result.data.headers);
+    setCsvRows(result.data.rows);
+    setCsvRecords(result.data.records);
+    setImportSheetNames(result.data.sheetNames || []);
+    setImportActiveSheet(result.data.activeSheet || '');
+    setCsvMapping(autoDetectCsvMapping(result.data.headers));
+    if (!targetWalletId && wallets[0]) {
+      setTargetWalletId(wallets[0].id);
+    }
+    setMessage(null);
+  };
+
+  const handleCsvFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = '';
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const raw = (event.target?.result as string) || '';
-      const parsed = parseCsvText(raw);
-      if (parsed.headers.length === 0 || parsed.rows.length === 0) {
-        setMessage({
-          text: isRTL ? 'ملف CSV فارغ أو غير صالح.' : 'CSV file is empty or invalid.',
-          error: true,
-        });
-        return;
-      }
+    try {
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      applyParsedImportData(bytes, file.name, file.type);
+    } catch {
+      resetImportPreviewState();
+      setMessage({
+        text: isRTL
+          ? 'تعذرت قراءة الملف المختار. تأكد من أن الملف بصيغة Excel أو CSV صالحة.'
+          : 'Failed to read the selected file. Ensure it is a valid Excel or CSV file.',
+        error: true,
+      });
+    }
+  };
 
-      setCsvFileName(file.name);
-      setCsvHeaders(parsed.headers);
-      setCsvRows(parsed.rows);
-      setCsvMapping(autoDetectCsvMapping(parsed.headers));
-      if (!targetWalletId && wallets[0]) {
-        setTargetWalletId(wallets[0].id);
-      }
-      setMessage(null);
-    };
-    reader.readAsText(file);
+  const handleImportSheetChange = (nextSheet: string) => {
+    const cached = importFileBytesRef.current;
+    if (!cached) return;
+    applyParsedImportData(cached.bytes, cached.fileName, cached.mimeType, nextSheet);
   };
 
   const csvPreviewResult = useMemo(() => {
-    if (csvRows.length === 0) return { previewRows: [], validCount: 0, duplicateCount: 0 };
+    if (csvRows.length === 0) {
+      return { previewRows: [], validCount: 0, invalidCount: 0, duplicateCount: 0 };
+    }
     return mapCsvRowsToTransactions({
       rows: csvRows,
       mapping: csvMapping,
@@ -412,14 +464,22 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
       doesNotAffectBalance: false,
     }));
 
+    const skippedInvalid = csvPreviewResult.invalidCount;
+    const skippedDup = skipDuplicates ? csvPreviewResult.duplicateCount : 0;
     const imported = importTransactionsBatch(batch);
-    setCsvHeaders([]);
-    setCsvRows([]);
-    setCsvFileName('');
+    resetImportPreviewState();
     setMessage({
       text: isRTL
-        ? `تم استيراد ${imported} معاملة بنجاح!`
-        : `Successfully imported ${imported} transactions!`,
+        ? `تم استيراد ${imported} معاملة بنجاح!${
+            skippedInvalid > 0 || skippedDup > 0
+              ? ` (تم تخطي ${skippedInvalid} غير صالح و ${skippedDup} مكرر)`
+              : ''
+          }`
+        : `Successfully imported ${imported} transactions!${
+            skippedInvalid > 0 || skippedDup > 0
+              ? ` (Skipped ${skippedInvalid} invalid, ${skippedDup} duplicate)`
+              : ''
+          }`,
     });
   };
 
@@ -428,7 +488,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div
-        className="w-full max-w-md max-h-[90vh] flex flex-col rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] p-5 text-[var(--color-ink)] shadow-xl space-y-4 overflow-hidden"
+        className="w-full max-w-lg max-h-[90vh] flex flex-col rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] p-5 text-[var(--color-ink)] shadow-xl space-y-4 overflow-hidden"
         dir={isRTL ? 'rtl' : 'ltr'}
       >
         {/* Header */}
@@ -445,7 +505,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
           </button>
         </div>
 
-        {/* Mode Switcher: JSON vs CSV */}
+        {/* Mode Switcher: JSON vs Excel/CSV */}
         <div className="grid grid-cols-2 gap-1 p-1 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl shrink-0">
           <button
             type="button"
@@ -469,6 +529,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
           </button>
           <button
             type="button"
+            data-testid="tab-import-spreadsheet"
             onClick={() => {
               setActiveTab('csv');
               setMessage(null);
@@ -481,10 +542,10 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
           >
             {isRTL ? (
               <>
-                استيراد <bdi dir="ltr">CSV</bdi>
+                استيراد <bdi dir="ltr">Excel / CSV</bdi>
               </>
             ) : (
-              'CSV Import Wizard'
+              'Import Excel / CSV'
             )}
           </button>
         </div>
@@ -492,6 +553,8 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
         {/* Status Message */}
         {message && (
           <div
+            data-testid="backup-status-message"
+            data-status={message.error ? 'error' : 'success'}
             className={`p-3 rounded-lg text-xs flex items-center gap-2 shrink-0 ${
               message.error
                 ? 'bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/20 text-[var(--color-expense)]'
@@ -1050,24 +1113,25 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
               )}
             </>
           ) : (
-            /* CSV Import Wizard */
+            /* Excel / CSV Import Wizard */
             <div className="space-y-3">
               <button
                 type="button"
                 onClick={() => csvFileInputRef.current?.click()}
                 className="w-full p-3.5 bg-[var(--color-bg)] hover:bg-[var(--color-surface)] border border-dashed border-[var(--color-line)] rounded-xl flex items-center justify-between text-xs transition-colors min-h-[52px]"
               >
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 min-w-0">
                   <FileSpreadsheet className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
-                  <div className="text-start">
-                    <div className="font-bold text-[var(--color-ink)]">
+                  <div className="text-start min-w-0">
+                    <div className="font-bold text-[var(--color-ink)] truncate">
                       {csvFileName ||
                         (isRTL ? (
                           <>
-                            اختر ملف <bdi dir="ltr">CSV</bdi> للاستيراد
+                            اختر ملف <bdi dir="ltr">Excel (.xlsx / .xls)</bdi> أو{' '}
+                            <bdi dir="ltr">CSV</bdi>
                           </>
                         ) : (
-                          'Choose CSV file to import'
+                          'Choose Excel (.xlsx / .xls) or CSV file'
                         ))}
                     </div>
                     <div className="text-[11px] text-[var(--color-muted)]">
@@ -1077,28 +1141,50 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                           : `${csvRows.length} rows ready for preview`
                         : isRTL ? (
                           <>
-                            يدعم كشوف الحسابات وتقارير <bdi dir="ltr">Excel</bdi>
+                            يدعم ملفات <bdi dir="ltr">Excel</bdi> وكشوف الحسابات{' '}
+                            <bdi dir="ltr">CSV</bdi>
                           </>
                         ) : (
-                          'Supports bank exports & Excel CSV'
+                          'Supports Excel workbooks & bank CSV exports'
                         )}
                     </div>
                   </div>
                 </div>
-                <span className="text-[var(--color-accent)] font-semibold">
+                <span className="text-[var(--color-accent)] font-semibold shrink-0">
                   {isRTL ? 'تصفح' : 'Browse'}
                 </span>
               </button>
               <input
                 ref={csvFileInputRef}
+                data-testid="spreadsheet-file-input"
                 type="file"
-                accept=".csv,text/csv"
+                accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
                 className="hidden"
                 onChange={handleCsvFileSelected}
               />
 
               {csvHeaders.length > 0 && (
                 <div className="space-y-3">
+                  {/* Worksheet selector for multi-sheet Excel files */}
+                  {importSheetNames.length > 1 && (
+                    <div>
+                      <label className="block text-xs font-semibold text-[var(--color-ink)] mb-1">
+                        {isRTL ? 'ورقة العمل (Sheet)' : 'Worksheet'}
+                      </label>
+                      <select
+                        value={importActiveSheet}
+                        onChange={(e) => handleImportSheetChange(e.target.value)}
+                        className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] min-h-[40px]"
+                      >
+                        {importSheetNames.map((name) => (
+                          <option key={name} value={name}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
                   {/* Target Wallet */}
                   <div>
                     <label className="block text-xs font-semibold text-[var(--color-ink)] mb-1">
@@ -1119,8 +1205,17 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
 
                   {/* Column Mapping Selectors */}
                   <div className="p-3 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl space-y-2">
-                    <div className="text-xs font-bold text-[var(--color-ink)] mb-1">
-                      {isRTL ? 'ربط الأعمدة' : 'Column Mapping'}
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <span className="text-xs font-bold text-[var(--color-ink)]">
+                        {isRTL ? 'ربط الأعمدة (تلقائي)' : 'Column Mapping (Auto-detected)'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setCsvMapping(autoDetectCsvMapping(csvHeaders))}
+                        className="text-[10px] font-semibold text-[var(--color-accent)] hover:underline"
+                      >
+                        {isRTL ? 'إعادة التعرف التلقائي' : 'Auto-detect'}
+                      </button>
                     </div>
                     {(
                       [
@@ -1134,6 +1229,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                       <div key={field.key} className="flex items-center justify-between gap-2 text-xs">
                         <span className="text-[var(--color-muted)] shrink-0">{field.label}</span>
                         <select
+                          data-testid={`map-select-${field.key}`}
                           value={csvMapping[field.key]}
                           onChange={(e) =>
                             setCsvMapping((prev) => ({
@@ -1141,12 +1237,12 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                               [field.key]: parseInt(e.target.value, 10),
                             }))
                           }
-                          className="w-40 px-2 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)]"
+                          className="w-44 px-2 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)]"
                         >
                           <option value={-1}>{isRTL ? '— غير محدد —' : '— Unmapped —'}</option>
                           {csvHeaders.map((h, idx) => (
                             <option key={idx} value={idx}>
-                              {h || `Col ${idx + 1}`}
+                              {h || (isRTL ? `عمود ${idx + 1}` : `Col ${idx + 1}`)}
                             </option>
                           ))}
                         </select>
@@ -1160,10 +1256,24 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                       <div className="font-semibold text-[var(--color-ink)]">
                         {isRTL ? 'تخطي المعاملات المكررة تلقائياً' : 'Skip duplicate rows'}
                       </div>
-                      <div className="text-[11px] text-[var(--color-muted)] mt-0.5">
-                        {isRTL
-                          ? `صالحة: ${csvPreviewResult.validCount} • مكررة: ${csvPreviewResult.duplicateCount}`
-                          : `Valid: ${csvPreviewResult.validCount} • Duplicates: ${csvPreviewResult.duplicateCount}`}
+                      <div className="text-[11px] text-[var(--color-muted)] mt-0.5 flex flex-wrap gap-x-2">
+                        <span className="text-[var(--color-income)] font-semibold">
+                          {isRTL
+                            ? `صالح: ${csvPreviewResult.validCount}`
+                            : `Valid: ${csvPreviewResult.validCount}`}
+                        </span>
+                        {csvPreviewResult.invalidCount > 0 && (
+                          <span className="text-[var(--color-expense)] font-semibold">
+                            {isRTL
+                              ? `غير صالح (يُتخطى): ${csvPreviewResult.invalidCount}`
+                              : `Invalid (skipped): ${csvPreviewResult.invalidCount}`}
+                          </span>
+                        )}
+                        <span>
+                          {isRTL
+                            ? `مكرر: ${csvPreviewResult.duplicateCount}`
+                            : `Duplicates: ${csvPreviewResult.duplicateCount}`}
+                        </span>
                       </div>
                     </div>
                     <input
@@ -1174,58 +1284,169 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                     />
                   </div>
 
-                  {/* Preview Table (first 6 rows) */}
+                  {/* Formatted Preview Table (first 6 rows) */}
                   <div className="border border-[var(--color-line)] rounded-xl overflow-hidden bg-[var(--color-bg)]">
-                    <div className="px-3 py-2 border-b border-[var(--color-line)] text-[11px] font-bold text-[var(--color-muted)]">
-                      {isRTL ? 'معاينة أول الصفوف' : 'Preview'}
+                    <div className="px-3 py-2 border-b border-[var(--color-line)] flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold text-[var(--color-ink)]">
+                        {isRTL ? 'معاينة أول الصفوف' : 'Preview First Rows'}
+                      </span>
+                      <div className="flex items-center gap-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-md p-0.5 text-[10px]">
+                        <button
+                          type="button"
+                          onClick={() => setPreviewMode('mapped')}
+                          className={`px-2 py-0.5 rounded font-semibold ${
+                            previewMode === 'mapped'
+                              ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)]'
+                              : 'text-[var(--color-muted)]'
+                          }`}
+                        >
+                          {isRTL ? 'بعد الربط' : 'Mapped'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPreviewMode('raw')}
+                          className={`px-2 py-0.5 rounded font-semibold ${
+                            previewMode === 'raw'
+                              ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)]'
+                              : 'text-[var(--color-muted)]'
+                          }`}
+                        >
+                          {isRTL ? 'أعمدة الملف' : 'Raw Sheet'}
+                        </button>
+                      </div>
                     </div>
-                    <div className="divide-y divide-[var(--color-line)] max-h-40 overflow-y-auto text-[11px]">
-                      {csvPreviewResult.previewRows.slice(0, 6).map((row) => (
-                        <div key={row.rowIndex} className="px-3 py-2 flex items-center justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="font-semibold text-[var(--color-ink)] truncate">
-                              {row.categoryLabel} {row.notes ? `• ${row.notes}` : ''}
-                            </div>
-                            <div className="text-[10px] text-[var(--color-muted)]">{row.date}</div>
-                          </div>
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            {row.isDuplicate && (
-                              <span className="px-1.5 py-0.5 rounded bg-[var(--color-warning)]/15 text-[var(--color-warning-text)] text-[10px] font-semibold">
-                                {isRTL ? 'مكرر' : 'Dup'}
-                              </span>
-                            )}
-                            {!row.isValid ? (
-                              <span className="text-[var(--color-expense)] font-semibold">
-                                {isRTL ? 'غير صالح' : 'Invalid'}
-                              </span>
-                            ) : (
-                              <span
-                                className={`font-bold num-tabular ${
-                                  row.type === 'income'
-                                    ? 'text-[var(--color-income)]'
-                                    : 'text-[var(--color-expense)]'
-                                }`}
+
+                    <div className="overflow-x-auto max-h-48">
+                      {previewMode === 'mapped' ? (
+                        <table
+                          data-testid="import-preview-table"
+                          className="w-full text-[11px] text-start border-collapse"
+                        >
+                          <thead className="bg-[var(--color-surface)] border-b border-[var(--color-line)] text-[10px] text-[var(--color-muted)] sticky top-0">
+                            <tr>
+                              <th className="px-2.5 py-1.5 font-semibold text-start">#</th>
+                              <th className="px-2.5 py-1.5 font-semibold text-start">
+                                {isRTL ? 'التاريخ' : 'Date'}
+                              </th>
+                              <th className="px-2.5 py-1.5 font-semibold text-start">
+                                {isRTL ? 'المبلغ' : 'Amount'}
+                              </th>
+                              <th className="px-2.5 py-1.5 font-semibold text-start">
+                                {isRTL ? 'التصنيف' : 'Category'}
+                              </th>
+                              <th className="px-2.5 py-1.5 font-semibold text-start">
+                                {isRTL ? 'الملاحظات' : 'Notes'}
+                              </th>
+                              <th className="px-2.5 py-1.5 font-semibold text-start">
+                                {isRTL ? 'الحالة' : 'Status'}
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-[var(--color-line)]">
+                            {csvPreviewResult.previewRows.slice(0, 6).map((row) => (
+                              <tr
+                                key={row.rowIndex}
+                                className={
+                                  !row.isValid
+                                    ? 'bg-[var(--color-expense)]/5'
+                                    : row.isDuplicate
+                                    ? 'bg-[var(--color-warning)]/5'
+                                    : ''
+                                }
                               >
-                                {row.type === 'income' ? '+' : '−'}
-                                {row.amount}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      ))}
+                                <td className="px-2.5 py-1.5 text-[var(--color-muted)] num-tabular">
+                                  {row.rowIndex}
+                                </td>
+                                <td className="px-2.5 py-1.5 whitespace-nowrap num-tabular">
+                                  {row.date || '—'}
+                                </td>
+                                <td className="px-2.5 py-1.5 whitespace-nowrap font-bold num-tabular">
+                                  {row.isValid ? (
+                                    <span
+                                      className={
+                                        row.type === 'income'
+                                          ? 'text-[var(--color-income)]'
+                                          : 'text-[var(--color-expense)]'
+                                      }
+                                    >
+                                      {row.type === 'income' ? '+' : '−'}
+                                      {row.amount}
+                                    </span>
+                                  ) : (
+                                    '—'
+                                  )}
+                                </td>
+                                <td className="px-2.5 py-1.5 max-w-[95px] truncate">
+                                  {row.categoryLabel}
+                                </td>
+                                <td className="px-2.5 py-1.5 max-w-[120px] truncate text-[var(--color-muted)]">
+                                  {row.notes || '—'}
+                                </td>
+                                <td className="px-2.5 py-1.5 whitespace-nowrap">
+                                  {!row.isValid ? (
+                                    <span className="px-1.5 py-0.5 rounded bg-[var(--color-expense)]/15 text-[var(--color-expense)] text-[10px] font-semibold">
+                                      {isRTL
+                                        ? row.errorReasonAr || 'غير صالح'
+                                        : row.errorReason || 'Invalid'}
+                                    </span>
+                                  ) : row.isDuplicate ? (
+                                    <span className="px-1.5 py-0.5 rounded bg-[var(--color-warning)]/15 text-[var(--color-warning-text)] text-[10px] font-semibold">
+                                      {isRTL ? 'مكرر' : 'Duplicate'}
+                                    </span>
+                                  ) : (
+                                    <span className="px-1.5 py-0.5 rounded bg-[var(--color-income)]/15 text-[var(--color-income)] text-[10px] font-semibold">
+                                      {isRTL ? 'صالح' : 'Valid'}
+                                    </span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      ) : (
+                        <table className="w-full text-[11px] text-start border-collapse">
+                          <thead className="bg-[var(--color-surface)] border-b border-[var(--color-line)] text-[10px] text-[var(--color-muted)] sticky top-0">
+                            <tr>
+                              {csvHeaders.map((h, i) => (
+                                <th key={i} className="px-2.5 py-1.5 font-semibold text-start whitespace-nowrap">
+                                  {h || (isRTL ? `عمود ${i + 1}` : `Col ${i + 1}`)}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-[var(--color-line)]">
+                            {csvRecords.slice(0, 6).map((rec, rIdx) => {
+                              const keys = Object.keys(rec);
+                              return (
+                                <tr key={rIdx}>
+                                  {keys.map((k) => (
+                                    <td
+                                      key={k}
+                                      className="px-2.5 py-1.5 max-w-[140px] truncate whitespace-nowrap"
+                                    >
+                                      {rec[k] || '—'}
+                                    </td>
+                                  ))}
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      )}
                     </div>
                   </div>
 
                   {/* Confirm Import Button */}
                   <button
                     type="button"
+                    data-testid="confirm-spreadsheet-import"
                     disabled={rowsReadyToImport.length === 0}
                     onClick={handleConfirmCsvImport}
                     className="w-full py-2.5 bg-[var(--color-accent)] disabled:opacity-40 text-[var(--color-on-accent)] font-semibold rounded-xl text-xs min-h-[44px]"
                   >
                     {isRTL
-                      ? `استيراد ${rowsReadyToImport.length} معاملة`
-                      : `Import ${rowsReadyToImport.length} transactions`}
+                      ? `استيراد ${rowsReadyToImport.length} معاملة صالحة`
+                      : `Import ${rowsReadyToImport.length} valid transactions`}
                   </button>
                 </div>
               )}

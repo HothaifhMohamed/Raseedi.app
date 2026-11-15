@@ -18,10 +18,14 @@ import {
   decryptBackupJson,
   isEncryptedBackupPayload,
 } from './security';
+import * as XLSX from 'xlsx';
 import {
   parseCsvText,
+  parseImportFileBuffer,
   autoDetectCsvMapping,
   mapCsvRowsToTransactions,
+  normalizeCsvDate,
+  parseImportAmount,
 } from './csvImport';
 import { DEFAULT_CATEGORIES, validateBackupSchema } from './db';
 import { Budget, Debt, Transaction } from '../types';
@@ -417,3 +421,108 @@ test('validateBackupSchema: accepts moneyCircles, orgWorkspaces, and activeWorks
     'INVALID_ACTIVE_WORKSPACE_FIELD'
   );
 });
+
+test('excel & csv import: parses .xlsx/.xls to JSON records, auto-detects Arabic/English columns, validates dates/amounts, rejects PDF/images', () => {
+  // 1. Build a real multi-row .xlsx workbook in memory (including invalid rows & Arabic numerals)
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet([
+    ['التاريخ', 'المبلغ', 'الملاحظات', 'النوع', 'التصنيف'],
+    ['2026-05-10', '٣٥٠٫٧٥ ج.م', 'مشتريات السوبرماركت', 'مصروف', 'سوبرماركت'],
+    [45788, 1250, 'مكافأة مشروع', 'income', 'راتب'],
+    ['2025-02-30', 500, 'تاريخ تقويمي مستحيل', 'مصروف', 'أخرى'],
+    ['2026-05-12', 'ليس رقماً', 'مبلغ تالف', 'مصروف', 'أخرى'],
+  ]);
+  XLSX.utils.book_append_sheet(wb, ws, 'Transactions');
+  const xlsxBytes = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer);
+
+  const xlsxResult = parseImportFileBuffer({
+    bytes: xlsxBytes,
+    fileName: 'statement.xlsx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  assert.equal(xlsxResult.ok, true);
+  if (!xlsxResult.ok) return;
+
+  assert.equal(xlsxResult.data.fileType, 'xlsx');
+  assert.deepEqual(xlsxResult.data.headers, ['التاريخ', 'المبلغ', 'الملاحظات', 'النوع', 'التصنيف']);
+  assert.equal(xlsxResult.data.records.length, 4);
+  assert.equal(xlsxResult.data.records[0]['الملاحظات'], 'مشتريات السوبرماركت');
+
+  const mapping = autoDetectCsvMapping(xlsxResult.data.headers);
+  assert.equal(mapping.dateIndex, 0);
+  assert.equal(mapping.amountIndex, 1);
+  assert.equal(mapping.notesIndex, 2);
+  assert.equal(mapping.typeIndex, 3);
+  assert.equal(mapping.categoryIndex, 4);
+
+  const mapped = mapCsvRowsToTransactions({
+    rows: xlsxResult.data.rows,
+    mapping,
+    categories: DEFAULT_CATEGORIES,
+    existingTransactions: [],
+  });
+  assert.equal(mapped.validCount, 2);
+  assert.equal(mapped.invalidCount, 2);
+  assert.equal(mapped.previewRows[0].amount, 350.75);
+  assert.equal(mapped.previewRows[1].date, '2025-05-11');
+  assert.equal(mapped.previewRows[1].type, 'income');
+  assert.equal(mapped.previewRows[2].isValid, false);
+  assert.equal(mapped.previewRows[3].isValid, false);
+
+  // 2. Also verify legacy .xls (BIFF8) parsing & English headers
+  const wbXls = XLSX.utils.book_new();
+  const wsXls = XLSX.utils.aoa_to_sheet([
+    ['date', 'amount', 'notes'],
+    ['15/06/2026', '420.50', 'Coffee & snacks'],
+  ]);
+  XLSX.utils.book_append_sheet(wbXls, wsXls, 'Sheet1');
+  const xlsBytes = new Uint8Array(XLSX.write(wbXls, { type: 'array', bookType: 'xls' }) as ArrayBuffer);
+  const xlsResult = parseImportFileBuffer({
+    bytes: xlsBytes,
+    fileName: 'legacy.xls',
+  });
+  assert.equal(xlsResult.ok, true);
+  if (xlsResult.ok) {
+    assert.equal(xlsResult.data.fileType, 'xls');
+    assert.equal(xlsResult.data.records[0].notes, 'Coffee & snacks');
+    const engMap = autoDetectCsvMapping(xlsResult.data.headers);
+    assert.equal(engMap.dateIndex, 0);
+    assert.equal(engMap.amountIndex, 1);
+    assert.equal(engMap.notesIndex, 2);
+  }
+
+  // 3. Semicolon-separated Arabic CSV (Excel regional format)
+  const semiCsv = 'التاريخ;المبلغ;ملاحظات\n2026-07-01;240;فاتورة نت';
+  const semiBytes = new TextEncoder().encode(semiCsv);
+  const csvResult = parseImportFileBuffer({ bytes: semiBytes, fileName: 'bank.csv' });
+  assert.equal(csvResult.ok, true);
+  if (csvResult.ok) {
+    assert.equal(csvResult.data.rows[0][2], 'فاتورة نت');
+  }
+
+  // 4. Reject unsupported formats (PDF, PNG image, spoofed binary .csv)
+  const pdfCheck = parseImportFileBuffer({
+    bytes: new TextEncoder().encode('%PDF-1.7\n...'),
+    fileName: 'receipt.pdf',
+    mimeType: 'application/pdf',
+  });
+  assert.equal(pdfCheck.ok, false);
+  if (!pdfCheck.ok) assert.equal(pdfCheck.errorCode, 'UNSUPPORTED_FORMAT');
+
+  const pngCheck = parseImportFileBuffer({
+    bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    fileName: 'photo.png',
+    mimeType: 'image/png',
+  });
+  assert.equal(pngCheck.ok, false);
+  if (!pngCheck.ok) assert.equal(pngCheck.errorCode, 'UNSUPPORTED_FORMAT');
+
+  // 5. Strict date & amount helpers
+  assert.equal(normalizeCsvDate('2026-02-29'), null); // 2026 not leap year
+  assert.equal(normalizeCsvDate('2024-02-29'), '2024-02-29'); // 2024 leap year
+  assert.equal(parseImportAmount('(150.25)')?.amount, 150.25);
+  assert.equal(parseImportAmount('(150.25)')?.isNegative, true);
+  assert.equal(parseImportAmount('100abc'), null);
+  assert.equal(parseImportAmount('0'), null);
+});
+
