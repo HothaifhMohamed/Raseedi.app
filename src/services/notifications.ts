@@ -67,8 +67,19 @@ export function buildAppNotifications(params: {
   } = params;
   const items: AppNotificationItem[] = [];
 
-  // 0. Organization Subscription Lifecycle Alerts (14d / 3d / 0d / grace / expired read-only)
-  if (isOrgWorkspace && orgSubscriptionState && orgSubscriptionState.expiryNotificationStage !== 'none') {
+  // 0. Organization Subscription Lifecycle Alerts (only paid/trial orgs within <= 7d or grace/expired, never free)
+  const isPaidOrTrialOrg =
+    orgSubscriptionState &&
+    orgSubscriptionState.planTier !== 'free' &&
+    orgSubscriptionState.billingCycle !== 'free';
+  if (
+    isOrgWorkspace &&
+    isPaidOrTrialOrg &&
+    orgSubscriptionState.expiryNotificationStage !== 'none' &&
+    (orgSubscriptionState.expiryNotificationStage === 'grace' ||
+      orgSubscriptionState.expiryNotificationStage === 'expired' ||
+      (orgSubscriptionState.daysRemaining !== null && orgSubscriptionState.daysRemaining <= 7))
+  ) {
     const stage = orgSubscriptionState.expiryNotificationStage;
     const label = orgName ? `"${orgName}"` : '';
     if (stage === 'expired') {

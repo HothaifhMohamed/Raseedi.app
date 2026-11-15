@@ -10,7 +10,7 @@ export { normalizeApprovalStatus };
 
 export const DAY_MS = 24 * 60 * 60 * 1000;
 export const GRACE_PERIOD_DAYS = 7;
-export const EXPIRING_SOON_WINDOW_DAYS = 14;
+export const EXPIRING_SOON_WINDOW_DAYS = 7;
 
 export type OrgSubscriptionLifecycleStatus =
   | 'trial'
@@ -19,7 +19,7 @@ export type OrgSubscriptionLifecycleStatus =
   | 'grace'
   | 'read_only';
 
-export type ExpiryNotificationStage = 'none' | '14d' | '3d' | '0d' | 'grace' | 'expired';
+export type ExpiryNotificationStage = 'none' | '7d' | '14d' | '3d' | '0d' | 'grace' | 'expired';
 
 export interface OrgSubscriptionState {
   status: OrgSubscriptionLifecycleStatus;
@@ -130,19 +130,19 @@ export function computeOrgSubscriptionState(
       ? Math.floor(org.maxSeats)
       : computeOrgSeatLimit(org.extraSeats || 0);
 
-  if (planTier === 'free') {
+  if (planTier === 'free' || billingCycle === 'free') {
     return {
-      status: 'read_only',
+      status: 'active',
       planTier: 'free',
       billingCycle: 'free',
-      expiresAt,
-      graceEndsAt: expiresAt,
-      daysRemaining: 0,
-      graceDaysRemaining: 0,
+      expiresAt: null,
+      graceEndsAt: null,
+      daysRemaining: null,
+      graceDaysRemaining: null,
       isGracePeriod: false,
-      isReadOnly: true,
-      canWrite: false,
-      expiryNotificationStage: 'expired',
+      isReadOnly: false,
+      canWrite: true,
+      expiryNotificationStage: 'none',
       seatLimit,
       monthlyScanLimit: PRICING_CONFIG.free.monthlyAiScans,
     };
@@ -178,7 +178,7 @@ export function computeOrgSubscriptionState(
     } else if (daysRemaining <= 3) {
       expiryNotificationStage = '3d';
     } else if (daysRemaining <= EXPIRING_SOON_WINDOW_DAYS) {
-      expiryNotificationStage = '14d';
+      expiryNotificationStage = '7d';
     }
 
     const status: OrgSubscriptionLifecycleStatus =

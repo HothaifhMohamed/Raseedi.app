@@ -1534,3 +1534,50 @@ export function generateNextVoucherNumber(
   return `${prefix}-${String(maxNum + 1).padStart(4, '0')}`;
 }
 
+/**
+ * Applies partial updates to a Wallet and deterministically adjusts `balance`,
+ * `initialBalanceMinor`, and `balanceMinor` whenever `initialBalance` changes
+ * (unless `balance` is explicitly overridden in `updates`).
+ */
+export function applyWalletUpdates(wallet: Wallet, updates: Partial<Wallet>): Wallet {
+  const merged: Wallet = {
+    ...wallet,
+    ...updates,
+  };
+  const targetCurrency = merged.currency || wallet.currency || 'EGP';
+  const nextInitial = roundCurrency(
+    Number.isFinite(Number(merged.initialBalance)) ? Number(merged.initialBalance) : 0,
+    targetCurrency
+  );
+
+  let nextBalance: number;
+  if (updates.balance !== undefined && Number.isFinite(Number(updates.balance))) {
+    nextBalance = roundCurrency(Number(updates.balance), targetCurrency);
+  } else if (
+    updates.initialBalance !== undefined &&
+    Number.isFinite(Number(updates.initialBalance))
+  ) {
+    const prevInitial = Number.isFinite(Number(wallet.initialBalance))
+      ? Number(wallet.initialBalance)
+      : 0;
+    const prevBalance = Number.isFinite(Number(wallet.balance)) ? Number(wallet.balance) : 0;
+    const delta = nextInitial - prevInitial;
+    nextBalance = roundCurrency(prevBalance + delta, targetCurrency);
+  } else {
+    nextBalance = roundCurrency(
+      Number.isFinite(Number(merged.balance)) ? Number(merged.balance) : 0,
+      targetCurrency
+    );
+  }
+
+  return {
+    ...merged,
+    currency: targetCurrency,
+    initialBalance: nextInitial,
+    balance: nextBalance,
+    initialBalanceMinor: toMinor(nextInitial, targetCurrency),
+    balanceMinor: toMinor(nextBalance, targetCurrency),
+  };
+}
+
+

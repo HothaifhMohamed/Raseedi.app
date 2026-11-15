@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import {
   Save,
   Download,
@@ -18,6 +18,7 @@ import {
   LogOut,
   Crown,
   RotateCcw,
+  History,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import {
@@ -60,9 +61,11 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     isCloudSyncing,
     cloudSyncStatus,
     cloudSyncError,
-    cloudConflict,
     cloudSkippedAttachmentsWarning,
     lastCloudBackupExists,
+    cloudBackupHistory,
+    refreshCloudBackupHistory,
+    restoreFromBackupHistoryEntry,
     preRestoreSnapshotDate,
     createPreRestoreSnapshot,
     revertPreRestoreSnapshot,
@@ -70,8 +73,6 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     signOutGoogleAccount,
     syncToCloudNow,
     restoreFromCloudNow,
-    resolveCloudConflictOverwrite,
-    clearCloudConflict,
     updateSettings,
     importTransactionsBatch,
     t,
@@ -102,6 +103,20 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
   });
   const [targetWalletId, setTargetWalletId] = useState(wallets[0]?.id || '');
   const [skipDuplicates, setSkipDuplicates] = useState(true);
+  const [isRefreshingHistory, setIsRefreshingHistory] = useState(false);
+  const [restoringHistoryId, setRestoringHistoryId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'json' || !user?.isLoggedIn) return;
+    let active = true;
+    setIsRefreshingHistory(true);
+    void refreshCloudBackupHistory().finally(() => {
+      if (active) setIsRefreshingHistory(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, [isOpen, activeTab, user?.isLoggedIn, refreshCloudBackupHistory]);
 
   const jsonFileInputRef = useRef<HTMLInputElement>(null);
   const csvFileInputRef = useRef<HTMLInputElement>(null);
@@ -600,71 +615,6 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                       </span>
                     </div>
 
-                    {cloudConflict && (
-                      <div className="p-3 rounded-xl bg-[var(--color-warning)]/12 border border-[var(--color-warning)]/35 space-y-2 text-xs">
-                        <div className="font-bold text-[var(--color-warning-text)] flex items-center gap-1.5">
-                          <AlertCircle className="w-4 h-4 shrink-0" />
-                          <span>
-                            {isRTL
-                              ? 'تعارض مع نسخة سحابية أحدث!'
-                              : 'Newer cloud backup detected!'}
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-[var(--color-ink)] leading-relaxed">
-                          {isRTL
-                            ? `توجد نسخة أحدث على السحابة (${new Date(cloudConflict.cloudUpdatedAtMs).toLocaleString('ar-EG')}). اختر استعادتها أو استبدالها ببيانات هذا الجهاز:`
-                            : `A newer cloud backup exists (${new Date(cloudConflict.cloudUpdatedAtMs).toLocaleString('en-US')}). Restore the cloud version or overwrite it with this device:`}
-                        </p>
-                        <div className="grid grid-cols-2 gap-2">
-                          <button
-                            type="button"
-                            disabled={isCloudSyncing}
-                            onClick={async () => {
-                              const ok = await restoreFromCloudNow();
-                              if (ok) clearCloudConflict();
-                              setMessage(
-                                ok
-                                  ? {
-                                      text: isRTL
-                                        ? 'تمت استعادة النسخة السحابية الأحدث بنجاح!'
-                                        : 'Restored newer cloud backup!',
-                                    }
-                                  : {
-                                      text: isRTL ? 'تعذرت استعادة النسخة.' : 'Restore failed.',
-                                      error: true,
-                                    }
-                              );
-                            }}
-                            className="py-2 px-2.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-[11px] font-semibold min-h-[36px]"
-                          >
-                            {isRTL ? 'استعادة الأحدث (السحابة)' : 'Keep Cloud (Restore)'}
-                          </button>
-                          <button
-                            type="button"
-                            disabled={isCloudSyncing}
-                            onClick={async () => {
-                              const ok = await resolveCloudConflictOverwrite();
-                              setMessage(
-                                ok
-                                  ? {
-                                      text: isRTL
-                                        ? 'تم استبدال السحابة ببيانات هذا الجهاز.'
-                                        : 'Cloud backup overwritten with device data.',
-                                    }
-                                  : {
-                                      text: isRTL ? 'فشل تحديث السحابة.' : 'Overwrite failed.',
-                                      error: true,
-                                    }
-                              );
-                            }}
-                            className="py-2 px-2.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-ink)] text-[11px] font-semibold min-h-[36px]"
-                          >
-                            {isRTL ? 'استبدال السحابة بهذا الجهاز' : 'Overwrite Cloud'}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         type="button"
@@ -719,6 +669,114 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                         <Download className="w-3.5 h-3.5 text-[var(--color-accent)]" />
                         <span>{isRTL ? 'استعادة من السحابة' : 'Restore Cloud'}</span>
                       </button>
+                    </div>
+
+                    {/* Last 7 Automatic Cloud Backups */}
+                    <div className="pt-2 border-t border-[var(--color-line)] space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 text-[11px] font-bold text-[var(--color-ink)]">
+                          <History className="w-3.5 h-3.5 text-[var(--color-accent)]" />
+                          <span>
+                            {isRTL ? 'آخر 7 نسخ سحابية تلقائية' : 'Last 7 Cloud Backups'}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={isRefreshingHistory || isCloudSyncing}
+                          onClick={async () => {
+                            setIsRefreshingHistory(true);
+                            try {
+                              await refreshCloudBackupHistory();
+                            } finally {
+                              setIsRefreshingHistory(false);
+                            }
+                          }}
+                          className="text-[10px] font-semibold text-[var(--color-accent)] hover:underline disabled:opacity-50"
+                        >
+                          {isRefreshingHistory
+                            ? isRTL
+                              ? 'جاري التحديث...'
+                              : 'Refreshing...'
+                            : isRTL
+                            ? 'تحديث'
+                            : 'Refresh'}
+                        </button>
+                      </div>
+
+                      {cloudBackupHistory.length === 0 ? (
+                        <p className="text-[10px] text-[var(--color-muted)]">
+                          {isRefreshingHistory
+                            ? isRTL
+                              ? 'جاري تحميل سجل النسخ...'
+                              : 'Loading backup history...'
+                            : isRTL
+                            ? 'سيتم الاحتفاظ تلقائياً بآخر 7 نسخ سحابية عند المزامنة.'
+                            : 'The last 7 automatic cloud snapshots will appear here after sync.'}
+                        </p>
+                      ) : (
+                        <div className="space-y-1.5 max-h-44 overflow-y-auto pe-0.5">
+                          {cloudBackupHistory.slice(0, 7).map((entry, idx) => (
+                            <div
+                              key={entry.id}
+                              className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)]"
+                            >
+                              <div className="min-w-0">
+                                <div className="text-[11px] font-semibold text-[var(--color-ink)] truncate">
+                                  {new Date(entry.createdAtMs).toLocaleString(
+                                    isRTL ? 'ar-EG' : 'en-US',
+                                    { dateStyle: 'short', timeStyle: 'short' }
+                                  )}
+                                  {idx === 0 && (
+                                    <span className="ms-1.5 text-[9px] font-bold text-[var(--color-accent)]">
+                                      {isRTL ? '(الأحدث)' : '(Latest)'}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[10px] text-[var(--color-muted)]">
+                                  {isRTL
+                                    ? `${entry.storedTransactionsCount} معاملة • ${entry.walletsCount} محفظة`
+                                    : `${entry.storedTransactionsCount} tx • ${entry.walletsCount} wallets`}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                disabled={isCloudSyncing || restoringHistoryId !== null}
+                                onClick={async () => {
+                                  setRestoringHistoryId(entry.id);
+                                  try {
+                                    const ok = await restoreFromBackupHistoryEntry(entry.id);
+                                    setMessage(
+                                      ok
+                                        ? {
+                                            text: isRTL
+                                              ? 'تمت استعادة النسخة السحابية المختارة بنجاح!'
+                                              : 'Selected cloud backup restored!',
+                                          }
+                                        : {
+                                            text: isRTL
+                                              ? 'تعذرت استعادة هذه النسخة.'
+                                              : 'Failed to restore selected backup.',
+                                            error: true,
+                                          }
+                                    );
+                                  } finally {
+                                    setRestoringHistoryId(null);
+                                  }
+                                }}
+                                className="px-2.5 py-1 rounded-md bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 text-[var(--color-accent)] text-[10px] font-bold shrink-0 min-h-[28px] disabled:opacity-50"
+                              >
+                                {restoringHistoryId === entry.id
+                                  ? isRTL
+                                    ? 'جاري...'
+                                    : '...'
+                                  : isRTL
+                                  ? 'استعادة'
+                                  : 'Restore'}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 ) : (

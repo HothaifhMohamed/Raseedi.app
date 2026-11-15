@@ -652,13 +652,6 @@ export const MoreMenu: React.FC = () => {
       <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-3 space-y-2.5">
         <div className="flex items-center justify-between gap-2 text-[11px] font-semibold text-[var(--color-muted)]">
           <span>{isRTL ? 'تواصل سريع مع فريق رَصِيدِي' : 'Quick Contact & Support'}</span>
-          <button
-            type="button"
-            onClick={() => setSupportLegalTab('support')}
-            className="text-[var(--color-accent)] hover:underline"
-          >
-            {isRTL ? 'تخصيص الروابط' : 'Edit Links'}
-          </button>
         </div>
         <div className="grid grid-cols-2 gap-2">
           <a
@@ -692,7 +685,7 @@ export const MoreMenu: React.FC = () => {
         <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-3">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
             <a
-              href={settings.socialLinks?.facebookUrl?.trim() || SUPPORT_CONFIG.defaultFacebookUrl}
+              href={SUPPORT_CONFIG.defaultFacebookUrl}
               target="_blank"
               rel="noopener noreferrer"
               data-testid="social-link-facebook"
@@ -720,7 +713,7 @@ export const MoreMenu: React.FC = () => {
             </a>
 
             <a
-              href={settings.socialLinks?.instagramUrl?.trim() || SUPPORT_CONFIG.defaultInstagramUrl}
+              href={SUPPORT_CONFIG.defaultInstagramUrl}
               target="_blank"
               rel="noopener noreferrer"
               data-testid="social-link-instagram"

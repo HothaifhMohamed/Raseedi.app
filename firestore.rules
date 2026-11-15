@@ -66,12 +66,17 @@ service cloud.firestore {
       return isSignedIn() && m != null && m.data.status == 'active' && m.data.role in ['owner', 'admin', 'accountant', 'employee'];
     }
 
-    // 7-day grace window after subscription expiry; read-only afterward
+    // Free orgs are always writable; paid/trial orgs stay writable through 7-day grace window
     function isOrgWritable(orgId) {
       let o = orgDoc(orgId);
       return o != null
-        && o.data.get('planTier', 'business_pro') != 'free'
-        && (!('expiresAt' in o.data) || o.data.expiresAt == null || request.time.toMillis() <= o.data.expiresAt + 7 * 86400000);
+        && (
+          o.data.get('planTier', 'business_pro') == 'free'
+          || o.data.get('billingCycle', 'monthly') == 'free'
+          || !('expiresAt' in o.data)
+          || o.data.expiresAt == null
+          || request.time.toMillis() <= o.data.expiresAt + 7 * 86400000
+        );
     }
 
     function isAfterPeriodLock(orgId, dateStr) {
@@ -256,6 +261,50 @@ service cloud.firestore {
         && data.transactions.size() <= 500
         && (data.transactions.size() == 0 || data.transactions[0] is map)
         && data.updatedAt is timestamp;
+    }
+
+    function isValidBackupHistoryEntry(data, userId, backupId) {
+      return data.keys().hasAll([
+        'id',
+        'uid',
+        'source',
+        'createdAtMs',
+        'totalTransactions',
+        'storedTransactionsCount',
+        'walletsCount',
+        'snapshotJson',
+        'createdAt'
+      ])
+        && data.keys().hasOnly([
+          'id',
+          'uid',
+          'source',
+          'createdAtMs',
+          'totalTransactions',
+          'storedTransactionsCount',
+          'walletsCount',
+          'snapshotJson',
+          'createdAt'
+        ])
+        && data.id is string
+        && data.id == backupId
+        && isValidId(data.id)
+        && data.uid is string
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && data.source in ['auto', 'manual']
+        && data.createdAtMs is number
+        && data.createdAtMs > 0
+        && data.totalTransactions is int
+        && data.totalTransactions >= 0
+        && data.storedTransactionsCount is int
+        && data.storedTransactionsCount >= 0
+        && data.walletsCount is int
+        && data.walletsCount >= 0
+        && data.snapshotJson is string
+        && data.snapshotJson.size() > 0
+        && data.snapshotJson.size() <= 900000
+        && data.createdAt is timestamp;
     }
 
     function isValidOrgSettingsUpdate(data) {
@@ -579,6 +628,35 @@ service cloud.firestore {
           && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
         allow list: if false;
         allow create, update: if false;
+        allow delete: if isValidId(userId)
+          && isValidId(backupId)
+          && isVerifiedUser()
+          && isOwner(userId)
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+      }
+
+      // Rolling history of the last 7 automatic cloud backups
+      match /backupHistory/{backupId} {
+        allow get: if isValidId(userId)
+          && isValidId(backupId)
+          && isOwner(userId)
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+        allow list: if isValidId(userId)
+          && isOwner(userId)
+          && (request.query.limit == null || request.query.limit <= 30)
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(backupId)
+          && isVerifiedUser()
+          && isOwner(userId)
+          && isValidBackupHistoryEntry(incoming(), userId, backupId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+        allow update: if false;
         allow delete: if isValidId(userId)
           && isValidId(backupId)
           && isVerifiedUser()

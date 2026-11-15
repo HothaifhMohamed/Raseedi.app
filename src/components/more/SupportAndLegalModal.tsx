@@ -9,8 +9,6 @@ import {
   Share2,
   ExternalLink,
   Headphones,
-  Edit3,
-  Check,
   X,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
@@ -28,46 +26,19 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
   onClose,
   initialTab = 'support',
 }) => {
-  const { isRTL, isPro, settings, updateSettings } = useApp();
+  const { isRTL, isPro } = useApp();
   const [activeTab, setActiveTab] = useState<'support' | 'legal'>(initialTab);
-  const [editingSocial, setEditingSocial] = useState(false);
-  const [facebookUrl, setFacebookUrl] = useState(
-    settings.socialLinks?.facebookUrl || SUPPORT_CONFIG.defaultFacebookUrl
-  );
-  const [instagramUrl, setInstagramUrl] = useState(
-    settings.socialLinks?.instagramUrl || SUPPORT_CONFIG.defaultInstagramUrl
-  );
-  const [socialSaved, setSocialSaved] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
       setActiveTab(initialTab);
-      setFacebookUrl(settings.socialLinks?.facebookUrl || SUPPORT_CONFIG.defaultFacebookUrl);
-      setInstagramUrl(settings.socialLinks?.instagramUrl || SUPPORT_CONFIG.defaultInstagramUrl);
-      setSocialSaved(false);
-      setEditingSocial(false);
     }
-  }, [isOpen, initialTab, settings.socialLinks]);
+  }, [isOpen, initialTab]);
 
   if (!isOpen) return null;
 
-  const resolvedFacebookUrl =
-    settings.socialLinks?.facebookUrl?.trim() || SUPPORT_CONFIG.defaultFacebookUrl;
-  const resolvedInstagramUrl =
-    settings.socialLinks?.instagramUrl?.trim() || SUPPORT_CONFIG.defaultInstagramUrl;
-
-  const handleSaveSocialLinks = (e: React.FormEvent) => {
-    e.preventDefault();
-    updateSettings({
-      socialLinks: {
-        facebookUrl: facebookUrl.trim(),
-        instagramUrl: instagramUrl.trim(),
-      },
-    });
-    setEditingSocial(false);
-    setSocialSaved(true);
-    window.setTimeout(() => setSocialSaved(false), 2500);
-  };
+  const resolvedFacebookUrl = SUPPORT_CONFIG.defaultFacebookUrl;
+  const resolvedInstagramUrl = SUPPORT_CONFIG.defaultInstagramUrl;
 
   return (
     <div
@@ -195,73 +166,14 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
 
               {/* Social Media Channels */}
               <div className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <Share2 className="w-4 h-4 text-[var(--color-accent)] shrink-0" />
-                    <span className="font-bold text-[var(--color-ink)] text-xs">
-                      {isRTL ? 'حسابات التواصل الاجتماعي' : 'Social Media Pages'}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setEditingSocial((prev) => !prev)}
-                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--color-accent)] hover:underline min-h-[32px] px-1"
-                  >
-                    <Edit3 className="w-3 h-3" />
-                    <span>{editingSocial ? (isRTL ? 'إلغاء' : 'Cancel') : isRTL ? 'تعديل الروابط' : 'Edit Links'}</span>
-                  </button>
+                <div className="flex items-center gap-2">
+                  <Share2 className="w-4 h-4 text-[var(--color-accent)] shrink-0" />
+                  <span className="font-bold text-[var(--color-ink)] text-xs">
+                    {isRTL ? 'حسابات التواصل الاجتماعي' : 'Social Media Pages'}
+                  </span>
                 </div>
 
-                {socialSaved && (
-                  <div className="p-2 rounded-lg bg-[var(--color-income)]/10 border border-[var(--color-income)]/30 text-[var(--color-income)] text-[11px] font-medium flex items-center gap-1.5">
-                    <Check className="w-3.5 h-3.5 shrink-0" />
-                    <span>{isRTL ? 'تم حفظ روابط التواصل بنجاح' : 'Social links updated'}</span>
-                  </div>
-                )}
-
-                {editingSocial ? (
-                  <form onSubmit={handleSaveSocialLinks} className="space-y-2.5 pt-1">
-                    <div>
-                      <label className="block text-[11px] font-semibold text-[var(--color-muted)] mb-1">
-                        {isRTL ? 'رابط صفحة فيسبوك' : 'Facebook Page URL'}
-                      </label>
-                      <input
-                        type="url"
-                        dir="ltr"
-                        value={facebookUrl}
-                        onChange={(e) => setFacebookUrl(e.target.value)}
-                        placeholder="https://facebook.com/..."
-                        className="w-full px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[40px]"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-semibold text-[var(--color-muted)] mb-1">
-                        {isRTL ? 'رابط حساب إنستقرام' : 'Instagram Profile URL'}
-                      </label>
-                      <input
-                        type="url"
-                        dir="ltr"
-                        value={instagramUrl}
-                        onChange={(e) => setInstagramUrl(e.target.value)}
-                        placeholder="https://instagram.com/..."
-                        className="w-full px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[40px]"
-                      />
-                    </div>
-                    <button
-                      type="submit"
-                      className="w-full py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-semibold min-h-[40px]"
-                    >
-                      {isRTL ? 'حفظ الروابط' : 'Save Social Links'}
-                    </button>
-                  </form>
-                ) : !resolvedFacebookUrl && !resolvedInstagramUrl ? (
-                  <p className="text-[11px] text-[var(--color-muted)]">
-                    {isRTL
-                      ? 'لم تتم إضافة روابط تواصل اجتماعي بعد. اضغط «تعديل الروابط» لإضافة روابطك.'
-                      : 'No social links added yet. Click "Edit Links" to add your pages.'}
-                  </p>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     {resolvedFacebookUrl && (
                       <a
                         href={resolvedFacebookUrl}
@@ -300,7 +212,6 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
                       </a>
                     )}
                   </div>
-                )}
               </div>
             </>
           ) : (

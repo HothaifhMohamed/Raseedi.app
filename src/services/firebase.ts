@@ -61,6 +61,13 @@ import {
   computeLicenseCodeHash,
   isAuthorizedAdminUser,
 } from './licenseCodes';
+import {
+  BackupHistoryRecord,
+  BackupHistorySummary,
+  buildCompactBackupHistorySnapshotJson,
+  getBackupIdsToPrune,
+  MAX_AUTO_CLOUD_BACKUPS,
+} from './backupHistory';
 
 const app = initializeApp(firebaseConfig);
 
@@ -468,6 +475,10 @@ export async function saveCloudBackup(
   data: Omit<AppDatabaseData, 'user'> & {
     orgWorkspaces?: Record<string, OrgWorkspaceData>;
     activeWorkspace?: string;
+  },
+  options?: {
+    source?: 'auto' | 'manual';
+    recordHistory?: boolean;
   }
 ): Promise<{ syncedAt: number; updatedAtMs: number; skippedAttachmentsCount: number }> {
   const metaPath = `users/${uid}/backup/meta`;
@@ -629,7 +640,114 @@ export async function saveCloudBackup(
     handleFirestoreError(error, OperationType.UPDATE, `users/${uid}`);
   }
 
+  if (options?.recordHistory !== false) {
+    try {
+      const source = options?.source === 'manual' ? 'manual' : 'auto';
+      const historyId = `${source}_${updatedAtMs}`;
+      const { snapshotJson, storedTransactionsCount } = buildCompactBackupHistorySnapshotJson({
+        ...data,
+        updatedAtMs,
+      });
+
+      const historyRef = doc(db, 'users', uid, 'backupHistory', historyId);
+      await setDoc(historyRef, {
+        id: historyId,
+        uid,
+        source,
+        createdAtMs: updatedAtMs,
+        totalTransactions: (data.transactions || []).length,
+        storedTransactionsCount,
+        walletsCount: (data.wallets || []).length,
+        snapshotJson,
+        createdAt: serverTimestamp(),
+      });
+
+      const histQuery = query(
+        collection(db, 'users', uid, 'backupHistory'),
+        orderBy('createdAtMs', 'desc'),
+        limit(30)
+      );
+      const histSnap = await getDocs(histQuery);
+      const existingEntries = histSnap.docs.map((d) => {
+        const docData = d.data() as Partial<BackupHistorySummary>;
+        return {
+          id: d.id,
+          createdAtMs: Number(docData.createdAtMs || 0),
+        };
+      });
+      const idsToPrune = getBackupIdsToPrune(existingEntries, MAX_AUTO_CLOUD_BACKUPS);
+      if (idsToPrune.length > 0) {
+        const pruneBatch = writeBatch(db);
+        for (const staleId of idsToPrune) {
+          pruneBatch.delete(doc(db, 'users', uid, 'backupHistory', staleId));
+        }
+        await pruneBatch.commit();
+      }
+    } catch (historyErr) {
+      console.warn('Cloud backup history snapshot skipped:', historyErr);
+    }
+  }
+
   return { syncedAt: updatedAtMs, updatedAtMs, skippedAttachmentsCount };
+}
+
+export async function fetchCloudBackupHistory(uid: string): Promise<BackupHistorySummary[]> {
+  const historyPath = `users/${uid}/backupHistory`;
+  try {
+    const q = query(
+      collection(db, 'users', uid, 'backupHistory'),
+      orderBy('createdAtMs', 'desc'),
+      limit(MAX_AUTO_CLOUD_BACKUPS)
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => {
+      const data = d.data() as Partial<BackupHistoryRecord>;
+      return {
+        id: d.id,
+        uid,
+        source: data.source === 'manual' ? 'manual' : 'auto',
+        createdAtMs: Number(data.createdAtMs || 0),
+        totalTransactions: Number(data.totalTransactions || 0),
+        storedTransactionsCount: Number(data.storedTransactionsCount || 0),
+        walletsCount: Number(data.walletsCount || 0),
+      };
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, historyPath);
+  }
+}
+
+export async function fetchCloudBackupFromHistory(
+  uid: string,
+  backupId: string
+): Promise<CloudBackupPayload | null> {
+  const path = `users/${uid}/backupHistory/${backupId}`;
+  try {
+    const snap = await getDoc(doc(db, 'users', uid, 'backupHistory', backupId));
+    if (!snap.exists()) return null;
+    const data = snap.data() as Partial<BackupHistoryRecord>;
+    if (!data.snapshotJson) return null;
+    const parsed = JSON.parse(data.snapshotJson) as Partial<CloudBackupPayload>;
+    return {
+      uid,
+      schemaVersion: Number(parsed.schemaVersion || 2),
+      updatedAtMs: Number(parsed.updatedAtMs || data.createdAtMs || Date.now()),
+      transactions: Array.isArray(parsed.transactions) ? parsed.transactions : [],
+      wallets: Array.isArray(parsed.wallets) ? parsed.wallets : [],
+      categories: Array.isArray(parsed.categories) ? parsed.categories : [],
+      budgets: Array.isArray(parsed.budgets) ? parsed.budgets : [],
+      debts: Array.isArray(parsed.debts) ? parsed.debts : [],
+      goals: Array.isArray(parsed.goals) ? parsed.goals : [],
+      templates: Array.isArray(parsed.templates) ? parsed.templates : [],
+      moneyCircles: Array.isArray(parsed.moneyCircles) ? parsed.moneyCircles : [],
+      orgWorkspaces: parsed.orgWorkspaces,
+      activeWorkspace: parsed.activeWorkspace,
+      settings: parsed.settings as AppDatabaseData['settings'],
+      hasCompletedOnboarding: Boolean(parsed.hasCompletedOnboarding ?? true),
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, path);
+  }
 }
 
 export async function syncOrganizationMetaToCloud(
@@ -637,18 +755,22 @@ export async function syncOrganizationMetaToCloud(
   personalData: Omit<AppDatabaseData, 'user'>,
   orgWorkspaces: Record<string, OrgWorkspaceData>,
   activeWorkspace?: string
-): Promise<boolean> {
+): Promise<number | null> {
   try {
-    if (!uid || !auth.currentUser || auth.currentUser.uid !== uid) return false;
-    if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
-    await saveCloudBackup(uid, {
-      ...personalData,
-      orgWorkspaces,
-      activeWorkspace: activeWorkspace || 'personal',
-    });
-    return true;
+    if (!uid || !auth.currentUser || auth.currentUser.uid !== uid) return null;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return null;
+    const res = await saveCloudBackup(
+      uid,
+      {
+        ...personalData,
+        orgWorkspaces,
+        activeWorkspace: activeWorkspace || 'personal',
+      },
+      { source: 'auto', recordHistory: true }
+    );
+    return res.updatedAtMs;
   } catch {
-    return false;
+    return null;
   }
 }
 

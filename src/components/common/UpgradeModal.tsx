@@ -757,7 +757,7 @@ export const UpgradeModal: React.FC = () => {
             </div>
             <div className="grid grid-cols-2 gap-2">
               <a
-                href={settings.socialLinks?.facebookUrl?.trim() || SUPPORT_CONFIG.defaultFacebookUrl}
+                href={SUPPORT_CONFIG.defaultFacebookUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 data-testid="upgrade-social-facebook"
@@ -778,7 +778,7 @@ export const UpgradeModal: React.FC = () => {
               </a>
 
               <a
-                href={settings.socialLinks?.instagramUrl?.trim() || SUPPORT_CONFIG.defaultInstagramUrl}
+                href={SUPPORT_CONFIG.defaultInstagramUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 data-testid="upgrade-social-instagram"

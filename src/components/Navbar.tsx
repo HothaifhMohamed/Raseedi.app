@@ -48,7 +48,6 @@ export const Navbar: React.FC = () => {
     isPro,
     isBusinessPro,
     cloudSyncStatus,
-    cloudConflict,
     filters,
     activeWorkspace,
     isOrgWorkspace,
@@ -128,7 +127,7 @@ export const Navbar: React.FC = () => {
     isOrgWorkspace && activeOrganization ? activeOrganization.currency : settings.mainCurrency
   );
 
-  const hasSyncAlert = Boolean(cloudConflict) || cloudSyncStatus === 'error';
+  const hasSyncAlert = cloudSyncStatus === 'error';
 
   const hasActiveFilters =
     filters.type !== 'all' ||
@@ -620,7 +619,7 @@ export const Navbar: React.FC = () => {
                     </div>
                     {hasSyncAlert && (
                       <span className="text-[10px] font-semibold text-[var(--color-expense)]">
-                        {cloudConflict ? (isRTL ? 'تعارض' : 'Conflict') : isRTL ? 'خطأ' : 'Sync'}
+                        {isRTL ? 'خطأ' : 'Sync'}
                       </span>
                     )}
                   </button>

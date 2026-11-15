@@ -14,10 +14,18 @@ import {
   calculateVatBreakdown,
   doesTransactionAffectAccounting,
   getTransactionWalletDeltas,
+  applyWalletUpdates,
 } from './calculations';
+import { buildAppNotifications } from './notifications';
+import {
+  MAX_AUTO_CLOUD_BACKUPS,
+  getBackupIdsToPrune,
+  buildCompactBackupHistorySnapshotJson,
+} from './backupHistory';
+import { DEFAULT_SETTINGS } from './db';
 import { fromMinor, toMinor, roundCurrency } from './currency';
 import { PRICING_CONFIG } from '../config/pricing';
-import type { Transaction } from '../types';
+import type { Transaction, Wallet } from '../types';
 
 test('VAT minor-unit precision across 2-decimal (EGP) and 3-decimal (KWD, BHD, OMR, JOD, TND) currencies', () => {
   // Exclusive VAT in EGP: 100.00 + 14% = 114.00
@@ -45,18 +53,46 @@ test('VAT minor-unit precision across 2-decimal (EGP) and 3-decimal (KWD, BHD, O
   }
 });
 
-test('Org subscription lifecycle transitions: trial -> active -> 14d/3d/0d alerts -> 7d grace -> read-only', () => {
+test('Org subscription lifecycle transitions: free never expires; trial >7d silent; <=7d/3d/0d alerts -> 7d grace -> read-only', () => {
   const now = Date.UTC(2026, 5, 1, 12, 0, 0);
 
-  const trial = computeOrgSubscriptionState(
+  // Free org never triggers expiry notifications or read-only restrictions
+  const freeOrg = computeOrgSubscriptionState(
+    { planTier: 'free', billingCycle: 'free', expiresAt: null },
+    now
+  );
+  assert.equal(freeOrg.status, 'active');
+  assert.equal(freeOrg.canWrite, true);
+  assert.equal(freeOrg.isReadOnly, false);
+  assert.equal(freeOrg.expiryNotificationStage, 'none');
+
+  // 10-day remaining trial must NOT fire an expiry notification yet (window is <= 7 days)
+  const trial10d = computeOrgSubscriptionState(
     { planTier: 'business_pro', billingCycle: 'trial', expiresAt: now + 10 * DAY_MS },
     now
   );
-  assert.equal(trial.status, 'trial');
-  assert.equal(trial.canWrite, true);
-  assert.equal(trial.isReadOnly, false);
-  assert.equal(trial.expiryNotificationStage, '14d');
-  assert.equal(trial.seatLimit, PRICING_CONFIG.businessPro.includedSeats);
+  assert.equal(trial10d.status, 'trial');
+  assert.equal(trial10d.canWrite, true);
+  assert.equal(trial10d.isReadOnly, false);
+  assert.equal(trial10d.expiryNotificationStage, 'none');
+  assert.equal(trial10d.seatLimit, PRICING_CONFIG.businessPro.includedSeats);
+
+  // 6-day remaining trial keeps trial status and fires 7d expiry stage
+  const trial6d = computeOrgSubscriptionState(
+    { planTier: 'business_pro', billingCycle: 'trial', expiresAt: now + 6 * DAY_MS },
+    now
+  );
+  assert.equal(trial6d.status, 'trial');
+  assert.equal(trial6d.canWrite, true);
+  assert.equal(trial6d.expiryNotificationStage, '7d');
+
+  // Paid plan at 6 days remaining becomes expiring_soon
+  const paid6d = computeOrgSubscriptionState(
+    { planTier: 'business_pro', billingCycle: 'monthly', expiresAt: now + 6 * DAY_MS },
+    now
+  );
+  assert.equal(paid6d.status, 'expiring_soon');
+  assert.equal(paid6d.expiryNotificationStage, '7d');
 
   const active = computeOrgSubscriptionState(
     { planTier: 'business_pro', billingCycle: 'yearly', expiresAt: now + 60 * DAY_MS, extraSeats: 3 },
@@ -167,3 +203,167 @@ test('Approval invariants & transfer wallet deltas with 3-decimal currencies', (
   assert.equal(transferDeltas.sourceDelta, -10.375);
   assert.equal(transferDeltas.destDelta, 12.345);
 });
+
+test('applyWalletUpdates recalculates balance and minor units across EGP and KWD', () => {
+  const walletEgp: Wallet = {
+    id: 'w1',
+    name: 'كاش',
+    icon: 'Banknote',
+    color: '#0D9488',
+    currency: 'EGP',
+    initialBalance: 1000,
+    balance: 1350,
+    initialBalanceMinor: 100000,
+    balanceMinor: 135000,
+    isArchived: false,
+    order: 1,
+  };
+
+  // Increasing initialBalance by +500 must shift balance from 1350 -> 1850
+  const updatedEgp = applyWalletUpdates(walletEgp, {
+    name: 'خزنة الشركة',
+    color: '#2563EB',
+    icon: 'Landmark',
+    initialBalance: 1500,
+  });
+  assert.equal(updatedEgp.name, 'خزنة الشركة');
+  assert.equal(updatedEgp.color, '#2563EB');
+  assert.equal(updatedEgp.icon, 'Landmark');
+  assert.equal(updatedEgp.initialBalance, 1500);
+  assert.equal(updatedEgp.balance, 1850);
+  assert.equal(updatedEgp.initialBalanceMinor, 150000);
+  assert.equal(updatedEgp.balanceMinor, 185000);
+
+  // 3-decimal KWD wallet update + currency change
+  const walletKwd: Wallet = {
+    id: 'w2',
+    name: 'Kuwait',
+    icon: 'Wallet',
+    color: '#0D9488',
+    currency: 'KWD',
+    initialBalance: 10.25,
+    balance: 15.375,
+    isArchived: false,
+    order: 2,
+  };
+  const updatedKwd = applyWalletUpdates(walletKwd, { initialBalance: 20.5 });
+  assert.equal(updatedKwd.initialBalance, 20.5);
+  assert.equal(updatedKwd.balance, 25.625);
+  assert.equal(updatedKwd.initialBalanceMinor, 20500);
+  assert.equal(updatedKwd.balanceMinor, 25625);
+
+  // Explicit balance override takes precedence
+  const explicit = applyWalletUpdates(walletEgp, { balance: 999 });
+  assert.equal(explicit.balance, 999);
+  assert.equal(explicit.balanceMinor, 99900);
+});
+
+test('buildAppNotifications skips org alerts on free tier and >7d trials, and emits when <=7d', () => {
+  const nowMs = Date.UTC(2026, 5, 1, 12, 0, 0);
+  const now = new Date(nowMs);
+  const baseSettings = {
+    ...DEFAULT_SETTINGS,
+    notificationsEnabled: false,
+    budgetAlertsEnabled: false,
+    debtRemindersEnabled: false,
+  };
+
+  const freeState = computeOrgSubscriptionState(
+    { planTier: 'free', billingCycle: 'free', expiresAt: null },
+    nowMs
+  );
+  const freeNotifs = buildAppNotifications({
+    budgets: [],
+    transactions: [],
+    debts: [],
+    settings: baseSettings,
+    isOrgWorkspace: true,
+    orgName: 'Free Org',
+    orgSubscriptionState: freeState,
+    now,
+  });
+  assert.equal(freeNotifs.length, 0);
+
+  const trial10dState = computeOrgSubscriptionState(
+    { planTier: 'business_pro', billingCycle: 'trial', expiresAt: nowMs + 10 * DAY_MS },
+    nowMs
+  );
+  const trial10dNotifs = buildAppNotifications({
+    budgets: [],
+    transactions: [],
+    debts: [],
+    settings: baseSettings,
+    isOrgWorkspace: true,
+    orgName: 'Trial 10d Org',
+    orgSubscriptionState: trial10dState,
+    now,
+  });
+  assert.equal(trial10dNotifs.length, 0);
+
+  const trial5dState = computeOrgSubscriptionState(
+    { planTier: 'business_pro', billingCycle: 'trial', expiresAt: nowMs + 5 * DAY_MS },
+    nowMs
+  );
+  const trial5dNotifs = buildAppNotifications({
+    budgets: [],
+    transactions: [],
+    debts: [],
+    settings: baseSettings,
+    isOrgWorkspace: true,
+    orgName: 'Trial 5d Org',
+    orgSubscriptionState: trial5dState,
+    now,
+  });
+  assert.equal(trial5dNotifs.length, 1);
+  assert.equal(trial5dNotifs[0].type, 'org_subscription_expiring');
+});
+
+test('backupHistory prunes beyond 7 backups and compacts large payloads safely', () => {
+  assert.equal(MAX_AUTO_CLOUD_BACKUPS, 7);
+  const entries = Array.from({ length: 9 }, (_, i) => ({
+    id: `auto_${1000 + i}`,
+    createdAtMs: 1000 + i,
+  }));
+  const toDelete = getBackupIdsToPrune(entries, 7);
+  assert.deepEqual(toDelete, ['auto_1001', 'auto_1000']);
+
+  const hugeBase64 = 'data:image/jpeg;base64,' + 'A'.repeat(20_000);
+  const txs: Transaction[] = Array.from({ length: 40 }, (_, i) => ({
+    id: `tx-${i}`,
+    type: 'expense',
+    amount: 50 + i,
+    currency: 'EGP',
+    categoryId: 'c1',
+    walletId: 'w1',
+    date: `2026-06-${String((i % 28) + 1).padStart(2, '0')}`,
+    time: '12:00',
+    priority: 'normal',
+    doesNotAffectBalance: false,
+    notes: 'Item ' + 'X'.repeat(200),
+    attachments: [hugeBase64],
+    createdAt: i + 1,
+    updatedAt: i + 1,
+  }));
+
+  const packed = buildCompactBackupHistorySnapshotJson(
+    {
+      transactions: txs,
+      wallets: [],
+      categories: [],
+      budgets: [],
+      debts: [],
+      goals: [],
+      templates: [],
+      moneyCircles: [],
+      settings: DEFAULT_SETTINGS,
+      hasCompletedOnboarding: true,
+      updatedAtMs: 5000,
+    },
+    3500
+  );
+  assert.ok(Buffer.byteLength(packed.snapshotJson, 'utf8') <= 3500);
+  assert.equal(packed.truncated, true);
+  assert.ok(packed.storedTransactionsCount > 0 && packed.storedTransactionsCount < txs.length);
+  assert.equal(packed.snapshotJson.includes('data:image/jpeg'), false);
+});
+

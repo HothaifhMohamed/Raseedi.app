@@ -157,10 +157,17 @@ export const PWAInstallPrompt: React.FC = () => {
 
 export const OfflineIndicator: React.FC = () => {
   const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
+  const [isDismissed, setIsDismissed] = useState(false);
 
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
+    const handleOnline = () => {
+      setIsOnline(true);
+      setIsDismissed(false);
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      setIsDismissed(false);
+    };
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
@@ -171,12 +178,37 @@ export const OfflineIndicator: React.FC = () => {
     };
   }, []);
 
-  if (isOnline) return null;
+  useEffect(() => {
+    if (isOnline || isDismissed) return;
+    const timer = window.setTimeout(() => {
+      setIsDismissed(true);
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [isOnline, isDismissed]);
+
+  if (isOnline || isDismissed) return null;
 
   return (
-    <div className="fixed top-2 inset-x-4 z-50 mx-auto max-w-md bg-[var(--color-warning)] text-[#1C1A17] text-xs font-semibold px-3 py-2 rounded-lg flex items-center justify-center gap-2 shadow-md">
-      <WifiOff className="w-4 h-4 shrink-0" />
-      <span>وضع عدم الاتصال — بياناتك محفوظة محلياً وتعمل بدون إنترنت</span>
+    <div
+      role="status"
+      data-testid="offline-banner"
+      className="relative w-full bg-[var(--color-warning)]/95 text-[#1C1A17] text-[11px] font-medium px-3 py-1 border-b border-black/10 flex items-center justify-between gap-2"
+    >
+      <div className="flex items-center gap-1.5 min-w-0">
+        <WifiOff className="w-3.5 h-3.5 shrink-0" />
+        <span className="truncate">
+          وضع عدم الاتصال — بياناتك محفوظة محلياً وتعمل بدون إنترنت
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={() => setIsDismissed(true)}
+        data-testid="offline-banner-dismiss"
+        aria-label="إغلاق تنبيه وضع عدم الاتصال"
+        className="p-0.5 rounded hover:bg-black/10 text-[#1C1A17] shrink-0 flex items-center justify-center"
+      >
+        <X className="w-3.5 h-3.5" />
+      </button>
     </div>
   );
 };

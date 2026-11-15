@@ -153,6 +153,33 @@
       },
       "required": ["uid", "chunkIndex", "transactions", "updatedAt"]
     },
+    "CloudBackupHistoryEntry": {
+      "title": "CloudBackupHistoryEntry",
+      "description": "Timestamped automatic cloud backup snapshot (retained up to latest 7 per user)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "source": { "type": "string", "enum": ["auto", "manual"] },
+        "createdAtMs": { "type": "number" },
+        "totalTransactions": { "type": "number" },
+        "storedTransactionsCount": { "type": "number" },
+        "walletsCount": { "type": "number" },
+        "snapshotJson": { "type": "string", "maxLength": 900000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "uid",
+        "source",
+        "createdAtMs",
+        "totalTransactions",
+        "storedTransactionsCount",
+        "walletsCount",
+        "snapshotJson",
+        "createdAt"
+      ]
+    },
     "ActivationCode": {
       "title": "ActivationCode",
       "description": "Server-only hashed PRO / Business activation codes redeemed atomically via /api/redeem-code",
@@ -378,6 +405,10 @@
     "/users/{userId}/backupChunks/{chunkId}": {
       "schema": { "$ref": "#/entities/CloudBackupChunk" },
       "description": "Chunked personal transaction slices (max 400 transactions per doc)"
+    },
+    "/users/{userId}/backupHistory/{backupId}": {
+      "schema": { "$ref": "#/entities/CloudBackupHistoryEntry" },
+      "description": "Rolling last 7 automatic cloud backup snapshots per user"
     },
     "/users/{userId}/scanQuotas/{monthKey}": {
       "schema": { "$ref": "#/entities/ScanQuota" },
