@@ -28,6 +28,7 @@ import { TransactionType, PriorityLevel, RecurrenceFrequency, Transaction } from
 import { CalculatorKeypad } from './CalculatorKeypad';
 import { CurrencyPickerModal } from './common/CurrencyPickerModal';
 import { IconRenderer } from './common/IconRenderer';
+import { HairlineFigure } from './common/HairlineVisuals';
 import { convertCurrency, toMinor } from '../services/currency';
 import {
   calculateVatBreakdown,
@@ -901,13 +902,24 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
         dir={isRTL ? 'rtl' : 'ltr'}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-line)]">
-          <h2 className="font-title text-base font-bold text-[var(--color-ink)]">
-            {editTransaction ? (isRTL ? 'تعديل المعاملة' : 'Edit Transaction') : (isRTL ? 'إضافة معاملة جديدة' : 'Add Transaction')}
-          </h2>
+        <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--color-line)]">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <HairlineFigure
+              figure="stack"
+              surface="surface"
+              tone="accent"
+              intensity={0.78}
+              stroke={1.15}
+              label={editTransaction ? 'Edit Transaction' : 'Add Transaction'}
+              className="w-10 shrink-0"
+            />
+            <h2 className="font-title text-base font-bold text-[var(--color-ink)] truncate">
+              {editTransaction ? (isRTL ? 'تعديل المعاملة' : 'Edit Transaction') : (isRTL ? 'إضافة معاملة جديدة' : 'Add Transaction')}
+            </h2>
+          </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-lg border border-[var(--color-line)] flex items-center justify-center text-[var(--color-muted)] hover:text-[var(--color-ink)] transition-colors min-h-[36px] min-w-[36px]"
+            className="w-8 h-8 rounded-lg border border-[var(--color-line)] flex items-center justify-center text-[var(--color-muted)] hover:text-[var(--color-ink)] transition-colors min-h-[36px] min-w-[36px] shrink-0"
           >
             <X className="w-4 h-4" />
           </button>

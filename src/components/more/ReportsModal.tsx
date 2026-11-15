@@ -4,6 +4,7 @@ import { useApp } from '../../context/AppContext';
 import { getTransactionsInDateRange } from '../../services/calculations';
 import { convertCurrency } from '../../services/currency';
 import { MoneyText } from '../common/MoneyText';
+import { HairlineFigure } from '../common/HairlineVisuals';
 
 interface ReportsModalProps {
   isOpen: boolean;
@@ -117,6 +118,25 @@ export const ReportsModal: React.FC<ReportsModalProps> = ({ isOpen, onClose }) =
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          {/* Interactive Preview Accent Card (hidden in print) */}
+          <div className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] flex items-center justify-between gap-3 print:hidden">
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-[var(--color-ink)]">{periodLabel}</div>
+              <div className="text-[11px] text-[var(--color-muted)] mt-0.5 num-tabular">
+                {startDate} — {endDate}
+              </div>
+            </div>
+            <HairlineFigure
+              figure="plot"
+              surface="bg"
+              tone="accent"
+              intensity={0.78}
+              stroke={1.05}
+              label={periodLabel}
+              className="w-16 shrink-0"
+            />
+          </div>
+
           {/* Period Toggle & Actions */}
           <div className="flex flex-wrap items-center justify-between gap-2 print:hidden">
             <div className="flex items-center gap-1 p-1 bg-[var(--color-bg)] rounded-xl border border-[var(--color-line)]">

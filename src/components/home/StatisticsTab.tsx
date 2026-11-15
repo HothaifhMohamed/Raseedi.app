@@ -19,6 +19,7 @@ import {
 } from '../../services/calculations';
 import { MoneyText } from '../common/MoneyText';
 import { AdBanner } from '../common/AdBanner';
+import { HairlineEmptyState, HairlineFigure } from '../common/HairlineVisuals';
 
 const CHART_PALETTE = ['#B5523B', '#C99A2E', '#5E7F3A', '#1E6F73', '#7A4E6D', '#6B5E50'];
 
@@ -258,15 +259,26 @@ export const StatisticsTab: React.FC = () => {
 
       {/* Month-End Forecast Card */}
       <div className="p-4 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-ink)]">
-            <TrendingUp className="w-3.5 h-3.5 text-[var(--color-accent)] shrink-0" />
-            <span>{isRTL ? 'توقع مصروف نهاية الشهر' : 'Month-End Spend Forecast'}</span>
-          </div>
-          <div className="text-[11px] text-[var(--color-muted)] mt-1">
-            {isRTL
-              ? `المتوسط اليومي: ${monthEndForecast.dailyAverage} ${settings.mainCurrency} (${monthEndForecast.daysElapsed} / ${monthEndForecast.totalDaysInMonth} يوم)`
-              : `Daily avg: ${monthEndForecast.dailyAverage} ${settings.mainCurrency} (${monthEndForecast.daysElapsed}/${monthEndForecast.totalDaysInMonth} days)`}
+        <div className="flex items-center gap-3 min-w-0">
+          <HairlineFigure
+            figure="plot"
+            surface="surface"
+            tone="accent"
+            intensity={0.78}
+            stroke={1.05}
+            label={isRTL ? 'توقع مصروف نهاية الشهر' : 'Month-End Spend Forecast'}
+            className="w-16 shrink-0"
+          />
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-ink)]">
+              <TrendingUp className="w-3.5 h-3.5 text-[var(--color-accent)] shrink-0" />
+              <span>{isRTL ? 'توقع مصروف نهاية الشهر' : 'Month-End Spend Forecast'}</span>
+            </div>
+            <div className="text-[11px] text-[var(--color-muted)] mt-1">
+              {isRTL
+                ? `المتوسط اليومي: ${monthEndForecast.dailyAverage} ${settings.mainCurrency} (${monthEndForecast.daysElapsed} / ${monthEndForecast.totalDaysInMonth} يوم)`
+                : `Daily avg: ${monthEndForecast.dailyAverage} ${settings.mainCurrency} (${monthEndForecast.daysElapsed}/${monthEndForecast.totalDaysInMonth} days)`}
+            </div>
           </div>
         </div>
         <div className="text-end shrink-0">
@@ -320,8 +332,17 @@ export const StatisticsTab: React.FC = () => {
       {activeStatView === 'category' && (
         <div className="space-y-4">
           {categoryStats.length === 0 ? (
-            <div className="text-center py-12 text-[var(--color-muted)] text-xs bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl">
-              {isRTL ? 'لا توجد مصاريف مسجلة في هذه الفترة الزمنية' : 'No expenses recorded in this period'}
+            <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl">
+              <HairlineEmptyState
+                figure="plot"
+                surface="surface"
+                title={isRTL ? 'لا توجد بيانات إحصائية بعد' : 'No statistical data yet'}
+                description={
+                  isRTL
+                    ? 'لا توجد مصاريف مسجلة في هذه الفترة الزمنية لعرض الرسم البياني.'
+                    : 'No expenses recorded in this period to display chart insights.'
+                }
+              />
             </div>
           ) : (
             <>

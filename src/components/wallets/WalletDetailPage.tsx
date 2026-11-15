@@ -18,6 +18,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { MoneyText } from '../common/MoneyText';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
+import { HairlineEmptyState } from '../common/HairlineVisuals';
 
 interface WalletDetailPageProps {
   walletId: string;
@@ -408,8 +409,21 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
 
         {/* Transactions Ledger List */}
         {filteredTransactions.length === 0 ? (
-          <div className="py-8 text-center text-xs text-[var(--color-muted)]">
-            {isRTL ? 'لا توجد معاملات مسجلة في هذه المحفظة.' : 'No transactions recorded in this wallet.'}
+          <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl">
+            <HairlineEmptyState
+              figure="drawer"
+              surface="surface"
+              title={
+                isRTL
+                  ? 'لا توجد معاملات مسجلة في هذه المحفظة'
+                  : 'No transactions recorded in this wallet'
+              }
+              description={
+                isRTL
+                  ? 'أضف أول معاملة لهذه المحفظة لتبدأ في متابعة حركاتها.'
+                  : 'Add your first transaction to track activity in this wallet.'
+              }
+            />
           </div>
         ) : (
           <>

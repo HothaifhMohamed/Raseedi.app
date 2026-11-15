@@ -1,6 +1,5 @@
 import React, { useState, useMemo } from 'react';
 import {
-  Wallet as WalletIcon,
   Plus,
   Eye,
   EyeOff,
@@ -28,6 +27,7 @@ import { PinLockModal } from '../common/PinLockModal';
 import { hashPin } from '../../services/security';
 import { MoneyText } from '../common/MoneyText';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
+import { HairlineEmptyState, HairlineFigure } from '../common/HairlineVisuals';
 
 const SOLID_MUTED_PALETTE = [
   { id: 'teal', label: 'تركواز ترابي', hex: '#3A605B' },
@@ -324,6 +324,29 @@ export const WalletsPage: React.FC = () => {
       </div>
 
       {/* Wallets Cards List */}
+      {sortedWallets.length === 0 ? (
+        <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl">
+          <HairlineEmptyState
+            figure="vault"
+            surface="surface"
+            title={isRTL ? 'لا توجد محافظ نشطة بعد' : 'No active wallets yet'}
+            description={
+              isRTL
+                ? 'أضف محفظتك الأولى للبدء في تتبع رصيدك ومعاملاتك.'
+                : 'Create your first wallet to start tracking balances and transactions.'
+            }
+            action={
+              <button
+                onClick={handleOpenAdd}
+                className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-accent)] text-[var(--color-on-accent)] font-medium rounded-xl text-xs hover:opacity-95 min-h-[44px]"
+              >
+                <Plus className="w-4 h-4" />
+                <span>{t('addWallet')}</span>
+              </button>
+            }
+          />
+        </div>
+      ) : (
       <div className="space-y-3" data-testid="wallets-card-list">
         {sortedWallets.map((w, index) => {
           const isHidden = hiddenBalances[w.id];
@@ -337,7 +360,7 @@ export const WalletsPage: React.FC = () => {
               onClick={() => {
                 if (!isReorderMode) handleCardClick(w);
               }}
-              className={`relative overflow-hidden rounded-xl p-4.5 border border-[var(--color-line)] pattern-wallet-lines shadow-sm transition-all text-white select-none min-h-[100px] ${
+              className={`group relative overflow-hidden rounded-xl p-4.5 border border-[var(--color-line)] pattern-wallet-lines shadow-sm transition-all text-white select-none min-h-[100px] ${
                 isReorderMode
                   ? 'cursor-default ring-1 ring-[var(--color-accent)]/40'
                   : 'cursor-pointer hover:opacity-95'
@@ -345,11 +368,21 @@ export const WalletsPage: React.FC = () => {
               style={{ backgroundColor: cardColor }}
             >
               <div className="relative z-10">
-                {/* Top Row: Icon + Name + Action Icons */}
+                {/* Top Row: Interactive Hairline 3D Vault/Padlock + Name + Action Icons */}
                 <div className="flex items-center justify-between mb-3 gap-2">
                   <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-9 h-9 rounded-lg bg-black/20 flex items-center justify-center shrink-0">
-                      <IconRenderer name={w.icon || 'Wallet'} className="w-4.5 h-4.5 text-white" />
+                    <div
+                      className="w-12 shrink-0 transition-transform duration-300 group-hover:scale-105 group-active:scale-95"
+                      title={w.isLocked ? (isRTL ? 'محفظة مقفلة' : 'Locked wallet') : w.name}
+                    >
+                      <HairlineFigure
+                        figure={w.isLocked ? 'padlock' : 'vault'}
+                        surface="wallet"
+                        plateColor={cardColor}
+                        intensity={0.8}
+                        stroke={1.15}
+                        label={w.name}
+                      />
                     </div>
                     <div className="min-w-0">
                       <h3 className="text-sm font-bold tracking-tight leading-tight flex items-center gap-1.5 flex-wrap">
@@ -483,6 +516,7 @@ export const WalletsPage: React.FC = () => {
           );
         })}
       </div>
+      )}
 
       {/* Add / Edit Wallet Modal */}
       {isEditModalOpen && (

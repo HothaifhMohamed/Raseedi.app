@@ -24,6 +24,7 @@ import { normalizeApprovalStatus } from '../../services/entitlements';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { AdBanner } from '../common/AdBanner';
 import { MoneyText } from '../common/MoneyText';
+import { HairlineEmptyState } from '../common/HairlineVisuals';
 
 export const TransactionsTab: React.FC = () => {
   const {
@@ -295,18 +296,30 @@ export const TransactionsTab: React.FC = () => {
 
       {/* Transactions List Grouped by Day (Ledger Style) */}
       {dayGroups.length === 0 ? (
-        /* Compact 1-line empty state */
-        <div className="py-8 px-4 flex items-center justify-center gap-2 text-xs text-[var(--color-muted)]">
-          <span>{isRTL ? 'لا توجد معاملات مسجلة بعد.' : 'No transactions recorded yet.'}</span>
-          <button
-            onClick={() => {
-              setEditingTransaction(null);
-              setIsAddModalOpen(true);
-            }}
-            className="text-[var(--color-accent)] font-semibold hover:underline min-h-[36px] flex items-center"
-          >
-            {isRTL ? '+ إضافة معاملة' : '+ Add Transaction'}
-          </button>
+        <div className="px-4 pt-2">
+          <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl">
+            <HairlineEmptyState
+              figure="drawer"
+              surface="surface"
+              title={isRTL ? 'لا توجد معاملات مسجلة بعد' : 'No transactions recorded yet'}
+              description={
+                isRTL
+                  ? 'ابدأ بتسجيل أول دخل أو مصروف ليظهر هنا بشكل مرتب.'
+                  : 'Record your first income or expense to keep your ledger organized.'
+              }
+              action={
+                <button
+                  onClick={() => {
+                    setEditingTransaction(null);
+                    setIsAddModalOpen(true);
+                  }}
+                  className="px-4 py-2 bg-[var(--color-accent)] text-[var(--color-on-accent)] rounded-xl text-xs font-semibold hover:opacity-95 min-h-[40px] flex items-center"
+                >
+                  {isRTL ? '+ إضافة معاملة' : '+ Add Transaction'}
+                </button>
+              }
+            />
+          </div>
         </div>
       ) : (
         <div className="space-y-4 px-4 pt-1">

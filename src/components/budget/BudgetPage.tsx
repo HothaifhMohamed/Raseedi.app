@@ -22,6 +22,7 @@ import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../../serv
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { MoneyText } from '../common/MoneyText';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
+import { HairlineEmptyState, HairlineFigure } from '../common/HairlineVisuals';
 
 export const BudgetPage: React.FC = () => {
   const {
@@ -142,20 +143,30 @@ export const BudgetPage: React.FC = () => {
   return (
     <div className="flex flex-col flex-1 px-4 py-3 pb-24 space-y-4" dir={isRTL ? 'rtl' : 'ltr'}>
       {/* Header */}
-      <div className="p-4 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] flex items-center justify-between">
-        <div>
-          <h2 className="font-title text-base font-bold text-[var(--color-ink)] flex items-center gap-2">
-            <BudgetIcon className="w-4 h-4 text-[var(--color-accent)]" />
-            <span>{t('budgetTitle')}</span>
-          </h2>
-          <p className="text-xs text-[var(--color-muted)] mt-0.5">
-            {isRTL ? 'تتبع حدود الصرف وضبط الميزانيات' : 'Track spending limits & monthly budgets'}
-          </p>
+      <div className="p-4 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <HairlineFigure
+            figure="terrain"
+            surface="surface"
+            tone="accent"
+            intensity={0.75}
+            stroke={1.0}
+            label={t('budgetTitle')}
+            className="w-12 sm:w-14 shrink-0"
+          />
+          <div className="min-w-0">
+            <h2 className="font-title text-base font-bold text-[var(--color-ink)] leading-tight">
+              {t('budgetTitle')}
+            </h2>
+            <p className="text-xs text-[var(--color-muted)] mt-0.5">
+              {isRTL ? 'تتبع حدود الصرف وضبط الميزانيات' : 'Track spending limits & monthly budgets'}
+            </p>
+          </div>
         </div>
 
         <button
           onClick={() => openCreateModal()}
-          className="flex items-center gap-1.5 px-3.5 py-2 bg-[var(--color-accent)] text-[var(--color-on-accent)] font-medium rounded-xl text-xs hover:opacity-95 transition-opacity min-h-[44px]"
+          className="flex items-center gap-1.5 px-3.5 py-2 bg-[var(--color-accent)] text-[var(--color-on-accent)] font-medium rounded-xl text-xs hover:opacity-95 transition-opacity min-h-[44px] shrink-0"
         >
           <Plus className="w-4 h-4" />
           <span>{t('addBudget')}</span>
@@ -187,23 +198,22 @@ export const BudgetPage: React.FC = () => {
 
       {/* Budgets List */}
       {budgetStatuses.length === 0 ? (
-        <div className="p-8 my-4 text-center bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl flex flex-col items-center">
-          <div className="w-12 h-12 rounded-xl bg-[var(--color-accent)]/10 text-[var(--color-accent)] flex items-center justify-center mb-3">
-            <BudgetIcon className="w-6 h-6" />
-          </div>
-          <h3 className="text-sm font-bold text-[var(--color-ink)] mb-1">
-            {t('noBudgetsTitle')}
-          </h3>
-          <p className="text-xs text-[var(--color-muted)] max-w-xs leading-relaxed mb-4">
-            {t('noBudgetsDesc')}
-          </p>
-          <button
-            onClick={() => openCreateModal()}
-            className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-accent)] text-[var(--color-on-accent)] font-medium rounded-xl text-xs hover:opacity-95 min-h-[44px]"
-          >
-            <Plus className="w-4 h-4" />
-            <span>{t('addBudget')}</span>
-          </button>
+        <div className="my-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl">
+          <HairlineEmptyState
+            figure="plot"
+            surface="surface"
+            title={t('noBudgetsTitle')}
+            description={t('noBudgetsDesc')}
+            action={
+              <button
+                onClick={() => openCreateModal()}
+                className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-accent)] text-[var(--color-on-accent)] font-medium rounded-xl text-xs hover:opacity-95 min-h-[44px]"
+              >
+                <Plus className="w-4 h-4" />
+                <span>{t('addBudget')}</span>
+              </button>
+            }
+          />
         </div>
       ) : (
         <div className="space-y-3">
