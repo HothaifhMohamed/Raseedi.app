@@ -169,6 +169,24 @@
       },
       "required": ["plan", "createdAt"]
     },
+    "AdminIssuedCode": {
+      "title": "AdminIssuedCode",
+      "description": "Hashed PRO / Business activation codes issued by the verified admin and redeemable once by target users",
+      "type": "object",
+      "properties": {
+        "codeHash": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tier": { "type": "string", "enum": ["pro", "business"] },
+        "cycle": { "type": "string", "enum": ["monthly", "yearly", "lifetime"] },
+        "planTier": { "type": "string", "enum": ["personal_pro", "business_pro"] },
+        "issuedByUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "issuedByEmail": { "type": "string", "format": "email", "maxLength": 254 },
+        "targetEmail": { "type": "string", "maxLength": 254 },
+        "usedBy": { "type": "string", "maxLength": 128 },
+        "usedAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["codeHash", "tier", "cycle", "planTier", "issuedByUid", "issuedByEmail", "createdAt"]
+    },
     "ScanQuota": {
       "title": "ScanQuota",
       "description": "Server-only monthly AI receipt scan counter per user",
@@ -368,6 +386,10 @@
     "/activationCodes/{codeHash}": {
       "schema": { "$ref": "#/entities/ActivationCode" },
       "description": "Server-only PRO activation code hashes"
+    },
+    "/adminIssuedCodes/{codeHash}": {
+      "schema": { "$ref": "#/entities/AdminIssuedCode" },
+      "description": "Admin-issued hashed PRO license codes redeemable once by verified users"
     },
     "/organizations/{orgId}": {
       "schema": { "$ref": "#/entities/Organization" },

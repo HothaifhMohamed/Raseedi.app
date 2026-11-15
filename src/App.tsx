@@ -54,6 +54,7 @@ const MainLayout: React.FC = () => {
     onCurrencySelectCallback,
     isSettingsOpen,
     setIsSettingsOpen,
+    openAdminPanelRequested,
     isBackupOpen,
     setIsBackupOpen,
     isPro,
@@ -220,7 +221,11 @@ const MainLayout: React.FC = () => {
         <UpgradeModal />
 
         {/* Global Settings & Backup Modals (accessible from Header overflow menu & More tab) */}
-        <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+        <SettingsModal
+          isOpen={isSettingsOpen}
+          onClose={() => setIsSettingsOpen(false)}
+          initialOpenAdminPanel={openAdminPanelRequested}
+        />
         <BackupModal isOpen={isBackupOpen} onClose={() => setIsBackupOpen(false)} />
 
         {/* Unified Enterprise Workspace Hub Modal */}

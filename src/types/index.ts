@@ -435,6 +435,8 @@ export interface VerifiedProEntitlement {
   expiresAt?: number | null;
   proExpiresAt?: number | null;
   verifiedAt: number;
+  activatedViaCode?: boolean;
+  codePreview?: string;
 }
 
 export interface UserAccount {

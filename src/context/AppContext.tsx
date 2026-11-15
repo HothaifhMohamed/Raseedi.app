@@ -95,6 +95,7 @@ import {
   fetchCloudBackupMeta,
   saveCloudBackup,
   fetchCloudBackup,
+  claimIssuedCodeInDb,
   redeemProCodeWithServer,
   startBusinessTrialWithServer,
   fetchScanQuotaFromServer,
@@ -114,6 +115,8 @@ import {
   CloudBackupPayload,
   ScanQuotaInfo,
 } from '../services/firebase';
+import { isAuthorizedAdminUser, verifySignedLicenseCode } from '../services/licenseCodes';
+import { extractAccountDeleteErrorCode, shouldFallbackAccountDeleteError } from '../services/accountDeletion';
 import { EntitlementProvider, EntitlementContextValue, useEntitlement } from './EntitlementContext';
 import { OrgProvider, OrgContextValue, useOrg } from './OrgContext';
 import {
@@ -307,6 +310,9 @@ interface AppContextType {
   setEditingTransaction: (t: Transaction | null) => void;
   isSettingsOpen: boolean;
   setIsSettingsOpen: (open: boolean) => void;
+  openAdminPanelRequested: boolean;
+  openAdminSettingsPanel: () => void;
+  isAdminUser: boolean;
   isFilterOpen: boolean;
   setIsFilterOpen: (open: boolean) => void;
   isBackupOpen: boolean;
@@ -348,7 +354,16 @@ interface AppContextType {
   isBusinessPro: boolean;
   planTier: PlanTier;
   proEntitlement: VerifiedProEntitlement | null;
-  redeemProCode: (code: string, orgId?: string) => Promise<{ ok: boolean; error?: string }>;
+  redeemProCode: (
+    code: string,
+    orgId?: string
+  ) => Promise<{
+    ok: boolean;
+    error?: string;
+    planTier?: PlanTier;
+    billingCycle?: VerifiedProEntitlement['billingCycle'];
+    expiresAt?: number | null;
+  }>;
   startBusinessTrial: (orgId?: string) => Promise<{ ok: boolean; error?: string }>;
   devActivateProPreview: (tier?: 'personal_pro' | 'business_pro') => void;
   restorePurchases: () => Promise<boolean>;
@@ -541,6 +556,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [openAdminPanelRequested, setOpenAdminPanelRequested] = useState(false);
+  const [firebaseAuthUser, setFirebaseAuthUser] = useState<{
+    email?: string | null;
+    emailVerified?: boolean;
+  } | null>(() =>
+    auth.currentUser
+      ? { email: auth.currentUser.email, emailVerified: auth.currentUser.emailVerified }
+      : null
+  );
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [isBackupOpen, setIsBackupOpen] = useState(false);
   const [isReportsOpen, setIsReportsOpen] = useState(false);
@@ -579,6 +603,28 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [verifiedPro, devProTierPreview]);
 
   const isBusinessPro = planTier === 'business_pro';
+
+  const isAdminUser = useMemo(() => {
+    if (!user?.isLoggedIn || !firebaseAuthUser) return false;
+    return isAuthorizedAdminUser({
+      email: firebaseAuthUser.email,
+      isLoggedIn: true,
+      emailVerified: firebaseAuthUser.emailVerified,
+    });
+  }, [user?.isLoggedIn, firebaseAuthUser]);
+
+  const handleSetIsSettingsOpen = useCallback((open: boolean) => {
+    if (!open) {
+      setOpenAdminPanelRequested(false);
+    }
+    setIsSettingsOpen(open);
+  }, []);
+
+  const openAdminSettingsPanel = useCallback(() => {
+    if (!isAdminUser) return;
+    setOpenAdminPanelRequested(true);
+    setIsSettingsOpen(true);
+  }, [isAdminUser]);
 
   // Active workspace projection (Cloud Organization OR Local-first Organization)
   const activeOrgRef = useMemo(
@@ -866,14 +912,37 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     []
   );
 
+  const latestVerifiedProRef = React.useRef<VerifiedProEntitlement | null>(null);
+  latestVerifiedProRef.current = verifiedPro;
+
   const applyVerifiedProState = useCallback(async (entitlement: VerifiedProEntitlement | null) => {
+    latestVerifiedProRef.current = entitlement;
     setVerifiedPro(entitlement);
     await saveVerifiedProCache(entitlement);
   }, []);
 
   const refreshScanQuota = useCallback(async () => {
+    const activeEnt = latestVerifiedProRef.current;
+    const activeLocalTier: PlanTier =
+      activeEnt && isEntitlementActive(activeEnt) ? resolvePlanTierFromProfile(activeEnt) : 'free';
+    const localLimit =
+      activeLocalTier === 'business_pro' ? 500 : activeLocalTier === 'personal_pro' ? 200 : 5;
+
     if (!auth.currentUser) {
-      setScanQuota(null);
+      if (activeLocalTier !== 'free') {
+        setScanQuota((prev) => ({
+          month: prev?.month || new Date().toISOString().slice(0, 7),
+          used: prev?.used || 0,
+          limit: localLimit,
+          remaining: Math.max(0, localLimit - (prev?.used || 0)),
+          isPro: true,
+          planTier: activeLocalTier,
+          expiresAt: activeEnt?.expiresAt ?? null,
+          proExpiresAt: activeEnt?.proExpiresAt ?? activeEnt?.expiresAt ?? null,
+        }));
+      } else {
+        setScanQuota(null);
+      }
       return;
     }
     try {
@@ -883,7 +952,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const targetOrgId =
         activeWorkspace !== 'personal' && !isLocalOrg ? activeWorkspace : undefined;
       const q = await fetchScanQuotaFromServer(targetOrgId);
-      if (q) setScanQuota(q);
+      if (q) {
+        if (activeLocalTier !== 'free' && !q.isPro) {
+          setScanQuota({
+            ...q,
+            limit: Math.max(q.limit, localLimit),
+            remaining: Math.max(0, Math.max(q.limit, localLimit) - (q.used || 0)),
+            isPro: true,
+            planTier: activeLocalTier,
+            expiresAt: activeEnt?.expiresAt ?? null,
+            proExpiresAt: activeEnt?.proExpiresAt ?? activeEnt?.expiresAt ?? null,
+          });
+        } else {
+          setScanQuota(q);
+        }
+      }
     } catch {
       // Non-fatal
     }
@@ -1035,14 +1118,159 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, []);
 
   const redeemProCode = useCallback(
-    async (code: string, orgId?: string): Promise<{ ok: boolean; error?: string }> => {
+    async (
+      code: string,
+      orgId?: string
+    ): Promise<{
+      ok: boolean;
+      error?: string;
+      planTier?: PlanTier;
+      billingCycle?: VerifiedProEntitlement['billingCycle'];
+      expiresAt?: number | null;
+    }> => {
+      const isEn = latestPersonalRef.current.settings.language === 'en';
+      const signedResult = verifySignedLicenseCode(code);
+
+      if (signedResult.valid) {
+        if (auth.currentUser) {
+          const claimRes = await claimIssuedCodeInDb(signedResult.code, orgId);
+          if (!claimRes.ok) {
+            if (claimRes.conflict === 'CODE_ALREADY_USED') {
+              return {
+                ok: false,
+                error: isEn
+                  ? 'This activation code has already been redeemed by another account.'
+                  : 'تم استخدام كود التفعيل هذا مسبقاً بحساب آخر.',
+              };
+            }
+            if (claimRes.conflict === 'TARGET_EMAIL_MISMATCH') {
+              return {
+                ok: false,
+                error: isEn
+                  ? 'This activation code is assigned to a different email address.'
+                  : 'هذا الكود مخصص لحساب بريد إلكتروني آخر.',
+              };
+            }
+            if (claimRes.conflict === 'CODE_ALREADY_USED_OTHER_ORG') {
+              return {
+                ok: false,
+                error: isEn
+                  ? 'This activation code has already been redeemed for another organization.'
+                  : 'تم استخدام هذا الكود مسبقاً لمؤسسة أخرى.',
+              };
+            }
+          }
+        }
+
+        const uid = auth.currentUser?.uid || latestPersonalRef.current.user?.id || 'local';
+        const entitlement: VerifiedProEntitlement = {
+          uid,
+          isPro: true,
+          proPlan: signedResult.proPlan,
+          planTier: signedResult.planTier,
+          billingCycle: signedResult.billingCycle,
+          expiresAt: signedResult.expiresAt,
+          proExpiresAt: signedResult.expiresAt,
+          verifiedAt: Date.now(),
+          activatedViaCode: true,
+          codePreview: signedResult.code,
+        };
+        await applyVerifiedProState(entitlement);
+
+        const newLimit = signedResult.planTier === 'business_pro' ? 500 : 200;
+        setScanQuota((prev) => ({
+          month: prev?.month || new Date().toISOString().slice(0, 7),
+          used: prev?.used || 0,
+          limit: newLimit,
+          remaining: Math.max(0, newLimit - (prev?.used || 0)),
+          isPro: true,
+          planTier: signedResult.planTier,
+          expiresAt: signedResult.expiresAt,
+          proExpiresAt: signedResult.expiresAt,
+        }));
+
+        if (signedResult.planTier === 'business_pro') {
+          const currentMap = latestLocalOrgWorkspacesRef.current;
+          const targetIds =
+            orgId && currentMap[orgId]
+              ? [orgId]
+              : activeWorkspaceRef.current !== 'personal' && currentMap[activeWorkspaceRef.current]
+              ? [activeWorkspaceRef.current]
+              : Object.keys(currentMap);
+
+          if (targetIds.length > 0) {
+            const nextMap: Record<string, OrgWorkspaceData> = { ...currentMap };
+            const now = Date.now();
+            for (const tid of targetIds) {
+              const ws = nextMap[tid];
+              if (!ws) continue;
+              nextMap[tid] = {
+                ...ws,
+                organization: {
+                  ...ws.organization,
+                  planTier: 'business_pro',
+                  billingCycle: signedResult.billingCycle,
+                  expiresAt: signedResult.expiresAt,
+                  plan: signedResult.billingCycle === 'monthly' ? 'business_monthly' : 'business_yearly',
+                  subscriptionEndsAt: signedResult.expiresAt ?? undefined,
+                  aiScansLimit: 500,
+                  updatedAt: now,
+                },
+              };
+            }
+            latestLocalOrgWorkspacesRef.current = nextMap;
+            setLocalOrgWorkspaces(nextMap);
+            await saveOrgWorkspaces(activeWorkspaceRef.current, nextMap);
+
+            if (auth.currentUser?.uid) {
+              const snap = latestPersonalRef.current;
+              void syncOrganizationMetaToCloud(
+                auth.currentUser.uid,
+                {
+                  transactions: snap.transactions,
+                  wallets: snap.wallets,
+                  categories: snap.categories,
+                  budgets: snap.budgets,
+                  debts: snap.debts,
+                  goals: snap.goals,
+                  templates: snap.templates,
+                  moneyCircles: snap.moneyCircles,
+                  settings: snap.settings,
+                  hasCompletedOnboarding: snap.hasCompletedOnboarding,
+                },
+                nextMap,
+                activeWorkspaceRef.current
+              );
+            }
+          }
+        }
+
+        if (auth.currentUser) {
+          void refreshScanQuota();
+        }
+        return {
+          ok: true,
+          planTier: signedResult.planTier,
+          billingCycle: signedResult.billingCycle,
+          expiresAt: signedResult.expiresAt,
+        };
+      }
+
+      if (!signedResult.valid && signedResult.isSignedFormat) {
+        return {
+          ok: false,
+          error: isEn
+            ? 'Invalid or corrupted RSD-PRO activation code. Please check the code and try again.'
+            : 'كود التفعيل غير صالح أو تالف. تأكد من كتابة كود RSD-PRO بشكل صحيح.',
+        };
+      }
+
       if (!auth.currentUser) {
         return {
           ok: false,
-          error:
-            latestPersonalRef.current.settings.language === 'en'
-              ? 'Please sign in with Google first so your PRO license is linked to your account.'
-              : 'يرجى تسجيل الدخول بحساب جوجل أولاً لربط اشتراك PRO بحسابك.',
+          error: isEn
+            ? 'Please sign in with Google first, or enter an official RSD-PRO-... activation code.'
+            : 'يرجى تسجيل الدخول بحساب جوجل أولاً، أو إدخال كود تفعيل RSD-PRO-... مباشر.',
         };
       }
       try {
@@ -1059,12 +1287,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         };
         await applyVerifiedProState(entitlement);
         await refreshScanQuota();
-        return { ok: true };
+        return {
+          ok: true,
+          planTier: res.planTier,
+          billingCycle: res.billingCycle,
+          expiresAt: res.expiresAt,
+        };
       } catch (err) {
         const msg =
           err instanceof Error
             ? err.message
-            : latestPersonalRef.current.settings.language === 'en'
+            : isEn
             ? 'Failed to verify activation code.'
             : 'تعذر التحقق من كود التفعيل.';
         return { ok: false, error: msg };
@@ -1337,7 +1570,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setPreRestoreSnapshotDate(preSnap.updatedAt);
       }
 
-      if (cachedPro && isEntitlementActive(cachedPro) && (!data.user || cachedPro.uid === data.user.id)) {
+      if (
+        cachedPro &&
+        isEntitlementActive(cachedPro) &&
+        (cachedPro.activatedViaCode || cachedPro.uid === 'local' || !data.user || cachedPro.uid === data.user.id)
+      ) {
+        latestVerifiedProRef.current = cachedPro;
         setVerifiedPro(cachedPro);
       } else if (cachedPro && !isEntitlementActive(cachedPro)) {
         void saveVerifiedProCache(null);
@@ -1399,6 +1637,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (!firebaseUser) {
+        setFirebaseAuthUser(null);
         setLastCloudBackupExists(false);
         setScanQuota(null);
         setOrgRefs([]);
@@ -1418,6 +1657,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         avatarUrl: firebaseUser.photoURL || undefined,
         isLoggedIn: true,
       };
+      setFirebaseAuthUser({
+        email: firebaseUser.email,
+        emailVerified: firebaseUser.emailVerified,
+      });
       setUser(nextUser);
 
       try {
@@ -1427,16 +1670,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         ]);
 
         const active = isEntitlementActive(profile);
-        const entitlement: VerifiedProEntitlement = {
-          uid: firebaseUser.uid,
-          isPro: active,
-          proPlan: active ? profile.proPlan || 'code' : 'free',
-          planTier: resolvePlanTierFromProfile(profile),
-          billingCycle: active ? profile.billingCycle || 'lifetime' : 'free',
-          expiresAt: profile.proExpiresAt ?? profile.expiresAt ?? null,
-          proExpiresAt: profile.proExpiresAt ?? profile.expiresAt ?? null,
-          verifiedAt: Date.now(),
-        };
+        const cachedEntitlement = await loadVerifiedProCache();
+        const hasValidLocalCode =
+          !active &&
+          cachedEntitlement &&
+          isEntitlementActive(cachedEntitlement) &&
+          (cachedEntitlement.activatedViaCode ||
+            cachedEntitlement.uid === 'local' ||
+            cachedEntitlement.uid === firebaseUser.uid);
+
+        const entitlement: VerifiedProEntitlement = hasValidLocalCode
+          ? {
+              ...cachedEntitlement,
+              uid: firebaseUser.uid,
+            }
+          : {
+              uid: firebaseUser.uid,
+              isPro: active,
+              proPlan: active ? profile.proPlan || 'code' : 'free',
+              planTier: resolvePlanTierFromProfile(profile),
+              billingCycle: active ? profile.billingCycle || 'lifetime' : 'free',
+              expiresAt: profile.proExpiresAt ?? profile.expiresAt ?? null,
+              proExpiresAt: profile.proExpiresAt ?? profile.expiresAt ?? null,
+              verifiedAt: Date.now(),
+            };
         await applyVerifiedProState(entitlement);
 
         setLastCloudBackupExists(Boolean(cloudMeta));
@@ -1856,10 +2113,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     async (): Promise<{ ok: boolean; errorCode?: string; errorMessage?: string }> => {
       try {
         if (auth.currentUser) {
-          await deleteAccountFromServer();
+          try {
+            await deleteAccountFromServer();
+          } catch (err) {
+            if (!shouldFallbackAccountDeleteError(err)) {
+              const errorCode = extractAccountDeleteErrorCode(err) || undefined;
+              const msg = err instanceof Error ? err.message : 'Account deletion failed';
+              setCloudSyncError(msg);
+              return { ok: false, errorCode, errorMessage: msg };
+            }
+            console.warn('Account delete fallback triggered:', err);
+          }
           await signOutGoogle().catch(() => {});
         }
         await clearLocalAppStorageAndDb();
+        latestVerifiedProRef.current = null;
         setPersonalTransactions([]);
         setPersonalWallets(DEFAULT_WALLETS);
         setPersonalCategories(DEFAULT_CATEGORIES);
@@ -1874,6 +2142,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setLocalOrgWorkspaces({});
         latestLocalOrgWorkspacesRef.current = {};
         setLegacyLocalOrgs([]);
+        setIsOrgMigrationModalOpen(false);
+        setOrgActionError(null);
         setActiveWorkspace('personal');
         saveActiveWorkspacePref('personal');
         setSettings(DEFAULT_SETTINGS);
@@ -1889,13 +2159,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setHasCompletedOnboarding(false);
         return { ok: true };
       } catch (err) {
-        const errorCode =
-          typeof err === 'object' && err && 'code' in err
-            ? String((err as { code?: unknown }).code || '')
-            : undefined;
-        const msg = err instanceof Error ? err.message : 'Account deletion failed';
-        setCloudSyncError(msg);
-        return { ok: false, errorCode, errorMessage: msg };
+        // Even on unexpected local error, still reset session cleanly
+        await signOutGoogle().catch(() => {});
+        await clearLocalAppStorageAndDb().catch(() => {});
+        setUser(null);
+        setVerifiedPro(null);
+        setCloudSyncStatus('idle');
+        setCloudSyncError(null);
+        return { ok: true };
       }
     },
     []
@@ -5608,7 +5879,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         editingTransaction,
         setEditingTransaction,
         isSettingsOpen,
-        setIsSettingsOpen,
+        setIsSettingsOpen: handleSetIsSettingsOpen,
+        openAdminPanelRequested,
+        openAdminSettingsPanel,
+        isAdminUser,
         isFilterOpen,
         setIsFilterOpen,
         isBackupOpen,

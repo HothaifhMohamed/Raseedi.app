@@ -30,6 +30,7 @@ export const UpgradeModal: React.FC = () => {
     proEntitlement,
     user,
     orgRefs,
+    organizationsList,
     isOrgWorkspace,
     activeOrganization,
     activeOrgSubscriptionState,
@@ -43,10 +44,20 @@ export const UpgradeModal: React.FC = () => {
     t,
   } = useApp();
 
-  const eligibleOrgs = React.useMemo(
-    () => orgRefs.filter((r) => r.role === 'owner' || r.role === 'admin'),
-    [orgRefs]
-  );
+  const eligibleOrgs = React.useMemo(() => {
+    const map = new Map<string, { orgId: string; orgName: string; currency: string }>();
+    for (const r of orgRefs) {
+      if (r.role === 'owner' || r.role === 'admin') {
+        map.set(r.orgId, { orgId: r.orgId, orgName: r.orgName, currency: r.currency || 'EGP' });
+      }
+    }
+    for (const org of organizationsList) {
+      if (org?.id && !map.has(org.id)) {
+        map.set(org.id, { orgId: org.id, orgName: org.name, currency: org.currency || 'EGP' });
+      }
+    }
+    return Array.from(map.values());
+  }, [orgRefs, organizationsList]);
 
   const [tierTab, setTierTab] = useState<'personal_pro' | 'business_pro'>(
     isOrgWorkspace || isBusinessPro ? 'business_pro' : 'personal_pro'
@@ -139,15 +150,6 @@ export const UpgradeModal: React.FC = () => {
     const trimmed = activationCode.trim();
     if (!trimmed) return;
 
-    if (!user?.isLoggedIn) {
-      setCodeError(
-        isRTL
-          ? 'يرجى تسجيل الدخول بحساب جوجل أولاً لربط كود التفعيل بحسابك والتحقق منه عبر الخادم.'
-          : 'Please sign in with Google first to verify and bind your activation code.'
-      );
-      return;
-    }
-
     setIsRedeeming(true);
     try {
       const result = await redeemProCode(trimmed, targetBusinessOrgId);
@@ -162,12 +164,34 @@ export const UpgradeModal: React.FC = () => {
       }
 
       setActivationCode('');
+      const tierLabel =
+        result.planTier === 'business_pro'
+          ? isRTL
+            ? 'Business PRO للأعمال'
+            : 'Business PRO'
+          : isRTL
+          ? 'Personal PRO للأفراد'
+          : 'Personal PRO';
+      const cycleLabel =
+        result.billingCycle === 'monthly'
+          ? isRTL
+            ? 'شهري'
+            : 'Monthly'
+          : result.billingCycle === 'yearly'
+          ? isRTL
+            ? 'سنوي'
+            : 'Yearly'
+          : result.billingCycle === 'lifetime'
+          ? isRTL
+            ? 'مدى الحياة'
+            : 'Lifetime'
+          : '';
       setCodeSuccess(
         isRTL
-          ? 'تم التحقق من الكود وتفعيل الاشتراك على حسابك بنجاح!'
-          : 'Activation code verified! Subscription is now active on your account.'
+          ? `تم تفعيل باقة ${tierLabel}${cycleLabel ? ` (${cycleLabel})` : ''} بنجاح!`
+          : `${tierLabel}${cycleLabel ? ` (${cycleLabel})` : ''} activated successfully!`
       );
-      window.setTimeout(() => setCodeSuccess(null), 3500);
+      window.setTimeout(() => setCodeSuccess(null), 4000);
     } finally {
       setIsRedeeming(false);
     }
@@ -702,14 +726,16 @@ export const UpgradeModal: React.FC = () => {
                   setActivationCode(e.target.value);
                   setCodeError(null);
                 }}
-                placeholder="RASEEDI-XXXX-XXXX-XXXX"
+                placeholder="RSD-PRO-XXXX-XXXX"
                 dir="ltr"
                 disabled={isRedeeming}
+                data-testid="upgrade-license-code-input"
                 className="flex-1 px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs font-mono text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px] disabled:opacity-60"
               />
               <button
                 type="submit"
                 disabled={isRedeeming || !activationCode.trim()}
+                data-testid="upgrade-activate-code-btn"
                 className="px-3.5 py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-semibold hover:opacity-95 transition-opacity min-h-[44px] disabled:opacity-50 shrink-0 flex items-center gap-1.5"
               >
                 {isRedeeming && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
@@ -717,10 +743,10 @@ export const UpgradeModal: React.FC = () => {
               </button>
             </div>
             {codeError && (
-              <p className="text-[11px] text-[var(--color-expense)] font-medium">{codeError}</p>
+              <p data-testid="upgrade-code-error" className="text-[11px] text-[var(--color-expense)] font-medium">{codeError}</p>
             )}
             {codeSuccess && (
-              <p className="text-[11px] text-[var(--color-income)] font-medium">{codeSuccess}</p>
+              <p data-testid="upgrade-code-success" className="text-[11px] text-[var(--color-income)] font-medium">{codeSuccess}</p>
             )}
           </form>
 

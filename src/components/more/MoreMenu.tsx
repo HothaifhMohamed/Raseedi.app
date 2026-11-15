@@ -27,6 +27,7 @@ import {
   Building2,
   CircleDollarSign,
   UploadCloud,
+  KeyRound,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ReportsModal } from './ReportsModal';
@@ -62,6 +63,8 @@ export const MoreMenu: React.FC = () => {
     setIsUpgradeModalOpen,
     setIsBackupOpen,
     setIsSettingsOpen,
+    isAdminUser,
+    openAdminSettingsPanel,
     t,
     isRTL,
   } = useApp();
@@ -618,6 +621,30 @@ export const MoreMenu: React.FC = () => {
             </div>
             <ArrowIcon className="w-4 h-4 text-[var(--color-muted)]" />
           </button>
+
+          {isAdminUser && (
+            <button
+              type="button"
+              data-testid="more-admin-panel-btn"
+              onClick={() => openAdminSettingsPanel()}
+              className="w-full p-3.5 flex items-center justify-between text-xs hover:bg-[var(--color-bg)] transition-colors text-start min-h-[44px]"
+            >
+              <div className="flex items-center gap-3">
+                <KeyRound className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
+                <div>
+                  <div className="font-semibold text-[var(--color-ink)]">
+                    {isRTL ? 'لوحة تحكم المدير ومولّد الأكواد' : 'Admin Console & Code Generator'}
+                  </div>
+                  <div className="text-[11px] text-[var(--color-muted)]">
+                    {isRTL
+                      ? 'إصدار أكواد PRO وربطها بقاعدة البيانات (للمدير فقط)'
+                      : 'Issue PRO codes & link to database (Admin only)'}
+                  </div>
+                </div>
+              </div>
+              <ArrowIcon className="w-4 h-4 text-[var(--color-muted)]" />
+            </button>
+          )}
         </div>
       </div>
 

@@ -12,7 +12,16 @@ export interface EntitlementContextValue {
   refreshScanQuota: () => Promise<void>;
   isUpgradeModalOpen: boolean;
   setIsUpgradeModalOpen: (open: boolean) => void;
-  redeemProCode: (code: string, orgId?: string) => Promise<{ ok: boolean; error?: string }>;
+  redeemProCode: (
+    code: string,
+    orgId?: string
+  ) => Promise<{
+    ok: boolean;
+    error?: string;
+    planTier?: PlanTier;
+    billingCycle?: VerifiedProEntitlement['billingCycle'];
+    expiresAt?: number | null;
+  }>;
   startBusinessTrial: (orgId?: string) => Promise<{ ok: boolean; error?: string }>;
   devActivateProPreview: (tier?: 'personal_pro' | 'business_pro') => void;
   restorePurchases: () => Promise<boolean>;

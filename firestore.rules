@@ -30,6 +30,13 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    function isAdmin() {
+      return isVerifiedUser()
+        && ('email' in request.auth.token)
+        && request.auth.token.email is string
+        && request.auth.token.email.lower() == 'hapaypal2003@gmail.com';
+    }
+
     // Single-read Organization RBAC & Subscription helpers
     function memberDoc(orgId) {
       return get(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid));
@@ -342,9 +349,79 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidAdminIssuedCode(data, codeHash) {
+      return data.keys().hasAll(['codeHash', 'tier', 'cycle', 'planTier', 'issuedByUid', 'issuedByEmail', 'createdAt'])
+        && data.keys().hasOnly([
+          'codeHash',
+          'tier',
+          'cycle',
+          'planTier',
+          'issuedByUid',
+          'issuedByEmail',
+          'targetEmail',
+          'usedBy',
+          'usedAt',
+          'createdAt'
+        ])
+        && data.codeHash is string && data.codeHash == codeHash && isValidId(data.codeHash)
+        && data.tier in ['pro', 'business']
+        && data.cycle in ['monthly', 'yearly', 'lifetime']
+        && data.planTier in ['personal_pro', 'business_pro']
+        && data.issuedByUid is string && data.issuedByUid.size() > 0 && data.issuedByUid.size() <= 128
+        && data.issuedByEmail is string && data.issuedByEmail.size() > 0 && data.issuedByEmail.size() <= 254
+        && (!('targetEmail' in data) || data.targetEmail == null || (data.targetEmail is string && data.targetEmail.size() <= 254))
+        && (!('usedBy' in data) || data.usedBy == null || (data.usedBy is string && data.usedBy.size() <= 128))
+        && (!('usedAt' in data) || data.usedAt == null || data.usedAt is timestamp)
+        && data.createdAt is timestamp;
+    }
+
     // Server-only collections: never accessible from clients
     match /activationCodes/{codeHash} {
       allow read, write: if false;
+    }
+
+    // Admin-issued hashed PRO activation codes (creator = verified admin; redeemers can only claim matching hash once)
+    match /adminIssuedCodes/{codeHash} {
+      allow get: if isValidId(codeHash) && (isAdmin() || isVerifiedUser());
+      allow list: if isAdmin();
+      allow create: if isValidId(codeHash)
+        && isAdmin()
+        && isValidAdminIssuedCode(incoming(), codeHash)
+        && incoming().issuedByUid == request.auth.uid
+        && incoming().issuedByEmail.lower() == request.auth.token.email.lower()
+        && (!('usedBy' in incoming()) || incoming().usedBy == null)
+        && (!('usedAt' in incoming()) || incoming().usedAt == null)
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(codeHash)
+        && isValidAdminIssuedCode(incoming(), codeHash)
+        && (
+          isAdmin() ||
+          (
+            isVerifiedUser()
+            && (!('usedBy' in existing()) || existing().usedBy == null)
+            && incoming().usedBy == request.auth.uid
+            && incoming().usedAt == request.time
+            && incoming().codeHash == existing().codeHash
+            && incoming().tier == existing().tier
+            && incoming().cycle == existing().cycle
+            && incoming().planTier == existing().planTier
+            && incoming().issuedByUid == existing().issuedByUid
+            && incoming().issuedByEmail == existing().issuedByEmail
+            && incoming().createdAt == existing().createdAt
+            && (
+              !('targetEmail' in existing())
+              || existing().targetEmail == null
+              || existing().targetEmail == ''
+              || (
+                ('email' in request.auth.token)
+                && request.auth.token.email is string
+                && existing().targetEmail.lower() == request.auth.token.email.lower()
+              )
+            )
+            && incoming().diff(existing()).affectedKeys().hasOnly(['usedBy', 'usedAt'])
+          )
+        );
+      allow delete: if isValidId(codeHash) && isAdmin();
     }
 
     match /proLicenses/{licenseId} {

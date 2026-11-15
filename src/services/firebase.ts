@@ -14,10 +14,16 @@ import {
   initializeFirestore,
   persistentLocalCache,
   persistentMultipleTabManager,
+  collection,
   doc,
   getDoc,
+  getDocs,
+  limit,
+  orderBy,
+  query,
   setDoc,
   updateDoc,
+  deleteDoc,
   writeBatch,
   serverTimestamp,
   Firestore,
@@ -48,6 +54,13 @@ import {
   ProPlanCode,
   VerifiedProEntitlement,
 } from '../types';
+import { shouldFallbackAccountDeleteError } from './accountDeletion';
+import {
+  AdminCouponCycle,
+  AdminCouponTier,
+  computeLicenseCodeHash,
+  isAuthorizedAdminUser,
+} from './licenseCodes';
 
 const app = initializeApp(firebaseConfig);
 
@@ -744,6 +757,247 @@ export async function redeemProCodeWithServer(
   };
 }
 
+export interface AdminIssuedCodeRecord {
+  codeHash: string;
+  tier: AdminCouponTier;
+  cycle: AdminCouponCycle;
+  planTier: PlanTier;
+  issuedByUid: string;
+  issuedByEmail: string;
+  targetEmail: string | null;
+  usedBy: string | null;
+  usedAt: number | null;
+  createdAtMs: number;
+}
+
+export async function registerAdminIssuedCodeInDb(params: {
+  code: string;
+  tier: AdminCouponTier;
+  cycle: AdminCouponCycle;
+  planTier: PlanTier;
+  targetEmail?: string;
+}): Promise<{ savedCloud: boolean; savedServer: boolean; codeHash: string }> {
+  const codeHash = computeLicenseCodeHash(params.code);
+  const currentUser = auth.currentUser;
+  if (
+    !currentUser ||
+    !isAuthorizedAdminUser({
+      email: currentUser.email,
+      isLoggedIn: true,
+      emailVerified: currentUser.emailVerified,
+    })
+  ) {
+    return { savedCloud: false, savedServer: false, codeHash };
+  }
+
+  const normalizedTarget = params.targetEmail?.trim().toLowerCase() || null;
+  const docPath = `adminIssuedCodes/${codeHash}`;
+  let savedCloud = false;
+  let savedServer = false;
+
+  try {
+    await setDoc(doc(db, 'adminIssuedCodes', codeHash), {
+      codeHash,
+      tier: params.tier,
+      cycle: params.cycle,
+      planTier: params.planTier,
+      issuedByUid: currentUser.uid,
+      issuedByEmail: (currentUser.email || '').trim().toLowerCase(),
+      targetEmail: normalizedTarget,
+      usedBy: null,
+      usedAt: null,
+      createdAt: serverTimestamp(),
+    });
+    savedCloud = true;
+  } catch (error) {
+    try {
+      handleFirestoreError(error, OperationType.WRITE, docPath);
+    } catch {
+      // Best-effort fallback: code remains cryptographically valid offline/local-first
+    }
+  }
+
+  const adminReady = await isCloudAdminReady();
+  if (adminReady) {
+    try {
+      const idToken = await currentUser.getIdToken();
+      const resp = await fetch('/api/admin/register-code', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          code: params.code,
+          tier: params.tier,
+          cycle: params.cycle,
+          ...(normalizedTarget ? { targetEmail: normalizedTarget } : {}),
+        }),
+      });
+      if (resp.ok) {
+        savedServer = true;
+      }
+    } catch {
+      // Server registration optional when offline or static deployment
+    }
+  }
+
+  return { savedCloud, savedServer, codeHash };
+}
+
+export async function claimIssuedCodeInDb(
+  rawCode: string,
+  orgId?: string
+): Promise<{
+  ok: boolean;
+  conflict?: 'CODE_ALREADY_USED' | 'TARGET_EMAIL_MISMATCH' | 'CODE_ALREADY_USED_OTHER_ORG';
+  cloudSynced: boolean;
+  serverSynced: boolean;
+}> {
+  const currentUser = auth.currentUser;
+  if (!currentUser) {
+    return { ok: true, cloudSynced: false, serverSynced: false };
+  }
+
+  const codeHash = computeLicenseCodeHash(rawCode);
+  const docPath = `adminIssuedCodes/${codeHash}`;
+  let cloudSynced = false;
+  let serverSynced = false;
+
+  try {
+    const ref = doc(db, 'adminIssuedCodes', codeHash);
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
+      const data = snap.data() as {
+        usedBy?: string | null;
+        targetEmail?: string | null;
+      };
+      if (data.usedBy && data.usedBy !== currentUser.uid) {
+        return {
+          ok: false,
+          conflict: 'CODE_ALREADY_USED',
+          cloudSynced: false,
+          serverSynced: false,
+        };
+      }
+      const expectedEmail = typeof data.targetEmail === 'string' ? data.targetEmail.trim().toLowerCase() : '';
+      const userEmail = (currentUser.email || '').trim().toLowerCase();
+      if (expectedEmail && expectedEmail !== userEmail) {
+        return {
+          ok: false,
+          conflict: 'TARGET_EMAIL_MISMATCH',
+          cloudSynced: false,
+          serverSynced: false,
+        };
+      }
+      if (!data.usedBy && currentUser.emailVerified) {
+        await updateDoc(ref, {
+          usedBy: currentUser.uid,
+          usedAt: serverTimestamp(),
+        });
+        cloudSynced = true;
+      } else if (data.usedBy === currentUser.uid) {
+        cloudSynced = true;
+      }
+    }
+  } catch (error) {
+    try {
+      handleFirestoreError(error, OperationType.WRITE, docPath);
+    } catch {
+      // Ignore offline/network issues so valid cryptographic codes still activate locally
+    }
+  }
+
+  const adminReady = await isCloudAdminReady();
+  if (adminReady) {
+    try {
+      await redeemProCodeWithServer(rawCode, orgId);
+      serverSynced = true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      if (
+        msg.includes('CODE_ALREADY_USED_OTHER_ORG') ||
+        msg.includes('مؤسسة أخرى')
+      ) {
+        return {
+          ok: false,
+          conflict: 'CODE_ALREADY_USED_OTHER_ORG',
+          cloudSynced,
+          serverSynced: false,
+        };
+      }
+      if (msg.includes('CODE_ALREADY_USED') || msg.includes('بحساب آخر')) {
+        return {
+          ok: false,
+          conflict: 'CODE_ALREADY_USED',
+          cloudSynced,
+          serverSynced: false,
+        };
+      }
+      if (msg.includes('TARGET_EMAIL_MISMATCH') || msg.includes('بريد إلكتروني آخر')) {
+        return {
+          ok: false,
+          conflict: 'TARGET_EMAIL_MISMATCH',
+          cloudSynced,
+          serverSynced: false,
+        };
+      }
+    }
+  }
+
+  return { ok: true, cloudSynced, serverSynced };
+}
+
+export async function fetchRecentAdminIssuedCodes(maxItems = 10): Promise<AdminIssuedCodeRecord[]> {
+  const currentUser = auth.currentUser;
+  if (
+    !currentUser ||
+    !isAuthorizedAdminUser({
+      email: currentUser.email,
+      isLoggedIn: true,
+      emailVerified: currentUser.emailVerified,
+    })
+  ) {
+    return [];
+  }
+
+  const colPath = 'adminIssuedCodes';
+  try {
+    const q = query(
+      collection(db, colPath),
+      orderBy('createdAt', 'desc'),
+      limit(maxItems)
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => {
+      const raw = d.data() as Record<string, unknown>;
+      const createdAtTs = raw.createdAt as { toMillis?: () => number } | undefined;
+      const usedAtTs = raw.usedAt as { toMillis?: () => number } | undefined;
+      return {
+        codeHash: String(raw.codeHash || d.id),
+        tier: raw.tier === 'business' ? 'business' : 'pro',
+        cycle:
+          raw.cycle === 'monthly' || raw.cycle === 'yearly' || raw.cycle === 'lifetime'
+            ? raw.cycle
+            : 'yearly',
+        planTier: raw.planTier === 'business_pro' ? 'business_pro' : 'personal_pro',
+        issuedByUid: String(raw.issuedByUid || ''),
+        issuedByEmail: String(raw.issuedByEmail || ''),
+        targetEmail: typeof raw.targetEmail === 'string' ? raw.targetEmail : null,
+        usedBy: typeof raw.usedBy === 'string' ? raw.usedBy : null,
+        usedAt: typeof usedAtTs?.toMillis === 'function' ? usedAtTs.toMillis() : null,
+        createdAtMs: typeof createdAtTs?.toMillis === 'function' ? createdAtTs.toMillis() : Date.now(),
+      };
+    });
+  } catch (error) {
+    try {
+      handleFirestoreError(error, OperationType.LIST, colPath);
+    } catch {
+      return [];
+    }
+  }
+}
+
 export async function startBusinessTrialWithServer(orgId?: string): Promise<{
   isPro: boolean;
   proPlan: ProPlanCode;
@@ -1056,23 +1310,84 @@ export async function deleteOrgOnServer(orgId: string, confirmName: string): Pro
   }
 }
 
-export async function deleteAccountFromServer(): Promise<void> {
-  const idToken = await getRequiredIdToken();
-  const response = await fetch('/api/delete-account', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-    },
-  });
+async function cleanupUserCloudDataBestEffort(uid: string): Promise<void> {
+  if (!uid) return;
+  try {
+    const metaRef = doc(db, 'users', uid, 'backup', 'meta');
+    let chunkCount = 0;
+    try {
+      const metaSnap = await getDoc(metaRef);
+      if (metaSnap.exists()) {
+        chunkCount = Math.max(0, Math.min(100, Number(metaSnap.data()?.chunkCount || 0)));
+      }
+    } catch {
+      // Ignore read errors (offline or missing permissions)
+    }
 
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => ({}))) as { message?: string; error?: string };
-    const err = new Error(payload.message || payload.error || 'DELETE_ACCOUNT_FAILED') as Error & {
-      code?: string;
-    };
-    err.code = payload.error;
-    throw err;
+    const deleteTasks: Promise<unknown>[] = [];
+    for (let i = 0; i < chunkCount; i++) {
+      deleteTasks.push(
+        deleteDoc(doc(db, 'users', uid, 'backupChunks', `chunk_${i}`)).catch(() => {})
+      );
+    }
+    deleteTasks.push(deleteDoc(metaRef).catch(() => {}));
+    deleteTasks.push(deleteDoc(doc(db, 'users', uid, 'backups', 'latest')).catch(() => {}));
+    await Promise.all(deleteTasks);
+
+    await deleteDoc(doc(db, 'users', uid)).catch(() => {});
+  } catch {
+    // Best-effort cleanup only; never block local deletion + signOut
   }
+}
+
+export async function deleteAccountFromServer(): Promise<{ mode: 'server' | 'local_fallback' }> {
+  const currentUser = auth.currentUser;
+  if (!currentUser) {
+    return { mode: 'local_fallback' };
+  }
+
+  const uid = currentUser.uid;
+  const adminReady = await isCloudAdminReady();
+
+  if (adminReady) {
+    try {
+      const idToken = await getRequiredIdToken();
+      const response = await fetch('/api/delete-account', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+        },
+      });
+
+      if (response.ok) {
+        return { mode: 'server' };
+      }
+
+      const payload = (await response.json().catch(() => ({}))) as {
+        message?: string;
+        error?: string;
+      };
+      const serverErr = new Error(
+        payload.message || payload.error || 'DELETE_ACCOUNT_FAILED'
+      ) as Error & { code?: string };
+      serverErr.code = payload.error;
+
+      if (!shouldFallbackAccountDeleteError(serverErr)) {
+        throw serverErr;
+      }
+    } catch (err) {
+      if (!shouldFallbackAccountDeleteError(err)) {
+        throw err;
+      }
+      console.warn('Server account delete unavailable, falling back to local wipe + signOut:', err);
+    }
+  }
+
+  // Smart Local-first / Offline-first fallback:
+  // Best-effort client Firestore cleanup + clean Firebase signOut(auth)
+  await cleanupUserCloudDataBestEffort(uid);
+  await signOutGoogle().catch(() => {});
+  return { mode: 'local_fallback' };
 }
 
 // ---------------------------------------------------------------------------

@@ -31,6 +31,10 @@ import {
   fetchFirestoreDocumentWithToken,
   isFirestorePermissionDeniedError,
 } from './src/services/firestoreRest';
+import {
+  isAuthorizedAdminUser,
+  verifySignedLicenseCode,
+} from './src/services/licenseCodes';
 
 dotenv.config();
 
@@ -305,10 +309,21 @@ function resolveActivationPlanDetails(
   const now = Date.now();
   const base = options?.baseMs && options.baseMs > now ? options.baseMs : now;
 
+  const rawTier = (options?.tier || '').toLowerCase();
+  const rawCycle = (options?.cycle || '').toLowerCase();
+  if ((rawTier === 'business' || rawTier === 'business_pro') && rawCycle === 'lifetime') {
+    return {
+      proPlan: 'code',
+      planTier: 'business_pro',
+      billingCycle: 'lifetime',
+      expiresAt: null,
+    };
+  }
+
   let canonicalPlan = plan;
   if (!canonicalPlan && options?.tier) {
-    const t = options.tier.toLowerCase();
-    const c = (options.cycle || '').toLowerCase();
+    const t = rawTier;
+    const c = rawCycle;
     if (t === 'business' || t === 'business_pro') {
       canonicalPlan = c === 'yearly' ? 'business_yearly' : 'business_monthly';
     } else if (t === 'personal' || t === 'personal_pro') {
@@ -1064,6 +1079,70 @@ Return JSON matching the schema with:
   app.use('/api', express.json({ limit: '64kb' }));
 
   app.post(
+    '/api/admin/register-code',
+    redeemIpLimiter,
+    requireFirebaseAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const authUser = req.authUser!;
+      if (
+        !isAuthorizedAdminUser({
+          email: authUser.email,
+          isLoggedIn: true,
+          emailVerified: authUser.email_verified,
+        })
+      ) {
+        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات المدير مطلوبة.' });
+        return;
+      }
+
+      const rawCode = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
+      const targetEmail =
+        typeof req.body?.targetEmail === 'string' && req.body.targetEmail.trim()
+          ? req.body.targetEmail.trim().toLowerCase().slice(0, 254)
+          : null;
+
+      const verified = verifySignedLicenseCode(rawCode);
+      if (!verified.valid) {
+        res.status(400).json({ error: 'INVALID_CODE', message: 'كود التفعيل غير صالح.' });
+        return;
+      }
+
+      if (!adminDbReady) {
+        respondCloudAdminUnavailable(res);
+        return;
+      }
+
+      const codeHash = hashActivationCodeServer(verified.code);
+      try {
+        const codeRef = adminDb.collection('activationCodes').doc(codeHash);
+        const snap = await codeRef.get();
+        if (!snap.exists) {
+          await codeRef.set({
+            plan: verified.proPlan,
+            tier: verified.planTier,
+            cycle: verified.billingCycle,
+            targetEmail,
+            issuedByUid: authUser.uid,
+            issuedByEmail: (authUser.email || '').toLowerCase(),
+            usedBy: null,
+            usedOrgId: null,
+            createdAt: FieldValue.serverTimestamp(),
+          });
+        }
+        res.json({ ok: true, codeHash });
+      } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(res);
+          return;
+        }
+        console.error('Admin register code error:', err);
+        res.status(500).json({ error: 'REGISTER_CODE_FAILED' });
+      }
+    }
+  );
+
+  app.post(
     '/api/redeem-code',
     redeemIpLimiter,
     requireFirebaseAuth,
@@ -1087,34 +1166,87 @@ Return JSON matching the schema with:
       }
 
       const codeHash = hashActivationCodeServer(rawCode);
+      const signedCheck = verifySignedLicenseCode(rawCode);
 
       try {
         const result = await adminDb.runTransaction(async (tx) => {
           const codeRef = adminDb.collection('activationCodes').doc(codeHash);
+          const adminIssuedRef = adminDb.collection('adminIssuedCodes').doc(codeHash);
           const userRef = adminDb.collection('users').doc(uid);
           const orgRef = targetOrgId ? adminDb.collection('organizations').doc(targetOrgId) : null;
           const memberRef = orgRef ? orgRef.collection('members').doc(uid) : null;
 
-          const [codeSnap, userSnap, orgSnap, memberSnap] = await Promise.all([
+          const [codeSnap, adminIssuedSnap, userSnap, orgSnap, memberSnap] = await Promise.all([
             tx.get(codeRef),
+            tx.get(adminIssuedRef),
             tx.get(userRef),
             orgRef ? tx.get(orgRef) : Promise.resolve(null),
             memberRef ? tx.get(memberRef) : Promise.resolve(null),
           ]);
 
-          if (!codeSnap.exists) {
-            return { status: 404 as const, error: 'INVALID_CODE', message: 'كود التفعيل غير صحيح.' };
+          const adminIssuedData = adminIssuedSnap.exists
+            ? (adminIssuedSnap.data() as {
+                usedBy?: string | null;
+                targetEmail?: string | null;
+              })
+            : null;
+
+          if (adminIssuedData?.usedBy && adminIssuedData.usedBy !== uid) {
+            return {
+              status: 409 as const,
+              error: 'CODE_ALREADY_USED',
+              message: 'تم استخدام هذا الكود مسبقاً بحساب آخر.',
+            };
           }
 
-          const codeData = codeSnap.data() as {
+          if (
+            adminIssuedData?.targetEmail &&
+            adminIssuedData.targetEmail.trim().toLowerCase() !== email.trim().toLowerCase()
+          ) {
+            return {
+              status: 403 as const,
+              error: 'TARGET_EMAIL_MISMATCH',
+              message: 'هذا الكود مخصص لبريد إلكتروني آخر.',
+            };
+          }
+
+          let codeData: {
             plan?: string;
             tier?: string;
             cycle?: string;
             seats?: number;
             extraSeats?: number;
+            targetEmail?: string | null;
             usedBy?: string | null;
             usedOrgId?: string | null;
           };
+          let isFreshSignedCode = false;
+
+          if (!codeSnap.exists) {
+            if (!signedCheck.valid) {
+              return { status: 404 as const, error: 'INVALID_CODE', message: 'كود التفعيل غير صحيح.' };
+            }
+            codeData = {
+              plan: signedCheck.proPlan,
+              tier: signedCheck.planTier,
+              cycle: signedCheck.billingCycle,
+              usedBy: null,
+            };
+            isFreshSignedCode = true;
+          } else {
+            codeData = codeSnap.data() as typeof codeData;
+          }
+
+          if (
+            codeData.targetEmail &&
+            codeData.targetEmail.trim().toLowerCase() !== email.trim().toLowerCase()
+          ) {
+            return {
+              status: 403 as const,
+              error: 'TARGET_EMAIL_MISMATCH',
+              message: 'هذا الكود مخصص لبريد إلكتروني آخر.',
+            };
+          }
 
           if (codeData.usedBy && codeData.usedBy !== uid) {
             return {
@@ -1209,10 +1341,27 @@ Return JSON matching the schema with:
             });
           }
 
-          if (!codeData.usedBy) {
+          if (isFreshSignedCode) {
+            tx.set(codeRef, {
+              plan: resolved.proPlan,
+              tier: resolved.planTier,
+              cycle: resolved.billingCycle,
+              usedBy: uid,
+              usedOrgId: targetOrgId || null,
+              usedAt: FieldValue.serverTimestamp(),
+              createdAt: FieldValue.serverTimestamp(),
+            });
+          } else if (!codeData.usedBy) {
             tx.update(codeRef, {
               usedBy: uid,
               usedOrgId: targetOrgId || null,
+              usedAt: FieldValue.serverTimestamp(),
+            });
+          }
+
+          if (adminIssuedSnap.exists && !adminIssuedData?.usedBy) {
+            tx.update(adminIssuedRef, {
+              usedBy: uid,
               usedAt: FieldValue.serverTimestamp(),
             });
           }
