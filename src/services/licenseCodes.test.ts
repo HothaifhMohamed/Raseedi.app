@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   ADMIN_PANEL_PASSCODE,
   AUTHORIZED_ADMIN_EMAILS,
+  BUSINESS_LICENSE_CODE_PREFIX,
   LICENSE_CODE_PREFIX,
   computeLicenseCodeHash,
   generateAdminLicenseCode,
@@ -56,13 +57,16 @@ describe('licenseCodes admin gate and cryptographic coupon engine', () => {
     assert.equal(verifyAdminPassword(''), false);
   });
 
-  it('generates unique RSD-PRO-* codes for each call', () => {
+  it('generates unique RSD-PRO-* and RSD-BIZ-* codes for each tier', () => {
     const c1 = generateAdminLicenseCode({ tier: 'pro', cycle: 'monthly' });
     const c2 = generateAdminLicenseCode({ tier: 'pro', cycle: 'monthly' });
+    const b1 = generateAdminLicenseCode({ tier: 'business', cycle: 'yearly' });
     assert.ok(c1.startsWith(LICENSE_CODE_PREFIX));
     assert.ok(c2.startsWith(LICENSE_CODE_PREFIX));
+    assert.ok(b1.startsWith(BUSINESS_LICENSE_CODE_PREFIX));
     assert.notEqual(c1, c2);
     assert.equal(isSignedLicenseFormat(c1), true);
+    assert.equal(isSignedLicenseFormat(b1), true);
   });
 
   it('round-trips Personal PRO monthly, yearly, and lifetime codes accurately', () => {
@@ -100,11 +104,12 @@ describe('licenseCodes admin gate and cryptographic coupon engine', () => {
     }
   });
 
-  it('round-trips Business PRO monthly, yearly, and lifetime codes accurately', () => {
+  it('round-trips Business PRO monthly, yearly, and lifetime RSD-BIZ codes accurately', () => {
     const fixedNow = 1_760_000_000_000;
     const dayMs = 24 * 60 * 60 * 1000;
 
     const bizYearly = generateAdminLicenseCode({ tier: 'business', cycle: 'yearly', nonce: 'BIZ999' });
+    assert.ok(bizYearly.startsWith('RSD-BIZ-'));
     const resBiz = verifySignedLicenseCode(bizYearly, fixedNow);
     assert.equal(resBiz.valid, true);
     if (resBiz.valid) {
@@ -115,6 +120,7 @@ describe('licenseCodes admin gate and cryptographic coupon engine', () => {
     }
 
     const bizLifetime = generateAdminLicenseCode({ tier: 'business', cycle: 'lifetime', nonce: 'BIZ888' });
+    assert.ok(bizLifetime.startsWith('RSD-BIZ-'));
     const resBizLife = verifySignedLicenseCode(bizLifetime, fixedNow);
     assert.equal(resBizLife.valid, true);
     if (resBizLife.valid) {
@@ -124,7 +130,7 @@ describe('licenseCodes admin gate and cryptographic coupon engine', () => {
     }
   });
 
-  it('rejects tampered or forged RSD-PRO codes strictly', () => {
+  it('rejects tampered or forged RSD-PRO and RSD-BIZ codes strictly', () => {
     const valid = generateAdminLicenseCode({ tier: 'business', cycle: 'lifetime', nonce: 'ABC123' });
     // Mutate signature last char
     const lastChar = valid[valid.length - 1];
@@ -143,7 +149,7 @@ describe('licenseCodes admin gate and cryptographic coupon engine', () => {
     const r2 = verifySignedLicenseCode(tamperedTier);
     assert.equal(r2.valid, false);
 
-    // Non-RSD-PRO legacy codes return isSignedFormat = false
+    // Non-RSD-PRO/RSD-BIZ legacy codes return isSignedFormat = false
     const r3 = verifySignedLicenseCode('RASEEDI-1234-5678');
     assert.equal(r3.valid, false);
     if (!r3.valid) {

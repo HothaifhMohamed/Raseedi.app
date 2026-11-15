@@ -11,7 +11,17 @@ import {
   initializeTestEnvironment,
   RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { deleteDoc, doc, getDoc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+  writeBatch,
+} from 'firebase/firestore';
 
 let testEnv: RulesTestEnvironment;
 
@@ -250,3 +260,181 @@ test('Expired Business subscription past 7-day grace puts org in read-only mode'
     })
   );
 });
+
+test('Coupons collection restricts creation/listing to Hapaypal2003@gmail.com and enforces atomic redemption', async () => {
+  const superAdminDb = testEnv
+    .authenticatedContext('admin_uid_1', {
+      email: 'Hapaypal2003@gmail.com',
+      email_verified: true,
+    })
+    .firestore();
+  const spoofedAdminDb = testEnv
+    .authenticatedContext('spoof_admin_uid', {
+      email: 'Hapaypal2003@gmail.com',
+      email_verified: false,
+    })
+    .firestore();
+  const userDb = authContext(OWNER_UID).firestore();
+
+  const code = 'RSD-BIZ-BYTEST01-ABCDEFGH';
+
+  // Non-admin and unverified email-spoofed user cannot create or list coupons
+  await assertFails(
+    setDoc(doc(userDb, 'coupons', code), {
+      code,
+      tier: 'business',
+      planTier: 'business_pro',
+      cycle: 'yearly',
+      status: 'unused',
+      used: false,
+      usedBy: null,
+      usedAt: null,
+      createdByUid: OWNER_UID,
+      createdByEmail: `${OWNER_UID}@raseedi.test`,
+      createdAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    setDoc(doc(spoofedAdminDb, 'coupons', code), {
+      code,
+      tier: 'business',
+      planTier: 'business_pro',
+      cycle: 'yearly',
+      status: 'unused',
+      used: false,
+      usedBy: null,
+      usedAt: null,
+      createdByUid: 'spoof_admin_uid',
+      createdByEmail: 'hapaypal2003@gmail.com',
+      createdAt: serverTimestamp(),
+    })
+  );
+  await assertFails(getDocs(collection(userDb, 'coupons')));
+
+  // Verified admin creates unused coupon
+  await assertSucceeds(
+    setDoc(doc(superAdminDb, 'coupons', code), {
+      code,
+      tier: 'business',
+      planTier: 'business_pro',
+      cycle: 'yearly',
+      status: 'unused',
+      used: false,
+      usedBy: null,
+      usedAt: null,
+      createdByUid: 'admin_uid_1',
+      createdByEmail: 'hapaypal2003@gmail.com',
+      createdAt: serverTimestamp(),
+    })
+  );
+
+  // User creates initial free profile
+  await assertSucceeds(
+    setDoc(doc(userDb, 'users', OWNER_UID), {
+      uid: OWNER_UID,
+      email: `${OWNER_UID}@raseedi.test`,
+      isPro: false,
+      proActive: false,
+      proPlan: 'free',
+      planTier: 'free',
+      billingCycle: 'free',
+      expiresAt: null,
+      proExpiresAt: null,
+      hasUsedBusinessTrial: false,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Non-atomic coupon update (without upgrading user) fails
+  await assertFails(
+    updateDoc(doc(userDb, 'coupons', code), {
+      used: true,
+      status: 'used',
+      usedBy: OWNER_UID,
+      usedAt: serverTimestamp(),
+    })
+  );
+
+  // Forging lifetime expiration on a yearly coupon fails
+  const badBatch = writeBatch(userDb);
+  badBatch.update(doc(userDb, 'coupons', code), {
+    used: true,
+    status: 'used',
+    usedBy: OWNER_UID,
+    usedAt: serverTimestamp(),
+  });
+  badBatch.update(doc(userDb, 'users', OWNER_UID), {
+    isPro: true,
+    proActive: true,
+    planTier: 'business_pro',
+    proPlan: 'business_yearly',
+    billingCycle: 'yearly',
+    expiresAt: null,
+    proExpiresAt: null,
+    redeemedCouponCode: code,
+    updatedAt: serverTimestamp(),
+  });
+  await assertFails(badBatch.commit());
+
+  // Valid atomic batch redemption succeeds
+  const expiry = Date.now() + 365 * 86400000;
+  const goodBatch = writeBatch(userDb);
+  goodBatch.update(doc(userDb, 'coupons', code), {
+    used: true,
+    status: 'used',
+    usedBy: OWNER_UID,
+    usedAt: serverTimestamp(),
+  });
+  goodBatch.update(doc(userDb, 'users', OWNER_UID), {
+    isPro: true,
+    proActive: true,
+    planTier: 'business_pro',
+    proPlan: 'business_yearly',
+    billingCycle: 'yearly',
+    expiresAt: expiry,
+    proExpiresAt: expiry,
+    redeemedCouponCode: code,
+    updatedAt: serverTimestamp(),
+  });
+  await assertSucceeds(goodBatch.commit());
+
+  // Reusing already-used coupon fails even for another user
+  const outsiderDb = authContext(OUTSIDER_UID).firestore();
+  await assertSucceeds(
+    setDoc(doc(outsiderDb, 'users', OUTSIDER_UID), {
+      uid: OUTSIDER_UID,
+      email: `${OUTSIDER_UID}@raseedi.test`,
+      isPro: false,
+      proActive: false,
+      proPlan: 'free',
+      planTier: 'free',
+      billingCycle: 'free',
+      expiresAt: null,
+      proExpiresAt: null,
+      hasUsedBusinessTrial: false,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  const replayBatch = writeBatch(outsiderDb);
+  replayBatch.update(doc(outsiderDb, 'coupons', code), {
+    used: true,
+    status: 'used',
+    usedBy: OUTSIDER_UID,
+    usedAt: serverTimestamp(),
+  });
+  replayBatch.update(doc(outsiderDb, 'users', OUTSIDER_UID), {
+    isPro: true,
+    proActive: true,
+    planTier: 'business_pro',
+    proPlan: 'business_yearly',
+    billingCycle: 'yearly',
+    expiresAt: expiry,
+    proExpiresAt: expiry,
+    redeemedCouponCode: code,
+    updatedAt: serverTimestamp(),
+  });
+  await assertFails(replayBatch.commit());
+});
+

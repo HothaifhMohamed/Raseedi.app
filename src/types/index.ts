@@ -429,6 +429,7 @@ export interface AppSettings {
 export interface VerifiedProEntitlement {
   uid: string;
   isPro: boolean;
+  proActive?: boolean;
   proPlan: ProPlanCode;
   planTier?: PlanTier;
   billingCycle?: BillingCycle;

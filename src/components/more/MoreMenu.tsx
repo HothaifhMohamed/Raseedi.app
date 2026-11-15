@@ -63,6 +63,7 @@ export const MoreMenu: React.FC = () => {
     setIsUpgradeModalOpen,
     setIsBackupOpen,
     setIsSettingsOpen,
+    user,
     isAdminUser,
     openAdminSettingsPanel,
     t,
@@ -622,7 +623,7 @@ export const MoreMenu: React.FC = () => {
             <ArrowIcon className="w-4 h-4 text-[var(--color-muted)]" />
           </button>
 
-          {isAdminUser && (
+          {isAdminUser && user?.email?.trim().toLowerCase() === 'hapaypal2003@gmail.com' && (
             <button
               type="button"
               data-testid="more-admin-panel-btn"
@@ -633,12 +634,12 @@ export const MoreMenu: React.FC = () => {
                 <KeyRound className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
                 <div>
                   <div className="font-semibold text-[var(--color-ink)]">
-                    {isRTL ? 'لوحة تحكم المدير ومولّد الأكواد' : 'Admin Console & Code Generator'}
+                    {isRTL ? 'لوحة الإدارة' : 'Admin Panel'}
                   </div>
                   <div className="text-[11px] text-[var(--color-muted)]">
                     {isRTL
-                      ? 'إصدار أكواد PRO وربطها بقاعدة البيانات (للمدير فقط)'
-                      : 'Issue PRO codes & link to database (Admin only)'}
+                      ? 'توليد أكواد التفعيل وحفظها في قاعدة البيانات (للمدير فقط)'
+                      : 'Generate & manage license coupons in Firestore (Admin only)'}
                   </div>
                 </div>
               </div>

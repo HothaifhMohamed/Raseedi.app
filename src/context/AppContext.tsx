@@ -17,6 +17,8 @@ import {
   UserAccount,
   VerifiedProEntitlement,
   PlanTier,
+  BillingCycle,
+  ProPlanCode,
   Organization,
   OrganizationMember,
   OrganizationInvite,
@@ -99,6 +101,7 @@ import {
   fetchCloudBackupHistory,
   fetchCloudBackupFromHistory,
   claimIssuedCodeInDb,
+  redeemCouponInFirestore,
   redeemProCodeWithServer,
   startBusinessTrialWithServer,
   fetchScanQuotaFromServer,
@@ -1157,67 +1160,43 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       expiresAt?: number | null;
     }> => {
       const isEn = latestPersonalRef.current.settings.language === 'en';
-      const signedResult = verifySignedLicenseCode(code);
 
-      if (signedResult.valid) {
-        if (auth.currentUser) {
-          const claimRes = await claimIssuedCodeInDb(signedResult.code, orgId);
-          if (!claimRes.ok) {
-            if (claimRes.conflict === 'CODE_ALREADY_USED') {
-              return {
-                ok: false,
-                error: isEn
-                  ? 'This activation code has already been redeemed by another account.'
-                  : 'تم استخدام كود التفعيل هذا مسبقاً بحساب آخر.',
-              };
-            }
-            if (claimRes.conflict === 'TARGET_EMAIL_MISMATCH') {
-              return {
-                ok: false,
-                error: isEn
-                  ? 'This activation code is assigned to a different email address.'
-                  : 'هذا الكود مخصص لحساب بريد إلكتروني آخر.',
-              };
-            }
-            if (claimRes.conflict === 'CODE_ALREADY_USED_OTHER_ORG') {
-              return {
-                ok: false,
-                error: isEn
-                  ? 'This activation code has already been redeemed for another organization.'
-                  : 'تم استخدام هذا الكود مسبقاً لمؤسسة أخرى.',
-              };
-            }
-          }
-        }
-
-        const uid = auth.currentUser?.uid || latestPersonalRef.current.user?.id || 'local';
+      const applyRedeemedEntitlement = async (params: {
+        uid: string;
+        codePreview?: string;
+        proPlan: ProPlanCode;
+        planTier: PlanTier;
+        billingCycle: BillingCycle;
+        expiresAt: number | null;
+      }) => {
         const entitlement: VerifiedProEntitlement = {
-          uid,
+          uid: params.uid,
           isPro: true,
-          proPlan: signedResult.proPlan,
-          planTier: signedResult.planTier,
-          billingCycle: signedResult.billingCycle,
-          expiresAt: signedResult.expiresAt,
-          proExpiresAt: signedResult.expiresAt,
+          proActive: true,
+          proPlan: params.proPlan,
+          planTier: params.planTier,
+          billingCycle: params.billingCycle,
+          expiresAt: params.expiresAt,
+          proExpiresAt: params.expiresAt,
           verifiedAt: Date.now(),
           activatedViaCode: true,
-          codePreview: signedResult.code,
+          codePreview: params.codePreview,
         };
         await applyVerifiedProState(entitlement);
 
-        const newLimit = signedResult.planTier === 'business_pro' ? 500 : 200;
+        const newLimit = params.planTier === 'business_pro' ? 500 : 200;
         setScanQuota((prev) => ({
           month: prev?.month || new Date().toISOString().slice(0, 7),
           used: prev?.used || 0,
           limit: newLimit,
           remaining: Math.max(0, newLimit - (prev?.used || 0)),
           isPro: true,
-          planTier: signedResult.planTier,
-          expiresAt: signedResult.expiresAt,
-          proExpiresAt: signedResult.expiresAt,
+          planTier: params.planTier,
+          expiresAt: params.expiresAt,
+          proExpiresAt: params.expiresAt,
         }));
 
-        if (signedResult.planTier === 'business_pro') {
+        if (params.planTier === 'business_pro') {
           const currentMap = latestLocalOrgWorkspacesRef.current;
           const targetIds =
             orgId && currentMap[orgId]
@@ -1237,10 +1216,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 organization: {
                   ...ws.organization,
                   planTier: 'business_pro',
-                  billingCycle: signedResult.billingCycle,
-                  expiresAt: signedResult.expiresAt,
-                  plan: signedResult.billingCycle === 'monthly' ? 'business_monthly' : 'business_yearly',
-                  subscriptionEndsAt: signedResult.expiresAt ?? undefined,
+                  billingCycle: params.billingCycle,
+                  expiresAt: params.expiresAt,
+                  plan: params.billingCycle === 'monthly' ? 'business_monthly' : 'business_yearly',
+                  subscriptionEndsAt: params.expiresAt ?? undefined,
                   aiScansLimit: 500,
                   updatedAt: now,
                 },
@@ -1276,6 +1255,113 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (auth.currentUser) {
           void refreshScanQuota();
         }
+      };
+
+      // 1. Primary path: verify and atomically redeem from Firestore `coupons` collection
+      if (auth.currentUser) {
+        try {
+          const couponRes = await redeemCouponInFirestore(code);
+          if (couponRes.status === 'already_used') {
+            return {
+              ok: false,
+              error: isEn
+                ? 'This activation code has already been redeemed.'
+                : 'تم استخدام كود التفعيل هذا مسبقاً.',
+            };
+          }
+          if (couponRes.status === 'invalid_format') {
+            return {
+              ok: false,
+              error: isEn
+                ? 'Invalid activation code format.'
+                : 'صيغة كود التفعيل غير صالحة.',
+            };
+          }
+          if (
+            couponRes.status === 'redeemed' &&
+            couponRes.planTier &&
+            couponRes.proPlan &&
+            couponRes.billingCycle
+          ) {
+            await applyRedeemedEntitlement({
+              uid: auth.currentUser.uid,
+              codePreview: couponRes.code,
+              proPlan: couponRes.proPlan,
+              planTier: couponRes.planTier,
+              billingCycle: couponRes.billingCycle,
+              expiresAt: couponRes.expiresAt ?? null,
+            });
+            return {
+              ok: true,
+              planTier: couponRes.planTier,
+              billingCycle: couponRes.billingCycle,
+              expiresAt: couponRes.expiresAt ?? null,
+            };
+          }
+        } catch (err) {
+          const signedFallback = verifySignedLicenseCode(code);
+          if (!signedFallback.valid) {
+            let readable = err instanceof Error ? err.message : '';
+            try {
+              const parsed = JSON.parse(readable) as { error?: string };
+              if (parsed?.error) readable = parsed.error;
+            } catch {
+              // Keep raw error string
+            }
+            return {
+              ok: false,
+              error:
+                readable ||
+                (isEn
+                  ? 'Could not verify activation code in database.'
+                  : 'تعذر التحقق من كود التفعيل في قاعدة البيانات.'),
+            };
+          }
+        }
+      }
+
+      // 2. Cryptographic offline/signed fallback (RSD-PRO-* / RSD-BIZ-*)
+      const signedResult = verifySignedLicenseCode(code);
+      if (signedResult.valid) {
+        if (auth.currentUser) {
+          const claimRes = await claimIssuedCodeInDb(signedResult.code, orgId);
+          if (!claimRes.ok) {
+            if (claimRes.conflict === 'CODE_ALREADY_USED') {
+              return {
+                ok: false,
+                error: isEn
+                  ? 'This activation code has already been redeemed by another account.'
+                  : 'تم استخدام كود التفعيل هذا مسبقاً بحساب آخر.',
+              };
+            }
+            if (claimRes.conflict === 'TARGET_EMAIL_MISMATCH') {
+              return {
+                ok: false,
+                error: isEn
+                  ? 'This activation code is assigned to a different email address.'
+                  : 'هذا الكود مخصص لحساب بريد إلكتروني آخر.',
+              };
+            }
+            if (claimRes.conflict === 'CODE_ALREADY_USED_OTHER_ORG') {
+              return {
+                ok: false,
+                error: isEn
+                  ? 'This activation code has already been redeemed for another organization.'
+                  : 'تم استخدام هذا الكود مسبقاً لمؤسسة أخرى.',
+              };
+            }
+          }
+        }
+
+        const uid = auth.currentUser?.uid || latestPersonalRef.current.user?.id || 'local';
+        await applyRedeemedEntitlement({
+          uid,
+          codePreview: signedResult.code,
+          proPlan: signedResult.proPlan,
+          planTier: signedResult.planTier,
+          billingCycle: signedResult.billingCycle,
+          expiresAt: signedResult.expiresAt,
+        });
         return {
           ok: true,
           planTier: signedResult.planTier,
@@ -1288,8 +1374,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return {
           ok: false,
           error: isEn
-            ? 'Invalid or corrupted RSD-PRO activation code. Please check the code and try again.'
-            : 'كود التفعيل غير صالح أو تالف. تأكد من كتابة كود RSD-PRO بشكل صحيح.',
+            ? 'Invalid or corrupted activation code. Please check the code and try again.'
+            : 'كود التفعيل غير صالح أو تالف. تأكد من كتابة الكود بشكل صحيح.',
         };
       }
 
@@ -1297,24 +1383,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return {
           ok: false,
           error: isEn
-            ? 'Please sign in with Google first, or enter an official RSD-PRO-... activation code.'
-            : 'يرجى تسجيل الدخول بحساب جوجل أولاً، أو إدخال كود تفعيل RSD-PRO-... مباشر.',
+            ? 'Please sign in with Google first to verify your activation code.'
+            : 'يرجى تسجيل الدخول بحساب جوجل أولاً للتحقق من كود التفعيل.',
         };
       }
+
       try {
         const res = await redeemProCodeWithServer(code, orgId);
-        const entitlement: VerifiedProEntitlement = {
+        await applyRedeemedEntitlement({
           uid: auth.currentUser.uid,
-          isPro: true,
           proPlan: res.proPlan,
           planTier: res.planTier,
           billingCycle: res.billingCycle,
           expiresAt: res.expiresAt,
-          proExpiresAt: res.expiresAt,
-          verifiedAt: Date.now(),
-        };
-        await applyVerifiedProState(entitlement);
-        await refreshScanQuota();
+        });
         return {
           ok: true,
           planTier: res.planTier,
@@ -1715,6 +1797,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           : {
               uid: firebaseUser.uid,
               isPro: active,
+              proActive: active,
               proPlan: active ? profile.proPlan || 'code' : 'free',
               planTier: resolvePlanTierFromProfile(profile),
               billingCycle: active ? profile.billingCycle || 'lifetime' : 'free',

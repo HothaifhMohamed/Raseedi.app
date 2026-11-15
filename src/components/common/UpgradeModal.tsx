@@ -188,10 +188,10 @@ export const UpgradeModal: React.FC = () => {
           : '';
       setCodeSuccess(
         isRTL
-          ? `تم تفعيل باقة ${tierLabel}${cycleLabel ? ` (${cycleLabel})` : ''} بنجاح!`
-          : `${tierLabel}${cycleLabel ? ` (${cycleLabel})` : ''} activated successfully!`
+          ? `مبروك! 🎉 تم تفعيل باقة ${tierLabel}${cycleLabel ? ` (${cycleLabel})` : ''} بنجاح على حسابك!`
+          : `Congratulations! 🎉 ${tierLabel}${cycleLabel ? ` (${cycleLabel})` : ''} activated successfully!`
       );
-      window.setTimeout(() => setCodeSuccess(null), 4000);
+      window.setTimeout(() => setCodeSuccess(null), 8000);
     } finally {
       setIsRedeeming(false);
     }
@@ -690,24 +690,19 @@ export const UpgradeModal: React.FC = () => {
             </ul>
           </div>
 
-          {/* Server-Verified Activation Code Redemption (always accessible for initial activation, renewals & extra seats) */}
+          {/* Activation Code Redemption ("لديك كود تفعيل؟") */}
           <form
             onSubmit={handleRedeemCode}
             className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-2.5"
           >
             <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-ink)]">
+              <label
+                htmlFor="upgrade-coupon-code-input"
+                className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-ink)]"
+              >
                 <KeyRound className="w-3.5 h-3.5 text-[var(--color-accent)] shrink-0" />
-                <span>
-                  {isPro
-                    ? isRTL
-                      ? 'تجديد الاشتراك أو تفعيل كود جديد'
-                      : 'Renew Subscription or Redeem New Code'
-                    : isRTL
-                    ? 'تفعيل بالكود الخاص بك'
-                    : 'Activate with License Code'}
-                </span>
-              </div>
+                <span>{isRTL ? 'لديك كود تفعيل؟' : 'Have an activation code?'}</span>
+              </label>
               {!user?.isLoggedIn && (
                 <button
                   type="button"
@@ -720,13 +715,14 @@ export const UpgradeModal: React.FC = () => {
             </div>
             <div className="flex items-center gap-2">
               <input
+                id="upgrade-coupon-code-input"
                 type="text"
                 value={activationCode}
                 onChange={(e) => {
                   setActivationCode(e.target.value);
                   setCodeError(null);
                 }}
-                placeholder="RSD-PRO-XXXX-XXXX"
+                placeholder="RSD-BIZ-XXXX-XXXX / RSD-PRO-XXXX-XXXX"
                 dir="ltr"
                 disabled={isRedeeming}
                 data-testid="upgrade-license-code-input"
@@ -743,10 +739,18 @@ export const UpgradeModal: React.FC = () => {
               </button>
             </div>
             {codeError && (
-              <p data-testid="upgrade-code-error" className="text-[11px] text-[var(--color-expense)] font-medium">{codeError}</p>
+              <p data-testid="upgrade-code-error" className="text-[11px] text-[var(--color-expense)] font-medium">
+                {codeError}
+              </p>
             )}
             {codeSuccess && (
-              <p data-testid="upgrade-code-success" className="text-[11px] text-[var(--color-income)] font-medium">{codeSuccess}</p>
+              <div
+                data-testid="upgrade-code-success"
+                className="p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 text-xs font-bold flex items-center gap-2 animate-in fade-in duration-150"
+              >
+                <Sparkles className="w-4 h-4 text-emerald-500 shrink-0" />
+                <span>{codeSuccess}</span>
+              </div>
             )}
           </form>
 

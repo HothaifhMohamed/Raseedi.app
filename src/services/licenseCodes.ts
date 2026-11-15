@@ -9,6 +9,7 @@ export type AdminCouponCycle = 'monthly' | 'yearly' | 'lifetime';
 
 export const ADMIN_PANEL_PASSCODE = 'raseedi_admin_2026';
 export const LICENSE_CODE_PREFIX = 'RSD-PRO-';
+export const BUSINESS_LICENSE_CODE_PREFIX = 'RSD-BIZ-';
 export const AUTHORIZED_ADMIN_EMAILS = ['hapaypal2003@gmail.com'] as const;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -202,6 +203,10 @@ export function verifyAdminPassword(input: string): boolean {
   return timingSafeEqual(trimmed, ADMIN_PANEL_PASSCODE);
 }
 
+export function getLicensePrefixForTier(tier: AdminCouponTier): string {
+  return tier === 'business' ? BUSINESS_LICENSE_CODE_PREFIX : LICENSE_CODE_PREFIX;
+}
+
 export function generateAdminLicenseCode(params: {
   tier: AdminCouponTier;
   cycle: AdminCouponCycle;
@@ -218,7 +223,7 @@ export function generateAdminLicenseCode(params: {
   const payloadSegment = `${tierFlag}${cycleFlag}${rawNonce}`;
   const macBytes = hmacSha256(LICENSE_SIGNING_SECRET, payloadSegment);
   const sigSegment = bytesToToken(macBytes, 8);
-  return `${LICENSE_CODE_PREFIX}${payloadSegment}-${sigSegment}`;
+  return `${getLicensePrefixForTier(params.tier)}${payloadSegment}-${sigSegment}`;
 }
 
 export interface VerifiedSignedLicenseResult {
@@ -243,7 +248,11 @@ export type LicenseVerificationResult =
   | InvalidSignedLicenseResult;
 
 export function isSignedLicenseFormat(rawCode: string): boolean {
-  return String(rawCode || '').trim().toUpperCase().startsWith(LICENSE_CODE_PREFIX);
+  const normalized = String(rawCode || '').trim().toUpperCase().replace(/\s+/g, '');
+  return (
+    normalized.startsWith(LICENSE_CODE_PREFIX) ||
+    normalized.startsWith(BUSINESS_LICENSE_CODE_PREFIX)
+  );
 }
 
 export function verifySignedLicenseCode(
@@ -251,11 +260,17 @@ export function verifySignedLicenseCode(
   nowMs: number = Date.now()
 ): LicenseVerificationResult {
   const normalized = String(rawCode || '').trim().toUpperCase().replace(/\s+/g, '');
-  if (!normalized.startsWith(LICENSE_CODE_PREFIX)) {
+  const matchedPrefix = normalized.startsWith(BUSINESS_LICENSE_CODE_PREFIX)
+    ? BUSINESS_LICENSE_CODE_PREFIX
+    : normalized.startsWith(LICENSE_CODE_PREFIX)
+    ? LICENSE_CODE_PREFIX
+    : null;
+
+  if (!matchedPrefix) {
     return { valid: false, isSignedFormat: false, reason: 'NOT_SIGNED_FORMAT' };
   }
 
-  const rest = normalized.slice(LICENSE_CODE_PREFIX.length);
+  const rest = normalized.slice(matchedPrefix.length);
   const parts = rest.split('-');
   if (parts.length !== 2) {
     return { valid: false, isSignedFormat: true, reason: 'MALFORMED_CODE' };
@@ -270,6 +285,10 @@ export function verifySignedLicenseCode(
   const cycleChar = payloadSegment[1];
   if ((tierChar !== 'P' && tierChar !== 'B') || (cycleChar !== 'M' && cycleChar !== 'Y' && cycleChar !== 'L')) {
     return { valid: false, isSignedFormat: true, reason: 'MALFORMED_CODE' };
+  }
+
+  if (matchedPrefix === BUSINESS_LICENSE_CODE_PREFIX && tierChar !== 'B') {
+    return { valid: false, isSignedFormat: true, reason: 'INVALID_SIGNATURE' };
   }
 
   const expectedMac = hmacSha256(LICENSE_SIGNING_SECRET, payloadSegment);
@@ -302,7 +321,7 @@ export function verifySignedLicenseCode(
 
   return {
     valid: true,
-    code: `${LICENSE_CODE_PREFIX}${payloadSegment}-${sigSegment}`,
+    code: `${matchedPrefix}${payloadSegment}-${sigSegment}`,
     tier,
     cycle,
     planTier,

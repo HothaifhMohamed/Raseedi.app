@@ -17,6 +17,7 @@ import {
   collection,
   doc,
   getDoc,
+  getDocFromServer,
   getDocs,
   limit,
   orderBy,
@@ -93,6 +94,18 @@ export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
+async function testConnection(): Promise<void> {
+  if (typeof window === 'undefined') return;
+  try {
+    await getDocFromServer(doc(db, 'test', 'connection'));
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.error('Please check your Firebase configuration.');
+    }
+  }
+}
+void testConnection();
+
 // Optional Firebase App Check initialization (when configured in environment)
 const appCheckSiteKey =
   typeof import.meta !== 'undefined' &&
@@ -157,8 +170,9 @@ export function handleFirestoreError(
     operationType,
     path,
   };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(errInfo.error || 'Firestore operation failed');
+  const serialized = JSON.stringify(errInfo);
+  console.error('Firestore Error: ', serialized);
+  throw new Error(serialized);
 }
 
 export interface CloudUserProfile {
@@ -167,20 +181,23 @@ export interface CloudUserProfile {
   displayName?: string;
   photoURL?: string;
   isPro: boolean;
+  proActive?: boolean;
   proPlan?: ProPlanCode;
   planTier?: PlanTier;
   billingCycle?: BillingCycle;
   expiresAt?: number | null;
   proExpiresAt?: number | null;
   hasUsedBusinessTrial?: boolean;
+  redeemedCouponCode?: string | null;
   lastSyncedAt?: number;
 }
 
 export function isEntitlementActive(
-  entitlement: Pick<VerifiedProEntitlement, 'isPro' | 'expiresAt' | 'proExpiresAt'> | CloudUserProfile | null | undefined,
+  entitlement: Pick<VerifiedProEntitlement, 'isPro' | 'proActive' | 'expiresAt' | 'proExpiresAt'> | CloudUserProfile | null | undefined,
   nowMs: number = Date.now()
 ): boolean {
-  if (!entitlement || !entitlement.isPro) return false;
+  const activeFlag = Boolean(entitlement?.isPro || entitlement?.proActive);
+  if (!entitlement || !activeFlag) return false;
   const expiry = entitlement.proExpiresAt ?? entitlement.expiresAt;
   if (typeof expiry === 'number' && expiry > 0) {
     return expiry > nowMs;
@@ -310,6 +327,7 @@ export async function ensureUserProfile(firebaseUser: User): Promise<CloudUserPr
         uid: firebaseUser.uid,
         email: (firebaseUser.email || `${firebaseUser.uid}@firebase.local`).slice(0, 254),
         isPro: false,
+        proActive: false,
         proPlan: 'free',
         planTier: 'free',
         billingCycle: 'free',
@@ -332,6 +350,7 @@ export async function ensureUserProfile(firebaseUser: User): Promise<CloudUserPr
         displayName: firebaseUser.displayName || undefined,
         photoURL: firebaseUser.photoURL || undefined,
         isPro: false,
+        proActive: false,
         proPlan: 'free',
         planTier: 'free',
         billingCycle: 'free',
@@ -359,6 +378,7 @@ export async function ensureUserProfile(firebaseUser: User): Promise<CloudUserPr
     return {
       ...existingData,
       isPro: active,
+      proActive: active,
       proPlan: existingData.proPlan || (active ? 'code' : 'free'),
       planTier: resolvePlanTierFromProfile({ ...existingData, isPro: active }),
       billingCycle: existingData.billingCycle || (active ? 'lifetime' : 'free'),
@@ -384,6 +404,7 @@ export async function fetchUserProfile(uid: string): Promise<CloudUserProfile | 
     return {
       ...data,
       isPro: active,
+      proActive: active,
       proPlan: data.proPlan || (active ? 'code' : 'free'),
       planTier: resolvePlanTierFromProfile({ ...data, isPro: active }),
       billingCycle: data.billingCycle || (active ? 'lifetime' : 'free'),
@@ -1118,6 +1139,225 @@ export async function fetchRecentAdminIssuedCodes(maxItems = 10): Promise<AdminI
       return [];
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Firestore `coupons` Collection (Admin Panel + Atomic User Redemption)
+// ---------------------------------------------------------------------------
+
+export interface FirestoreCouponRecord {
+  code: string;
+  tier: AdminCouponTier;
+  planTier: PlanTier;
+  cycle: AdminCouponCycle;
+  status: 'unused' | 'used';
+  used: boolean;
+  usedBy: string | null;
+  usedAt: number | null;
+  createdByUid: string;
+  createdByEmail: string;
+  createdAtMs: number;
+}
+
+const VALID_COUPON_ID_RE = /^[a-zA-Z0-9_\-]+$/;
+
+export async function createCouponInFirestore(params: {
+  code: string;
+  tier: AdminCouponTier;
+  cycle: AdminCouponCycle;
+  planTier: PlanTier;
+}): Promise<{ saved: boolean; code: string }> {
+  const normalizedCode = String(params.code || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .slice(0, 128);
+  const currentUser = auth.currentUser;
+
+  if (
+    !normalizedCode ||
+    !VALID_COUPON_ID_RE.test(normalizedCode) ||
+    !currentUser ||
+    !isAuthorizedAdminUser({
+      email: currentUser.email,
+      isLoggedIn: true,
+      emailVerified: currentUser.emailVerified,
+    })
+  ) {
+    return { saved: false, code: normalizedCode };
+  }
+
+  const docPath = `coupons/${normalizedCode}`;
+  try {
+    await setDoc(doc(db, 'coupons', normalizedCode), {
+      code: normalizedCode,
+      tier: params.tier,
+      planTier: params.planTier,
+      cycle: params.cycle,
+      status: 'unused',
+      used: false,
+      usedBy: null,
+      usedAt: null,
+      createdByUid: currentUser.uid,
+      createdByEmail: (currentUser.email || '').trim().toLowerCase().slice(0, 254),
+      createdAt: serverTimestamp(),
+    });
+    return { saved: true, code: normalizedCode };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, docPath);
+  }
+}
+
+export async function fetchAdminCouponsFromFirestore(
+  maxItems = 25
+): Promise<FirestoreCouponRecord[]> {
+  const currentUser = auth.currentUser;
+  if (
+    !currentUser ||
+    !isAuthorizedAdminUser({
+      email: currentUser.email,
+      isLoggedIn: true,
+      emailVerified: currentUser.emailVerified,
+    })
+  ) {
+    return [];
+  }
+
+  const colPath = 'coupons';
+  try {
+    const q = query(collection(db, colPath), orderBy('createdAt', 'desc'), limit(maxItems));
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => {
+      const raw = d.data() as Record<string, unknown>;
+      const createdAtTs = raw.createdAt as { toMillis?: () => number } | undefined;
+      const usedAtTs = raw.usedAt as { toMillis?: () => number } | undefined;
+      const isUsed = Boolean(raw.used === true || raw.status === 'used');
+      return {
+        code: String(raw.code || d.id),
+        tier: raw.tier === 'business' ? 'business' : 'pro',
+        planTier: raw.planTier === 'business_pro' ? 'business_pro' : 'personal_pro',
+        cycle:
+          raw.cycle === 'monthly' || raw.cycle === 'yearly' || raw.cycle === 'lifetime'
+            ? raw.cycle
+            : 'yearly',
+        status: isUsed ? 'used' : 'unused',
+        used: isUsed,
+        usedBy: typeof raw.usedBy === 'string' ? raw.usedBy : null,
+        usedAt: typeof usedAtTs?.toMillis === 'function' ? usedAtTs.toMillis() : null,
+        createdByUid: String(raw.createdByUid || ''),
+        createdByEmail: String(raw.createdByEmail || ''),
+        createdAtMs: typeof createdAtTs?.toMillis === 'function' ? createdAtTs.toMillis() : Date.now(),
+      };
+    });
+  } catch (error) {
+    try {
+      handleFirestoreError(error, OperationType.LIST, colPath);
+    } catch {
+      return [];
+    }
+  }
+}
+
+export interface CouponRedemptionResult {
+  status: 'redeemed' | 'not_found' | 'already_used' | 'invalid_format' | 'auth_required';
+  code?: string;
+  tier?: AdminCouponTier;
+  planTier?: PlanTier;
+  proPlan?: ProPlanCode;
+  billingCycle?: BillingCycle;
+  expiresAt?: number | null;
+}
+
+export async function redeemCouponInFirestore(rawCode: string): Promise<CouponRedemptionResult> {
+  const currentUser = auth.currentUser;
+  if (!currentUser) {
+    return { status: 'auth_required' };
+  }
+
+  const normalizedCode = String(rawCode || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .slice(0, 128);
+  if (!normalizedCode || !VALID_COUPON_ID_RE.test(normalizedCode)) {
+    return { status: 'invalid_format' };
+  }
+
+  const couponPath = `coupons/${normalizedCode}`;
+  const couponRef = doc(db, 'coupons', normalizedCode);
+
+  let couponSnap;
+  try {
+    couponSnap = await getDoc(couponRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, couponPath);
+  }
+
+  if (!couponSnap.exists()) {
+    return { status: 'not_found' };
+  }
+
+  const data = couponSnap.data() as Record<string, unknown>;
+  if (data.used === true || data.status === 'used') {
+    return { status: 'already_used', code: normalizedCode };
+  }
+
+  const tier: AdminCouponTier = data.tier === 'business' ? 'business' : 'pro';
+  const cycle: AdminCouponCycle =
+    data.cycle === 'monthly' || data.cycle === 'yearly' || data.cycle === 'lifetime'
+      ? data.cycle
+      : 'lifetime';
+  const planTier: PlanTier = tier === 'business' ? 'business_pro' : 'personal_pro';
+  const proPlan: ProPlanCode =
+    tier === 'business'
+      ? cycle === 'monthly'
+        ? 'business_monthly'
+        : cycle === 'yearly'
+        ? 'business_yearly'
+        : 'code'
+      : cycle;
+  const nowMs = Date.now();
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const expiresAt: number | null =
+    cycle === 'monthly' ? nowMs + 30 * DAY_MS : cycle === 'yearly' ? nowMs + 365 * DAY_MS : null;
+
+  await ensureUserProfile(currentUser);
+
+  const userRef = doc(db, 'users', currentUser.uid);
+  const batch = writeBatch(db);
+  batch.update(couponRef, {
+    used: true,
+    status: 'used',
+    usedBy: currentUser.uid,
+    usedAt: serverTimestamp(),
+  });
+  batch.update(userRef, {
+    isPro: true,
+    proActive: true,
+    planTier,
+    proPlan,
+    billingCycle: cycle,
+    expiresAt,
+    proExpiresAt: expiresAt,
+    redeemedCouponCode: normalizedCode,
+    updatedAt: serverTimestamp(),
+  });
+
+  try {
+    await batch.commit();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, couponPath);
+  }
+
+  return {
+    status: 'redeemed',
+    code: normalizedCode,
+    tier,
+    planTier,
+    proPlan,
+    billingCycle: cycle,
+    expiresAt,
+  };
 }
 
 export async function startBusinessTrialWithServer(orgId?: string): Promise<{

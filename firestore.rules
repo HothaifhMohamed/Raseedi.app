@@ -104,12 +104,14 @@ service cloud.firestore {
           'displayName',
           'photoURL',
           'isPro',
+          'proActive',
           'proPlan',
           'planTier',
           'billingCycle',
           'expiresAt',
           'proExpiresAt',
           'hasUsedBusinessTrial',
+          'redeemedCouponCode',
           'lastSyncedAt',
           'createdAt',
           'updatedAt'
@@ -124,12 +126,14 @@ service cloud.firestore {
         && (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 120))
         && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 512))
         && data.isPro == false
+        && (!('proActive' in data) || data.proActive == false)
         && (!('proPlan' in data) || data.proPlan == 'free')
         && (!('planTier' in data) || data.planTier == 'free')
         && (!('billingCycle' in data) || data.billingCycle == 'free')
         && (!('expiresAt' in data) || data.expiresAt == null)
         && (!('proExpiresAt' in data) || data.proExpiresAt == null)
         && (!('hasUsedBusinessTrial' in data) || data.hasUsedBusinessTrial == false)
+        && (!('redeemedCouponCode' in data) || data.redeemedCouponCode == null)
         && (!('lastSyncedAt' in data) || data.lastSyncedAt is number)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -143,6 +147,7 @@ service cloud.firestore {
           'displayName',
           'photoURL',
           'isPro',
+          'proActive',
           'proPlan',
           'planTier',
           'billingCycle',
@@ -150,11 +155,13 @@ service cloud.firestore {
           'proExpiresAt',
           'hasUsedBusinessTrial',
           'activationCodeHash',
+          'redeemedCouponCode',
           'lastSyncedAt',
           'createdAt',
           'updatedAt'
         ])
         && data.uid is string
+        && data.uid.size() <= 128
         && data.uid == userId
         && data.uid == request.auth.uid
         && data.email is string
@@ -163,6 +170,15 @@ service cloud.firestore {
         && (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 120))
         && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 512))
         && data.isPro is bool
+        && (!('proActive' in data) || data.proActive is bool)
+        && (!('proPlan' in data) || data.proPlan in ['free', 'monthly', 'yearly', 'lifetime', 'business_monthly', 'business_yearly', 'trial', 'code'])
+        && (!('planTier' in data) || data.planTier in ['free', 'personal_pro', 'business_pro'])
+        && (!('billingCycle' in data) || data.billingCycle in ['free', 'monthly', 'yearly', 'lifetime', 'trial', 'code'])
+        && (!('expiresAt' in data) || data.expiresAt == null || data.expiresAt is number)
+        && (!('proExpiresAt' in data) || data.proExpiresAt == null || data.proExpiresAt is number)
+        && (!('hasUsedBusinessTrial' in data) || data.hasUsedBusinessTrial is bool)
+        && (!('activationCodeHash' in data) || data.activationCodeHash == null || (data.activationCodeHash is string && data.activationCodeHash.size() <= 128))
+        && (!('redeemedCouponCode' in data) || data.redeemedCouponCode == null || (data.redeemedCouponCode is string && data.redeemedCouponCode.size() <= 128 && data.redeemedCouponCode.matches('^[a-zA-Z0-9_\\-]+$')))
         && (!('lastSyncedAt' in data) || data.lastSyncedAt is number)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -424,6 +440,79 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidCoupon(data, couponId) {
+      return data.keys().hasAll([
+        'code',
+        'tier',
+        'planTier',
+        'cycle',
+        'status',
+        'used',
+        'createdByUid',
+        'createdByEmail',
+        'createdAt'
+      ])
+        && data.keys().hasOnly([
+          'code',
+          'tier',
+          'planTier',
+          'cycle',
+          'status',
+          'used',
+          'usedBy',
+          'usedAt',
+          'createdByUid',
+          'createdByEmail',
+          'createdAt'
+        ])
+        && data.code is string
+        && data.code.size() > 0
+        && data.code.size() <= 128
+        && data.code.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.code == couponId
+        && data.tier in ['pro', 'business']
+        && data.planTier in ['personal_pro', 'business_pro']
+        && ((data.tier == 'business' && data.planTier == 'business_pro') || (data.tier == 'pro' && data.planTier == 'personal_pro'))
+        && data.cycle in ['monthly', 'yearly', 'lifetime']
+        && data.status in ['unused', 'used']
+        && data.used is bool
+        && ((data.used == false && data.status == 'unused') || (data.used == true && data.status == 'used'))
+        && data.createdByUid is string
+        && data.createdByUid.size() > 0
+        && data.createdByUid.size() <= 128
+        && data.createdByUid.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.createdByEmail is string
+        && data.createdByEmail.size() > 0
+        && data.createdByEmail.size() <= 254
+        && (!('usedBy' in data) || data.usedBy == null || (data.usedBy is string && data.usedBy.size() > 0 && data.usedBy.size() <= 128))
+        && (!('usedAt' in data) || data.usedAt == null || data.usedAt is timestamp)
+        && data.createdAt is timestamp;
+    }
+
+    function canRedeemCouponAtomically(userData, couponCode) {
+      let cBefore = get(/databases/$(database)/documents/coupons/$(couponCode));
+      let cAfter = getAfter(/databases/$(database)/documents/coupons/$(couponCode));
+      return isValidId(couponCode)
+        && exists(/databases/$(database)/documents/coupons/$(couponCode))
+        && cBefore != null
+        && cAfter != null
+        && cBefore.data.used == false
+        && cBefore.data.status == 'unused'
+        && cAfter.data.used == true
+        && cAfter.data.status == 'used'
+        && cAfter.data.usedBy == request.auth.uid
+        && userData.proActive == true
+        && userData.isPro == true
+        && userData.planTier == cBefore.data.planTier
+        && userData.billingCycle == cBefore.data.cycle
+        && userData.get('proExpiresAt', null) == userData.get('expiresAt', null)
+        && (
+          (cBefore.data.cycle == 'lifetime' && userData.get('expiresAt', null) == null)
+          || (cBefore.data.cycle == 'monthly' && userData.get('expiresAt', null) is number && userData.expiresAt <= request.time.toMillis() + 32 * 86400000)
+          || (cBefore.data.cycle == 'yearly' && userData.get('expiresAt', null) is number && userData.expiresAt <= request.time.toMillis() + 367 * 86400000)
+        );
+    }
+
     // Server-only collections: never accessible from clients
     match /activationCodes/{codeHash} {
       allow read, write: if false;
@@ -473,6 +562,50 @@ service cloud.firestore {
       allow delete: if isValidId(codeHash) && isAdmin();
     }
 
+    // Admin-generated activation coupons redeemable once atomically to upgrade user planTier & proActive
+    match /coupons/{couponId} {
+      allow get: if isValidId(couponId) && (isAdmin() || isVerifiedUser());
+      allow list: if isAdmin();
+      allow create: if isValidId(couponId)
+        && isAdmin()
+        && isValidCoupon(incoming(), couponId)
+        && incoming().used == false
+        && incoming().status == 'unused'
+        && (!('usedBy' in incoming()) || incoming().usedBy == null)
+        && (!('usedAt' in incoming()) || incoming().usedAt == null)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdByEmail.lower() == request.auth.token.email.lower()
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(couponId)
+        && isVerifiedUser()
+        && isValidCoupon(incoming(), couponId)
+        && (
+          isAdmin() ||
+          (
+            existing().used == false
+            && existing().status == 'unused'
+            && (!('usedBy' in existing()) || existing().usedBy == null)
+            && incoming().used == true
+            && incoming().status == 'used'
+            && incoming().usedBy == request.auth.uid
+            && incoming().usedAt == request.time
+            && incoming().code == existing().code
+            && incoming().tier == existing().tier
+            && incoming().planTier == existing().planTier
+            && incoming().cycle == existing().cycle
+            && incoming().createdByUid == existing().createdByUid
+            && incoming().createdByEmail == existing().createdByEmail
+            && incoming().createdAt == existing().createdAt
+            && incoming().diff(existing()).affectedKeys().hasOnly(['used', 'status', 'usedBy', 'usedAt'])
+            && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.proActive == true
+            && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.isPro == true
+            && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.redeemedCouponCode == couponId
+            && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.planTier == existing().planTier
+          )
+        );
+      allow delete: if isValidId(couponId) && isAdmin();
+    }
+
     match /proLicenses/{licenseId} {
       allow read, write: if false;
     }
@@ -497,20 +630,43 @@ service cloud.firestore {
         && incoming().uid == existing().uid
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().isPro == existing().isPro
-        && incoming().get('proPlan', 'free') == existing().get('proPlan', 'free')
-        && incoming().get('planTier', 'free') == existing().get('planTier', 'free')
-        && incoming().get('billingCycle', 'free') == existing().get('billingCycle', 'free')
-        && incoming().get('expiresAt', null) == existing().get('expiresAt', null)
-        && incoming().get('proExpiresAt', null) == existing().get('proExpiresAt', null)
-        && incoming().get('hasUsedBusinessTrial', false) == existing().get('hasUsedBusinessTrial', false)
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'email',
-          'displayName',
-          'photoURL',
-          'lastSyncedAt',
-          'updatedAt'
-        ]);
+        && (
+          (
+            incoming().isPro == existing().isPro
+            && incoming().get('proActive', false) == existing().get('proActive', false)
+            && incoming().get('proPlan', 'free') == existing().get('proPlan', 'free')
+            && incoming().get('planTier', 'free') == existing().get('planTier', 'free')
+            && incoming().get('billingCycle', 'free') == existing().get('billingCycle', 'free')
+            && incoming().get('expiresAt', null) == existing().get('expiresAt', null)
+            && incoming().get('proExpiresAt', null) == existing().get('proExpiresAt', null)
+            && incoming().get('hasUsedBusinessTrial', false) == existing().get('hasUsedBusinessTrial', false)
+            && incoming().get('redeemedCouponCode', null) == existing().get('redeemedCouponCode', null)
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'email',
+              'displayName',
+              'photoURL',
+              'lastSyncedAt',
+              'updatedAt'
+            ])
+          )
+          ||
+          (
+            ('redeemedCouponCode' in incoming())
+            && incoming().redeemedCouponCode is string
+            && canRedeemCouponAtomically(incoming(), incoming().redeemedCouponCode)
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'isPro',
+              'proActive',
+              'planTier',
+              'proPlan',
+              'billingCycle',
+              'expiresAt',
+              'proExpiresAt',
+              'redeemedCouponCode',
+              'updatedAt'
+            ])
+          )
+        );
       allow delete: if isValidId(userId) && isVerifiedUser() && isOwner(userId);
 
       // Server-only monthly receipt scan quota

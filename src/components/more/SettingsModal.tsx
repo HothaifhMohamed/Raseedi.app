@@ -26,12 +26,11 @@ import {
   AdminCouponCycle,
   AdminCouponTier,
   generateAdminLicenseCode,
-  verifyAdminPassword,
 } from '../../services/licenseCodes';
 import {
-  AdminIssuedCodeRecord,
-  fetchRecentAdminIssuedCodes,
-  registerAdminIssuedCodeInDb,
+  createCouponInFirestore,
+  fetchAdminCouponsFromFirestore,
+  FirestoreCouponRecord,
 } from '../../services/firebase';
 import {
   CURRENCIES,
@@ -100,31 +99,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     isError?: boolean;
   } | null>(null);
 
-  // Secret Admin Coupon Generator Panel State (only usable by verified admin)
+  // Secret Admin Coupon Generator Panel State (strictly restricted to Hapaypal2003@gmail.com)
+  const canAccessAdminPanel = Boolean(
+    isAdminUser && user?.email?.trim().toLowerCase() === 'hapaypal2003@gmail.com'
+  );
   const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
-  const [isAdminUnlocked, setIsAdminUnlocked] = useState(false);
-  const [adminPasswordInput, setAdminPasswordInput] = useState('');
-  const [adminPasswordError, setAdminPasswordError] = useState<string | null>(null);
-  const [adminCouponTier, setAdminCouponTier] = useState<AdminCouponTier>('pro');
+  const [adminCouponTier, setAdminCouponTier] = useState<AdminCouponTier>('business');
   const [adminCouponCycle, setAdminCouponCycle] = useState<AdminCouponCycle>('yearly');
-  const [adminTargetEmail, setAdminTargetEmail] = useState('');
   const [generatedAdminCode, setGeneratedAdminCode] = useState<string | null>(null);
-  const [adminCodeSyncStatus, setAdminCodeSyncStatus] = useState<'idle' | 'syncing' | 'cloud_synced' | 'local_only'>('idle');
-  const [recentAdminCodes, setRecentAdminCodes] = useState<AdminIssuedCodeRecord[]>([]);
+  const [adminCodeSyncStatus, setAdminCodeSyncStatus] = useState<
+    'idle' | 'syncing' | 'cloud_synced' | 'error'
+  >('idle');
+  const [adminCodeError, setAdminCodeError] = useState<string | null>(null);
+  const [recentCoupons, setRecentCoupons] = useState<FirestoreCouponRecord[]>([]);
   const [copiedAdminCode, setCopiedAdminCode] = useState(false);
 
   useEffect(() => {
     if (!isOpen) {
       setIsAdminPanelOpen(false);
-      setIsAdminUnlocked(false);
-      setAdminPasswordInput('');
-      setAdminPasswordError(null);
-      setAdminTargetEmail('');
       setAdminCodeSyncStatus('idle');
+      setAdminCodeError(null);
       setCopiedAdminCode(false);
       return;
     }
-    if (initialOpenAdminPanel && isAdminUser) {
+    if (initialOpenAdminPanel && canAccessAdminPanel) {
       setIsAdminPanelOpen(true);
     }
     setLockDateInput(activeOrganization?.lockedUntilDate || '');
@@ -132,18 +130,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setOrgThresholdDraft(String(activeOrganization?.approvalThreshold ?? 0));
     setRateDrafts({});
     setRateSyncFeedback(null);
-  }, [isOpen, initialOpenAdminPanel, isAdminUser, activeOrganization?.id, activeOrganization?.lockedUntilDate]);
+  }, [
+    isOpen,
+    initialOpenAdminPanel,
+    canAccessAdminPanel,
+    activeOrganization?.id,
+    activeOrganization?.lockedUntilDate,
+  ]);
 
   useEffect(() => {
-    if (!isOpen || !isAdminUser || !isAdminUnlocked) return;
+    if (!isOpen || !canAccessAdminPanel || !isAdminPanelOpen) return;
     let active = true;
-    void fetchRecentAdminIssuedCodes(6).then((records) => {
-      if (active) setRecentAdminCodes(records);
+    void fetchAdminCouponsFromFirestore(15).then((records) => {
+      if (active) setRecentCoupons(records);
     });
     return () => {
       active = false;
     };
-  }, [isOpen, isAdminUser, isAdminUnlocked]);
+  }, [isOpen, canAccessAdminPanel, isAdminPanelOpen]);
 
   const editableCurrencyCodes = useMemo(() => {
     const base = ['EGP', 'SAR', 'AED', 'KWD', 'QAR', 'BHD', 'OMR', 'JOD', 'EUR', 'GBP', 'TRY'];
@@ -1013,31 +1017,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             )}
           </div>
 
-          {/* 7. Secret Admin Coupon Generator & PRO License Panel (Visible exclusively to verified admin email) */}
-          {isAdminUser && (
+          {/* 7. Secret Admin Coupon Generator Panel (Visible exclusively to Hapaypal2003@gmail.com) */}
+          {canAccessAdminPanel && (
             <div
               data-testid="admin-panel-section"
               className="p-4 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl space-y-3"
             >
               <button
                 type="button"
-                onClick={() => {
-                  setIsAdminPanelOpen((prev) => !prev);
-                  setAdminPasswordError(null);
-                }}
+                onClick={() => setIsAdminPanelOpen((prev) => !prev)}
                 data-testid="admin-panel-toggle"
                 className="w-full flex items-center justify-between text-xs font-bold text-[var(--color-ink)] min-h-[36px]"
               >
                 <span className="flex items-center gap-2">
                   <KeyRound className="w-4 h-4 text-[var(--color-accent)]" />
-                  <span>{isRTL ? 'لوحة المدير / تفعيل التراخيص' : 'Admin Panel / License Activation'}</span>
+                  <span>{isRTL ? 'لوحة الإدارة' : 'Admin Panel'}</span>
                 </span>
                 <span className="text-[11px] font-medium text-[var(--color-muted)]">
-                  {isAdminUnlocked
-                    ? isRTL
-                      ? 'مفتوحة'
-                      : 'Unlocked'
-                    : isAdminPanelOpen
+                  {isAdminPanelOpen
                     ? isRTL
                       ? 'إخفاء'
                       : 'Hide'
@@ -1047,73 +1044,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </span>
               </button>
 
-              {isAdminPanelOpen && !isAdminUnlocked && (
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (verifyAdminPassword(adminPasswordInput)) {
-                      setIsAdminUnlocked(true);
-                      setAdminPasswordInput('');
-                      setAdminPasswordError(null);
-                    } else {
-                      setAdminPasswordError(
-                        isRTL ? 'كلمة مرور المدير غير صحيحة.' : 'Incorrect admin passcode.'
-                      );
-                    }
-                  }}
-                  className="pt-2 border-t border-[var(--color-line)] space-y-2"
-                >
-                  <label className="block text-[11px] text-[var(--color-muted)]">
-                    {isRTL ? 'أدخل كلمة مرور المدير للوصول لمولّد الأكواد' : 'Enter admin passcode to unlock coupon generator'}
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="password"
-                      dir="ltr"
-                      value={adminPasswordInput}
-                      onChange={(e) => {
-                        setAdminPasswordInput(e.target.value);
-                        setAdminPasswordError(null);
-                      }}
-                      placeholder={isRTL ? 'كلمة مرور المدير...' : 'Admin passcode...'}
-                      data-testid="admin-password-input"
-                      className="flex-1 px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[40px]"
-                    />
-                    <button
-                      type="submit"
-                      data-testid="admin-unlock-btn"
-                      className="px-3.5 py-2 bg-[var(--color-accent)] text-[var(--color-on-accent)] rounded-lg text-xs font-semibold hover:opacity-95 min-h-[40px] shrink-0"
-                    >
-                      {isRTL ? 'دخول' : 'Unlock'}
-                    </button>
-                  </div>
-                  {adminPasswordError && (
-                    <p data-testid="admin-password-error" className="text-[11px] text-[var(--color-expense)] font-medium">
-                      {adminPasswordError}
-                    </p>
-                  )}
-                </form>
-              )}
-
-              {isAdminPanelOpen && isAdminUnlocked && (
+              {isAdminPanelOpen && (
                 <div className="pt-3 border-t border-[var(--color-line)] space-y-3" data-testid="admin-coupon-panel">
                   <div className="flex items-center justify-between">
                     <span className="flex items-center gap-1.5 text-[11px] font-semibold text-[var(--color-income)]">
                       <ShieldCheck className="w-3.5 h-3.5" />
-                      <span>{isRTL ? 'مولّد أكواد التفعيل المشفرة' : 'Encrypted License Code Generator'}</span>
+                      <span>{isRTL ? 'توليد أكواد التفعيل (coupons)' : 'License Coupon Generator (coupons)'}</span>
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsAdminUnlocked(false);
-                        setGeneratedAdminCode(null);
-                        setAdminCodeSyncStatus('idle');
-                        setCopiedAdminCode(false);
-                      }}
-                      className="text-[11px] text-[var(--color-muted)] hover:text-[var(--color-ink)]"
-                    >
-                      {isRTL ? 'قفل اللوحة' : 'Lock'}
-                    </button>
                   </div>
 
                   {/* Tier Selection */}
@@ -1132,7 +1069,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             : 'bg-[var(--color-surface)] text-[var(--color-ink)] border-[var(--color-line)]'
                         }`}
                       >
-                        {isRTL ? 'باقة PRO للأفراد' : 'Personal PRO'}
+                        {isRTL ? 'باقة PRO (pro)' : 'Personal PRO (pro)'}
                       </button>
                       <button
                         type="button"
@@ -1144,7 +1081,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             : 'bg-[var(--color-surface)] text-[var(--color-ink)] border-[var(--color-line)]'
                         }`}
                       >
-                        {isRTL ? 'باقة Business للأعمال' : 'Business PRO'}
+                        {isRTL ? 'باقة الأعمال (business)' : 'Business PRO (business)'}
                       </button>
                     </div>
                   </div>
@@ -1152,13 +1089,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   {/* Cycle Selection */}
                   <div className="space-y-1.5">
                     <span className="block text-[11px] text-[var(--color-muted)]">
-                      {isRTL ? 'مدة الصلاحية' : 'Validity Duration'}
+                      {isRTL ? 'مدة التفعيل' : 'Activation Duration'}
                     </span>
                     <div className="grid grid-cols-3 gap-1.5">
                       {(
                         [
-                          { id: 'monthly', ar: 'شهري', en: 'Monthly' },
-                          { id: 'yearly', ar: 'سنوي', en: 'Yearly' },
+                          { id: 'monthly', ar: 'شهر', en: '1 Month' },
+                          { id: 'yearly', ar: 'سنة', en: '1 Year' },
                           { id: 'lifetime', ar: 'مدى الحياة', en: 'Lifetime' },
                         ] as const
                       ).map((opt) => (
@@ -1179,22 +1116,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </div>
                   </div>
 
-                  {/* Optional Target Email Binding */}
-                  <div className="space-y-1">
-                    <label className="block text-[11px] text-[var(--color-muted)]">
-                      {isRTL ? 'بريد المستخدم المستهدف (اختياري)' : 'Target User Email (Optional)'}
-                    </label>
-                    <input
-                      type="email"
-                      dir="ltr"
-                      value={adminTargetEmail}
-                      onChange={(e) => setAdminTargetEmail(e.target.value)}
-                      placeholder="user@gmail.com"
-                      data-testid="admin-target-email-input"
-                      className="w-full px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:outline-none focus:border-[var(--color-accent)] min-h-[38px]"
-                    />
-                  </div>
-
                   <button
                     type="button"
                     disabled={adminCodeSyncStatus === 'syncing'}
@@ -1206,20 +1127,42 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       setGeneratedAdminCode(code);
                       setCopiedAdminCode(false);
                       setAdminCodeSyncStatus('syncing');
+                      setAdminCodeError(null);
 
-                      const syncRes = await registerAdminIssuedCodeInDb({
-                        code,
-                        tier: adminCouponTier,
-                        cycle: adminCouponCycle,
-                        planTier: adminCouponTier === 'business' ? 'business_pro' : 'personal_pro',
-                        targetEmail: adminTargetEmail.trim() || undefined,
-                      });
-                      setAdminCodeSyncStatus(
-                        syncRes.savedCloud || syncRes.savedServer ? 'cloud_synced' : 'local_only'
-                      );
-                      if (syncRes.savedCloud) {
-                        const updatedList = await fetchRecentAdminIssuedCodes(6);
-                        setRecentAdminCodes(updatedList);
+                      try {
+                        const res = await createCouponInFirestore({
+                          code,
+                          tier: adminCouponTier,
+                          cycle: adminCouponCycle,
+                          planTier: adminCouponTier === 'business' ? 'business_pro' : 'personal_pro',
+                        });
+                        if (res.saved) {
+                          setAdminCodeSyncStatus('cloud_synced');
+                          const updatedList = await fetchAdminCouponsFromFirestore(15);
+                          setRecentCoupons(updatedList);
+                        } else {
+                          setAdminCodeSyncStatus('error');
+                          setAdminCodeError(
+                            isRTL
+                              ? 'تعذر حفظ الكود في قاعدة البيانات. تحقق من تسجيل الدخول بحساب المدير.'
+                              : 'Failed to save coupon to Firestore.'
+                          );
+                        }
+                      } catch (err) {
+                        setAdminCodeSyncStatus('error');
+                        let msg = err instanceof Error ? err.message : '';
+                        try {
+                          const parsed = JSON.parse(msg) as { error?: string };
+                          if (parsed?.error) msg = parsed.error;
+                        } catch {
+                          // ignore JSON parse failure
+                        }
+                        setAdminCodeError(
+                          msg ||
+                            (isRTL
+                              ? 'تعذر حفظ الكود في Firestore.'
+                              : 'Could not save coupon in Firestore.')
+                        );
                       }
                     }}
                     data-testid="admin-generate-code-btn"
@@ -1229,13 +1172,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <span>
                       {adminCodeSyncStatus === 'syncing'
                         ? isRTL
-                          ? 'جاري التوليد والحفظ...'
+                          ? 'جاري التوليد والحفظ في Firestore...'
                           : 'Generating & Saving...'
                         : isRTL
-                        ? 'توليد كود تفعيل فريد'
-                        : 'Generate Unique Code'}
+                        ? 'توليد وحفظ كود تفعيل جديد'
+                        : 'Generate & Save Coupon'}
                     </span>
                   </button>
+
+                  {adminCodeError && (
+                    <p className="text-[11px] text-[var(--color-expense)] font-medium">
+                      {adminCodeError}
+                    </p>
+                  )}
 
                   {generatedAdminCode && (
                     <div className="p-3 bg-[var(--color-surface)] border border-[var(--color-accent)]/40 rounded-lg space-y-2">
@@ -1277,48 +1226,57 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       <p className="text-[10px] text-[var(--color-muted)]">
                         {adminCodeSyncStatus === 'cloud_synced'
                           ? isRTL
-                            ? 'تم حفظ الكود في قاعدة البيانات بنجاح. سيتم تفعيله تلقائياً للمستخدم عند إدخاله.'
-                            : 'Code saved to database. Ready for one-time activation by the target user.'
+                            ? 'تم حفظ الكود في مجموعة coupons بحالة: غير مستخدم.'
+                            : 'Saved to Firestore coupons collection (Status: Unused).'
                           : isRTL
-                          ? 'انسخ الكود وأدخله في نافذة الترقية (PRO) لتفعيل الباقة فوراً على أي جهاز.'
-                          : 'Copy and paste this code in the Upgrade modal to activate immediately on any device.'}
+                          ? 'الكود جاهز للنسخ والمشاركة.'
+                          : 'Code ready to copy.'}
                       </p>
                     </div>
                   )}
 
-                  {recentAdminCodes.length > 0 && (
+                  {recentCoupons.length > 0 && (
                     <div className="pt-2 border-t border-[var(--color-line)] space-y-1.5">
                       <div className="text-[10px] font-semibold text-[var(--color-muted)]">
-                        {isRTL ? 'آخر الأكواد المسجلة في قاعدة البيانات' : 'Recent Database-Linked Codes'}
+                        {isRTL ? 'الأكواد المحفوظة في coupons' : 'Saved Coupons in Firestore'}
                       </div>
-                      <div className="space-y-1 max-h-32 overflow-y-auto">
-                        {recentAdminCodes.map((rec) => (
+                      <div className="space-y-1 max-h-36 overflow-y-auto">
+                        {recentCoupons.map((rec) => (
                           <div
-                            key={rec.codeHash}
+                            key={rec.code}
                             className="px-2.5 py-1.5 rounded-md bg-[var(--color-surface)] border border-[var(--color-line)] flex items-center justify-between gap-2 text-[10px]"
                           >
                             <div className="min-w-0">
-                              <span className="font-semibold text-[var(--color-ink)]">
-                                {rec.planTier === 'business_pro' ? 'Business' : 'PRO'} • {rec.cycle}
+                              <code className="block font-mono font-bold text-[var(--color-ink)] truncate" dir="ltr">
+                                {rec.code}
+                              </code>
+                              <span className="text-[var(--color-muted)]">
+                                {rec.tier === 'business' ? 'Business' : 'PRO'} •{' '}
+                                {rec.cycle === 'monthly'
+                                  ? isRTL
+                                    ? 'شهر'
+                                    : 'Month'
+                                  : rec.cycle === 'yearly'
+                                  ? isRTL
+                                    ? 'سنة'
+                                    : 'Year'
+                                  : isRTL
+                                  ? 'مدى الحياة'
+                                  : 'Lifetime'}
                               </span>
-                              {rec.targetEmail && (
-                                <span className="block text-[var(--color-muted)] truncate" dir="ltr">
-                                  {rec.targetEmail}
-                                </span>
-                              )}
                             </div>
                             <span
                               className={`shrink-0 font-semibold ${
-                                rec.usedBy ? 'text-[var(--color-muted)]' : 'text-[var(--color-income)]'
+                                rec.used ? 'text-[var(--color-muted)]' : 'text-[var(--color-income)]'
                               }`}
                             >
-                              {rec.usedBy
+                              {rec.used
                                 ? isRTL
-                                  ? 'مستخدم'
+                                  ? 'مُستخدم'
                                   : 'Used'
                                 : isRTL
-                                ? 'متاح'
-                                : 'Active'}
+                                ? 'غير مستخدم'
+                                : 'Unused'}
                             </span>
                           </div>
                         ))}
