@@ -35,9 +35,11 @@ test('buildLocalOrgWorkspace initializes localFirstMode org with wallets, minor 
   assert.equal(ws.organization.approvalThreshold, 1500);
   assert.equal(ws.organization.taxNumber, 'TRN-12345');
 
-  assert.equal(ws.wallets.length, 3);
-  assert.equal(ws.wallets[0].balance, 120000);
-  assert.equal(ws.wallets[0].balanceMinor, 12000000);
+  assert.equal(ws.wallets.length, 1);
+  assert.equal(ws.wallets[0].name, 'الخزينة الرئيسية');
+  assert.equal(ws.wallets[0].initialBalance, 0);
+  assert.equal(ws.wallets[0].balance, 0);
+  assert.equal(ws.wallets[0].balanceMinor, 0);
   assert.equal(ws.members.length, 1);
   assert.equal(ws.members[0].role, 'owner');
   assert.equal(ws.members[0].status, 'active');
@@ -173,7 +175,7 @@ test('recalculateLocalOrgWallets recomputes from initialBalance and ignores pend
   };
 
   const recalculated = recalculateLocalOrgWallets(corruptedWs, {}, { uid: 'u1', name: 'Owner' });
-  assert.equal(recalculated.wallets[0].balance, 120000 + 1000 - 250);
+  assert.equal(recalculated.wallets[0].balance, 1000 - 250);
   assert.equal(recalculated.auditLogs[0].action, 'recalculate');
 
   const logs = appendLocalOrgAuditLog(

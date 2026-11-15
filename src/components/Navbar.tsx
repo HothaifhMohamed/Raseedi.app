@@ -101,7 +101,7 @@ export const Navbar: React.FC = () => {
   const [newOrgVat, setNewOrgVat] = useState('14');
   const [newOrgTaxNumber, setNewOrgTaxNumber] = useState('');
   const [newOrgThreshold, setNewOrgThreshold] = useState('1000');
-  const [newOrgSample, setNewOrgSample] = useState(true);
+  const [newOrgSample, setNewOrgSample] = useState(false);
   const [inviteCodeInput, setInviteCodeInput] = useState('');
   const [createOrgError, setCreateOrgError] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
@@ -982,8 +982,8 @@ export const Navbar: React.FC = () => {
                 />
                 <span>
                   {isRTL
-                    ? 'إضافة محافظ ومراكز تكلفة مبدئية للعمل فوراً'
-                    : 'Include starter wallets & cost centers'}
+                    ? 'إضافة ميزانيات تقديرية مبدئية لمراكز التكلفة'
+                    : 'Include sample budgets for cost centers'}
                 </span>
               </label>
 

@@ -285,7 +285,7 @@ export function calculateTotalBalance(
   let total = 0;
 
   for (const wallet of wallets) {
-    if (wallet.isArchived) continue;
+    if (wallet.isArchived || wallet.excludeFromTotal) continue;
     const inMain = convertCurrency(wallet.balance, wallet.currency, mainCurrency, customRates);
     total += inMain;
   }

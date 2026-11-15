@@ -25,6 +25,9 @@ import {
 } from './calculations';
 import { convertCurrency, roundCurrency, getCurrencyDecimals } from './currency';
 import {
+  DEFAULT_WALLETS,
+  createCleanDefaultWallet,
+  generateDemoSeedData,
   mergeSettingsWithDefaults,
   createStarterOrgCategories,
   createStarterCostCentersForIndustry,
@@ -101,6 +104,36 @@ test('calculateTotalBalance aggregates wallets with currency conversion', () => 
   // In EGP with custom rate 50: 1000 + (100 * 50) = 6000
   const totalInEGP = calculateTotalBalance(wallets, 'EGP', { EGP: 50, USD: 1 });
   assert.equal(totalInEGP, 6000);
+
+  // Wallets marked excludeFromTotal: true or isArchived: true must not count toward total balance
+  const withExcluded: Wallet[] = [
+    ...wallets,
+    {
+      id: 'w3-savings',
+      name: 'Savings Trust',
+      currency: 'EGP',
+      initialBalance: 25000,
+      balance: 25000,
+      color: '#4A5B52',
+      icon: 'PiggyBank',
+      isArchived: false,
+      excludeFromTotal: true,
+      order: 3,
+    },
+    {
+      id: 'w4-archived',
+      name: 'Old Card',
+      currency: 'USD',
+      initialBalance: 500,
+      balance: 500,
+      color: '#4E555C',
+      icon: 'CreditCard',
+      isArchived: true,
+      excludeFromTotal: false,
+      order: 4,
+    },
+  ];
+  assert.equal(calculateTotalBalance(withExcluded, 'EGP', { EGP: 50, USD: 1 }), 6000);
 });
 
 test('calculateIncomeExpenseNet computes net balance correctly', () => {
@@ -737,6 +770,22 @@ test('industry starter generators tailor categories and typed cost centers per i
   const retailCenters = createStarterCostCentersForIndustry('org-2', 'retail', false, 456);
   assert.equal(retailCenters[0].type, 'branch');
   assert.equal(retailCenters[0].budgetAllocated, 50000);
+});
+
+test('clean onboarding defaults: DEFAULT_WALLETS contains only 1 wallet named الخزينة الرئيسية with balance 0', () => {
+  assert.equal(DEFAULT_WALLETS.length, 1);
+  assert.equal(DEFAULT_WALLETS[0].name, 'الخزينة الرئيسية');
+  assert.equal(DEFAULT_WALLETS[0].initialBalance, 0);
+  assert.equal(DEFAULT_WALLETS[0].balance, 0);
+
+  const enDefault = createCleanDefaultWallet('USD', 'en');
+  assert.equal(enDefault.name, 'Cash');
+  assert.equal(enDefault.currency, 'USD');
+  assert.equal(enDefault.balance, 0);
+
+  const demo = generateDemoSeedData('EGP');
+  assert.equal(demo.wallets?.length, 3);
+  assert.ok((demo.transactions?.length || 0) > 0);
 });
 
 

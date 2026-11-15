@@ -337,15 +337,25 @@ export const SummaryCards: React.FC = () => {
           </div>
 
           <div className="flex items-center justify-between pt-3 border-t border-[var(--color-line)] text-xs text-[var(--color-muted)]">
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <WalletIcon className="w-3.5 h-3.5 text-[var(--color-accent)]" />
               <span>
                 {wallets.length} {t('navWallets')}
               </span>
+              {wallets.some((w) => !w.isArchived && w.excludeFromTotal) && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--color-bg)] border border-[var(--color-line)] text-[var(--color-muted)]">
+                  {(() => {
+                    const excludedCount = wallets.filter((w) => !w.isArchived && w.excludeFromTotal).length;
+                    return isRTL
+                      ? `${excludedCount} مستثناة من الإجمالي`
+                      : `${excludedCount} excluded`;
+                  })()}
+                </span>
+              )}
             </div>
             <button
               onClick={() => setActiveNav('wallets')}
-              className="text-[var(--color-accent)] hover:underline font-medium text-xs flex items-center gap-1 min-h-[36px]"
+              className="text-[var(--color-accent)] hover:underline font-medium text-xs flex items-center gap-1 min-h-[36px] shrink-0"
             >
               <span>{isRTL ? 'عرض المحافظ ←' : 'View Wallets →'}</span>
             </button>

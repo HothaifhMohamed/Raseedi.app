@@ -25,12 +25,12 @@ export const OnboardingModal: React.FC = () => {
   const [currencyModalOpen, setCurrencyModalOpen] = useState(false);
 
   // Step 2: First Wallet (Personal) or Org Details (Organization)
-  const [walletName, setWalletName] = useState(isRTL ? 'المحفظة النقدية (كاش)' : 'Cash Wallet');
-  const [initialBalance, setInitialBalance] = useState('1000');
+  const [walletName, setWalletName] = useState(isRTL ? 'الخزينة الرئيسية' : 'Cash');
+  const [initialBalance, setInitialBalance] = useState('0');
 
   const [orgName, setOrgName] = useState(isRTL ? 'شركتي الناشئة' : 'My Business');
   const [orgVatRate, setOrgVatRate] = useState('14');
-  const [orgLoadSample, setOrgLoadSample] = useState(true);
+  const [orgLoadSample, setOrgLoadSample] = useState(false);
 
   // Step 3: Selected Starter Categories
   const [selectedCatIds, setSelectedCatIds] = useState<string[]>(
@@ -59,7 +59,7 @@ export const OnboardingModal: React.FC = () => {
     if (accountMode === 'organization') {
       completeOnboarding(
         selectedCurrency,
-        isRTL ? 'المحفظة الشخصية' : 'Personal Cash',
+        isRTL ? 'الخزينة الرئيسية' : 'Cash',
         0
       );
       await createOrganization({
@@ -321,8 +321,8 @@ export const OnboardingModal: React.FC = () => {
                   />
                   <span>
                     {isRTL
-                      ? 'تجهيز خزينة وبنك ومراكز تكلفة مبدئية'
-                      : 'Pre-populate treasury, bank & cost centers'}
+                      ? 'تجهيز مراكز تكلفة بميزانيات تقديرية مبدئية'
+                      : 'Pre-populate cost centers with sample budgets'}
                   </span>
                 </label>
               </div>

@@ -24,6 +24,7 @@ import { UpgradeModal } from './components/common/UpgradeModal';
 import { SettingsModal } from './components/more/SettingsModal';
 import { BackupModal } from './components/more/BackupModal';
 import { UndoSnackbar } from './components/common/UndoSnackbar';
+import { ToastNotification } from './components/common/ToastNotification';
 import { PinLockModal } from './components/common/PinLockModal';
 import { PWAInstallPrompt, OfflineIndicator } from './components/common/PWAInstallPrompt';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
@@ -211,8 +212,9 @@ const MainLayout: React.FC = () => {
         {/* Multidimensional Filter Modal */}
         <FilterModal />
 
-        {/* Undo Floating Snackbar */}
+        {/* Undo Floating Snackbar & Alert Toast */}
         <UndoSnackbar />
+        <ToastNotification />
 
         {/* EEA/UK Cookie Consent Banner before loading AdSense */}
         <AdConsentBanner />

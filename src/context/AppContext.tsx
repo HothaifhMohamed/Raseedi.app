@@ -176,6 +176,12 @@ export interface UndoAction {
   action: () => void;
 }
 
+export interface ToastMessage {
+  id: string;
+  text: string;
+  type?: 'info' | 'warning' | 'error' | 'success';
+}
+
 export interface WalletDependencies {
   transactionsCount: number;
   budgetsCount: number;
@@ -411,10 +417,13 @@ interface AppContextType {
   isRefreshingRates: boolean;
   refreshExchangeRates: (force?: boolean) => Promise<boolean>;
 
-  // Undo Notification
+  // Undo & Toast Notification
   undoAction: UndoAction | null;
   setUndoAction: (action: UndoAction | null) => void;
   triggerUndo: () => void;
+  toastMessage: ToastMessage | null;
+  showToast: (text: string, type?: ToastMessage['type']) => void;
+  clearToast: () => void;
 
   // CRUD Operations
   addTransaction: (data: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>) => Transaction;
@@ -603,6 +612,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [isAppLocked, setIsAppLocked] = useState(false);
   const [lockedWalletIds, setLockedWalletIds] = useState<string[]>([]);
   const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
+  const [toastMessage, setToastMessage] = useState<ToastMessage | null>(null);
+
+  const showToast = useCallback((text: string, type: ToastMessage['type'] = 'info') => {
+    setToastMessage({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 5)}`, text, type });
+  }, []);
+
+  const clearToast = useCallback(() => {
+    setToastMessage(null);
+  }, []);
 
   // Notifications Read State
   const [readNotificationIds, setReadNotificationIds] = useState<Set<string>>(new Set());
@@ -4832,6 +4850,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const deleteWallet = useCallback(
     (id: string) => {
+      if (wallets.length <= 1) {
+        showToast(
+          settings.language === 'en'
+            ? 'Cannot delete this wallet. Your account must have at least one wallet to record transactions. You can edit its details instead.'
+            : 'لا يمكن حذف هذه المحفظة. يجب أن يحتوي حسابك على محفظة واحدة على الأقل لتسجيل المعاملات. يمكنك تعديل بياناتها بدلاً من حذفها.',
+          'warning'
+        );
+        return;
+      }
       if (getWalletDependencies(id).totalCount > 0) return;
       if (isOrgWorkspace && activeOrganization) {
         if (!canOrgManage) return;
@@ -4861,6 +4888,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       savePersonalState({ wallets: nextWallets });
     },
     [
+      wallets.length,
+      showToast,
+      settings.language,
       getWalletDependencies,
       isOrgWorkspace,
       isUsingLocalOrgMode,
@@ -5701,12 +5731,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const completeOnboarding = useCallback(
     (mainCurrency: string, firstWalletName: string, initialBalance: number) => {
+      const cleanBalance = Number.isFinite(initialBalance) ? initialBalance : 0;
       const firstWallet: Wallet = {
         id: 'w-primary',
-        name: firstWalletName || 'المحفظة الرئيسية',
+        name:
+          firstWalletName.trim() ||
+          (settings.language === 'en' ? 'Cash' : 'الخزينة الرئيسية'),
         currency: mainCurrency,
-        initialBalance: initialBalance || 0,
-        balance: initialBalance || 0,
+        initialBalance: cleanBalance,
+        initialBalanceMinor: toMinor(cleanBalance, mainCurrency),
+        balance: cleanBalance,
+        balanceMinor: toMinor(cleanBalance, mainCurrency),
         color: '#3A605B',
         icon: 'Wallet',
         isArchived: false,
@@ -5731,6 +5766,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const loadDemoData = useCallback(() => {
     const demo = generateDemoSeedData(settings.mainCurrency);
+    if (demo.wallets) setPersonalWallets(demo.wallets);
     if (demo.transactions) setPersonalTransactions(demo.transactions);
     if (demo.templates) setPersonalTemplates(demo.templates);
     if (demo.budgets) setPersonalBudgets(demo.budgets);
@@ -5741,6 +5777,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     saveActiveWorkspacePref('personal');
 
     savePersonalState({
+      wallets: demo.wallets,
       transactions: demo.transactions,
       templates: demo.templates,
       budgets: demo.budgets,
@@ -6123,6 +6160,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         undoAction,
         setUndoAction,
         triggerUndo,
+        toastMessage,
+        showToast,
+        clearToast,
 
         addTransaction,
         importTransactionsBatch,

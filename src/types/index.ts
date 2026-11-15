@@ -52,6 +52,7 @@ export interface Wallet {
   color: string; // Gradient class or hex
   icon: string;
   isArchived: boolean;
+  excludeFromTotal?: boolean;
   isLocked?: boolean;
   pin?: string;
   pinSalt?: string;

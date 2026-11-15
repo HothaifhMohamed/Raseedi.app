@@ -96,41 +96,26 @@ export const DEFAULT_CATEGORIES: Category[] = [
   { id: 'cat-other', nameAr: 'أخرى ومتنوعة', nameEn: 'Other', icon: 'Layers', color: '#7A7468', type: 'both', order: 19 },
 ];
 
-export const DEFAULT_WALLETS: Wallet[] = [
-  {
-    id: 'w-cash',
-    name: 'المحفظة النقدية (كاش)',
-    currency: 'EGP',
-    initialBalance: 2500,
-    balance: 2500,
+export function createCleanDefaultWallet(
+  currency = 'EGP',
+  language: 'ar' | 'en' = 'ar'
+): Wallet {
+  return {
+    id: 'w-main-treasury',
+    name: language === 'en' ? 'Cash' : 'الخزينة الرئيسية',
+    currency: currency || 'EGP',
+    initialBalance: 0,
+    initialBalanceMinor: 0,
+    balance: 0,
+    balanceMinor: 0,
     color: '#3A605B',
     icon: 'Wallet',
     isArchived: false,
     order: 1,
-  },
-  {
-    id: 'w-bank',
-    name: 'الحساب البنكي (جاري)',
-    currency: 'EGP',
-    initialBalance: 28500,
-    balance: 28500,
-    color: '#3E4E63',
-    icon: 'CreditCard',
-    isArchived: false,
-    order: 2,
-  },
-  {
-    id: 'w-savings',
-    name: 'خزينة التوفير',
-    currency: 'USD',
-    initialBalance: 1200,
-    balance: 1200,
-    color: '#6A5243',
-    icon: 'PiggyBank',
-    isArchived: false,
-    order: 3,
-  },
-];
+  };
+}
+
+export const DEFAULT_WALLETS: Wallet[] = [createCleanDefaultWallet('EGP', 'ar')];
 
 export interface AppDatabaseData {
   transactions: Transaction[];
@@ -995,7 +980,44 @@ export function generateDemoSeedData(mainCurrency = 'EGP'): Partial<AppDatabaseD
     },
   ];
 
+  const wallets: Wallet[] = [
+    {
+      id: 'w-cash',
+      name: 'المحفظة النقدية (كاش)',
+      currency: mainCurrency,
+      initialBalance: 2500,
+      balance: 2500,
+      color: '#3A605B',
+      icon: 'Wallet',
+      isArchived: false,
+      order: 1,
+    },
+    {
+      id: 'w-bank',
+      name: 'الحساب البنكي (جاري)',
+      currency: mainCurrency,
+      initialBalance: 28500,
+      balance: 28500,
+      color: '#3E4E63',
+      icon: 'CreditCard',
+      isArchived: false,
+      order: 2,
+    },
+    {
+      id: 'w-savings',
+      name: 'خزينة التوفير',
+      currency: 'USD',
+      initialBalance: 1200,
+      balance: 1200,
+      color: '#6A5243',
+      icon: 'PiggyBank',
+      isArchived: false,
+      order: 3,
+    },
+  ];
+
   return {
+    wallets,
     transactions,
     templates,
     budgets,

@@ -1738,53 +1738,20 @@ Return JSON matching the schema with:
           const orgRef = adminDb.collection('organizations').doc(orgId);
           const batch = adminDb.batch();
 
-          const mainCashBalance = loadSampleData ? 120000 : 0;
-          const bankBalance = loadSampleData ? 450000 : 0;
-          const pettyBalance = loadSampleData ? 15000 : 0;
-
           const starterWallets: Wallet[] = [
             {
               id: `org-w-cash-${now}`,
               name: 'الخزينة الرئيسية',
               currency: cleanCurrency,
-              initialBalance: mainCashBalance,
-              initialBalanceMinor: toMinor(mainCashBalance, cleanCurrency),
-              balance: mainCashBalance,
-              balanceMinor: toMinor(mainCashBalance, cleanCurrency),
+              initialBalance: 0,
+              initialBalanceMinor: 0,
+              balance: 0,
+              balanceMinor: 0,
               color: '#3A605B',
-              icon: 'Vault',
+              icon: 'Wallet',
               isArchived: false,
               order: 1,
               walletType: 'standard',
-            },
-            {
-              id: `org-w-bank-${now + 1}`,
-              name: 'الحساب البنكي للشركة',
-              currency: cleanCurrency,
-              initialBalance: bankBalance,
-              initialBalanceMinor: toMinor(bankBalance, cleanCurrency),
-              balance: bankBalance,
-              balanceMinor: toMinor(bankBalance, cleanCurrency),
-              color: '#3E4E63',
-              icon: 'Landmark',
-              isArchived: false,
-              order: 2,
-              walletType: 'bank_account',
-            },
-            {
-              id: `org-w-petty-${now + 2}`,
-              name: 'عهدة النثرية والمشتريات',
-              currency: cleanCurrency,
-              initialBalance: pettyBalance,
-              initialBalanceMinor: toMinor(pettyBalance, cleanCurrency),
-              balance: pettyBalance,
-              balanceMinor: toMinor(pettyBalance, cleanCurrency),
-              color: '#C99A2E',
-              icon: 'Wallet',
-              isArchived: false,
-              order: 3,
-              walletType: 'petty_cash',
-              custodianMemberUid: uid,
             },
           ];
 
