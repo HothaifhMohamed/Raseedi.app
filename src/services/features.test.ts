@@ -544,11 +544,12 @@ test('arabic date parsing & expanded auto-mapping: parses Arabic months, الت�
   // Reject impossible Arabic calendar dates
   assert.equal(normalizeCsvDate('30 فبراير، 2026'), null);
 
-  // 2. Auto-detect "التكلفة", "cost", "القيمة", "الى (المحفظة)", "المحفظة"
+  // 2. Auto-detect "التكلفة", "cost", "القيمة", "الى (المحفظة)", "المحفظة", "القسم الرئيسي"
   const m1 = autoDetectCsvMapping(['التاريخ', 'التكلفة', 'الى (المحفظة)', 'الملاحظات']);
   assert.equal(m1.dateIndex, 0);
   assert.equal(m1.amountIndex, 1);
-  assert.equal(m1.walletIndex, 2);
+  assert.equal(m1.toWalletIndex, 2);
+  assert.equal(m1.walletIndex, -1);
   assert.equal(m1.notesIndex, 3);
 
   const m2 = autoDetectCsvMapping(['Date', 'Cost', 'المحفظة']);
@@ -556,12 +557,13 @@ test('arabic date parsing & expanded auto-mapping: parses Arabic months, الت�
   assert.equal(m2.amountIndex, 1);
   assert.equal(m2.walletIndex, 2);
 
-  const m3 = autoDetectCsvMapping(['التاريخ', 'القيمة', 'Wallet']);
+  const m3 = autoDetectCsvMapping(['التاريخ', 'القيمة', 'Wallet', 'القسم الرئيسي']);
   assert.equal(m3.dateIndex, 0);
   assert.equal(m3.amountIndex, 1);
   assert.equal(m3.walletIndex, 2);
+  assert.equal(m3.categoryIndex, 3);
 
-  // 3. End-to-end mapping of exported expense sheet with Arabic date + التكلفة + الى (المحفظة)
+  // 3. End-to-end mapping of exported expense sheet with Arabic date + التكلفة + المحفظة
   const wallets: Wallet[] = [
     {
       id: 'w-cash',
@@ -589,10 +591,10 @@ test('arabic date parsing & expanded auto-mapping: parses Arabic months, الت�
 
   const mapped = mapCsvRowsToTransactions({
     rows: [
-      ['15 نوفمبر، 2026 06:57 PM', '280', 'بنك مصر', 'فاتورة إنترنت'],
-      ['١٠ فبراير، ٢٠٢٦ ٠٩:١٥ م', '١٥٠٫٥٠ ج.م', 'المحفظة النقدية', 'قهوة'],
+      ['15 نوفمبر، 2026 06:57 PM', '-280', 'بنك مصر', 'فاتورة إنترنت'],
+      ['١٠ فبراير، ٢٠٢٦ ٠٩:١٥ م', '١٥٠٫٥٠ ج.م', 'المحفظة النقدية', 'إيداع'],
     ],
-    mapping: m1,
+    mapping: m2,
     categories: DEFAULT_CATEGORIES,
     existingTransactions: [],
     wallets,
@@ -601,11 +603,116 @@ test('arabic date parsing & expanded auto-mapping: parses Arabic months, الت�
   assert.equal(mapped.validCount, 2);
   assert.equal(mapped.invalidCount, 0);
   assert.equal(mapped.previewRows[0].date, '2026-11-15');
+  assert.equal(mapped.previewRows[0].type, 'expense');
   assert.equal(mapped.previewRows[0].amount, 280);
   assert.equal(mapped.previewRows[0].walletId, 'w-bank');
   assert.equal(mapped.previewRows[1].date, '2026-02-10');
+  assert.equal(mapped.previewRows[1].type, 'income');
   assert.equal(mapped.previewRows[1].amount, 150.5);
   assert.equal(mapped.previewRows[1].walletId, 'w-cash');
 });
+
+test('smart import: auto-wallet creation (0 initial), transfer To-Wallet routing, sign-based income/expense, and auto-categorization', () => {
+  const headers = [
+    'التاريخ',
+    'التكلفة',
+    'المحفظة',
+    'الى (المحفظة)',
+    'القسم الرئيسي',
+    'الملاحظات',
+  ];
+  const mapping = autoDetectCsvMapping(headers);
+  assert.equal(mapping.dateIndex, 0);
+  assert.equal(mapping.amountIndex, 1);
+  assert.equal(mapping.walletIndex, 2);
+  assert.equal(mapping.toWalletIndex, 3);
+  assert.equal(mapping.categoryIndex, 4);
+  assert.equal(mapping.notesIndex, 5);
+  assert.equal(mapping.typeIndex, -1);
+
+  const existingWallets: Wallet[] = [
+    {
+      id: 'w-cash',
+      name: 'المحفظة النقدية',
+      currency: 'EGP',
+      initialBalance: 1000,
+      balance: 1000,
+      color: '#10b981',
+      icon: 'wallet',
+      isArchived: false,
+      order: 0,
+    },
+  ];
+
+  const rows = [
+    // Positive -> income, existing wallet, brand-new income category
+    ['2026-11-01', '5000', 'المحفظة النقدية', '', 'أرباح استشارات', 'مشروع حر'],
+    // Negative -> expense stored as positive Math.abs(), brand-new wallet + brand-new expense category
+    ['2026-11-02', '-350.75', 'فودافون كاش', '', 'اشتراك جيم', 'تجديد شهري'],
+    // Existing auto-created wallet reused without duplication, matches default category "مطاعم"
+    ['2026-11-03', '-120', 'فودافون كاش', '', 'مطاعم', 'غداء'],
+    // Transfer because "الى (المحفظة)" is populated -> creates "خزينة الطوارئ" at 0
+    ['2026-11-04', '-800', 'المحفظة النقدية', 'خزينة الطوارئ', 'تحويلات', 'ادخار'],
+    // Invalid row -> must NOT pollute autoCreatedWallets or autoCreatedCategories
+    ['تاريخ تالف', '-50', 'محفظة وهمية', '', 'تصنيف وهمي', 'صف خاطئ'],
+  ];
+
+  const res = mapCsvRowsToTransactions({
+    rows,
+    mapping,
+    categories: DEFAULT_CATEGORIES,
+    existingTransactions: [],
+    wallets: existingWallets,
+    defaultCurrency: 'EGP',
+  });
+
+  assert.equal(res.validCount, 4);
+  assert.equal(res.invalidCount, 1);
+
+  // Row 1: positive => income, matched wallet, new category
+  assert.equal(res.previewRows[0].type, 'income');
+  assert.equal(res.previewRows[0].amount, 5000);
+  assert.equal(res.previewRows[0].walletId, 'w-cash');
+  assert.equal(res.previewRows[0].isNewWallet, false);
+  assert.equal(res.previewRows[0].isNewCategory, true);
+
+  // Row 2: negative => expense + positive amount, new wallet "فودافون كاش", new category "اشتراك جيم"
+  assert.equal(res.previewRows[1].type, 'expense');
+  assert.equal(res.previewRows[1].amount, 350.75);
+  assert.equal(res.previewRows[1].isNewWallet, true);
+  assert.equal(res.previewRows[1].walletName, 'فودافون كاش');
+  assert.equal(res.previewRows[1].isNewCategory, true);
+
+  // Row 3: reuses same new wallet id, matches existing "مطاعم"
+  assert.equal(res.previewRows[2].type, 'expense');
+  assert.equal(res.previewRows[2].walletId, res.previewRows[1].walletId);
+  assert.equal(res.previewRows[2].categoryId, 'cat-restaurants');
+  assert.equal(res.previewRows[2].isNewCategory, false);
+
+  // Row 4: "الى (المحفظة)" present => transfer + Math.abs(amount) + creates target wallet
+  assert.equal(res.previewRows[3].type, 'transfer');
+  assert.equal(res.previewRows[3].amount, 800);
+  assert.equal(res.previewRows[3].walletId, 'w-cash');
+  assert.equal(res.previewRows[3].toWalletName, 'خزينة الطوارئ');
+  assert.equal(res.previewRows[3].isNewToWallet, true);
+
+  // Auto-created wallets: "فودافون كاش" + "خزينة الطوارئ" (initialBalance = 0, no invalid-row wallet)
+  assert.equal(res.autoCreatedWallets.length, 2);
+  assert.deepEqual(
+    res.autoCreatedWallets.map((w) => ({ name: w.name, initialBalance: w.initialBalance })),
+    [
+      { name: 'فودافون كاش', initialBalance: 0 },
+      { name: 'خزينة الطوارئ', initialBalance: 0 },
+    ]
+  );
+
+  // Auto-created categories: "أرباح استشارات" (income), "اشتراك جيم" (expense), "تحويلات" (expense)
+  assert.equal(res.autoCreatedCategories.length, 3);
+  assert.equal(res.autoCreatedCategories[0].nameAr, 'أرباح استشارات');
+  assert.equal(res.autoCreatedCategories[0].type, 'income');
+  assert.equal(res.autoCreatedCategories[1].nameAr, 'اشتراك جيم');
+  assert.equal(res.autoCreatedCategories[1].type, 'expense');
+});
+
 
 

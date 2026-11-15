@@ -105,6 +105,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     categoryIndex: -1,
     notesIndex: -1,
     walletIndex: -1,
+    toWalletIndex: -1,
   });
   const [targetWalletId, setTargetWalletId] = useState(wallets[0]?.id || '');
   const [skipDuplicates, setSkipDuplicates] = useState(true);
@@ -397,7 +398,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     setCsvRecords(result.data.records);
     setImportSheetNames(result.data.sheetNames || []);
     setImportActiveSheet(result.data.activeSheet || '');
-    setCsvMapping(autoDetectCsvMapping(result.data.headers));
+    setCsvMapping({ ...autoDetectCsvMapping(result.data.headers), typeIndex: -1 });
     if (!targetWalletId && wallets[0]) {
       setTargetWalletId(wallets[0].id);
     }
@@ -430,18 +431,28 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     applyParsedImportData(cached.bytes, cached.fileName, cached.mimeType, nextSheet);
   };
 
+  const importDefaultCurrency = settings.mainCurrency || wallets[0]?.currency || 'EGP';
+
   const csvPreviewResult = useMemo(() => {
     if (csvRows.length === 0) {
-      return { previewRows: [], validCount: 0, invalidCount: 0, duplicateCount: 0 };
+      return {
+        previewRows: [],
+        validCount: 0,
+        invalidCount: 0,
+        duplicateCount: 0,
+        autoCreatedWallets: [],
+        autoCreatedCategories: [],
+      };
     }
     return mapCsvRowsToTransactions({
       rows: csvRows,
-      mapping: csvMapping,
+      mapping: { ...csvMapping, typeIndex: -1 },
       categories,
       existingTransactions: transactions,
       wallets,
+      defaultCurrency: importDefaultCurrency,
     });
-  }, [csvRows, csvMapping, categories, transactions, wallets]);
+  }, [csvRows, csvMapping, categories, transactions, wallets, importDefaultCurrency]);
 
   const rowsReadyToImport = useMemo(() => {
     return csvPreviewResult.previewRows.filter(
@@ -449,21 +460,42 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     );
   }, [csvPreviewResult.previewRows, skipDuplicates]);
 
+  const readyWalletsToCreate = useMemo(() => {
+    const neededIds = new Set<string>();
+    for (const r of rowsReadyToImport) {
+      if (r.isNewWallet && r.walletId) neededIds.add(r.walletId);
+      if (r.isNewToWallet && r.toWalletId) neededIds.add(r.toWalletId);
+    }
+    return csvPreviewResult.autoCreatedWallets.filter((w) => neededIds.has(w.id));
+  }, [rowsReadyToImport, csvPreviewResult.autoCreatedWallets]);
+
+  const readyCategoriesToCreate = useMemo(() => {
+    const neededIds = new Set<string>();
+    for (const r of rowsReadyToImport) {
+      if (r.isNewCategory && r.categoryId) neededIds.add(r.categoryId);
+    }
+    return csvPreviewResult.autoCreatedCategories.filter((c) => neededIds.has(c.id));
+  }, [rowsReadyToImport, csvPreviewResult.autoCreatedCategories]);
+
   const handleConfirmCsvImport = () => {
     const fallbackWallet = wallets.find((w) => w.id === targetWalletId) || wallets[0];
-    if (!fallbackWallet || rowsReadyToImport.length === 0) return;
+    const allKnownWallets = [...wallets, ...readyWalletsToCreate];
+    if (rowsReadyToImport.length === 0) return;
 
     const batch = rowsReadyToImport.map((r) => {
       const rowWallet =
-        (r.walletId && wallets.find((w) => w.id === r.walletId)) || fallbackWallet;
+        (r.walletId && allKnownWallets.find((w) => w.id === r.walletId)) ||
+        fallbackWallet ||
+        readyWalletsToCreate[0];
       return {
         type: r.type,
         amount: r.amount,
-        currency: rowWallet.currency,
+        currency: rowWallet?.currency || importDefaultCurrency,
         date: r.date,
         time: '12:00',
         categoryId: r.categoryId,
-        walletId: rowWallet.id,
+        walletId: rowWallet?.id || '',
+        ...(r.type === 'transfer' && r.toWalletId ? { toWalletId: r.toWalletId } : {}),
         notes: r.notes,
         priority: 'normal' as const,
         doesNotAffectBalance: false,
@@ -472,19 +504,36 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
 
     const skippedInvalid = csvPreviewResult.invalidCount;
     const skippedDup = skipDuplicates ? csvPreviewResult.duplicateCount : 0;
-    const imported = importTransactionsBatch(batch);
+    const createdWalletsCount = readyWalletsToCreate.length;
+    const createdCatsCount = readyCategoriesToCreate.length;
+    const imported = importTransactionsBatch(batch, {
+      newWallets: readyWalletsToCreate,
+      newCategories: readyCategoriesToCreate,
+    });
     resetImportPreviewState();
+
+    const extraPartsAr: string[] = [];
+    const extraPartsEn: string[] = [];
+    if (createdWalletsCount > 0) {
+      extraPartsAr.push(`إنشاء ${createdWalletsCount} محفظة تلقائياً`);
+      extraPartsEn.push(`${createdWalletsCount} wallet(s) created`);
+    }
+    if (createdCatsCount > 0) {
+      extraPartsAr.push(`إنشاء ${createdCatsCount} تصنيف تلقائياً`);
+      extraPartsEn.push(`${createdCatsCount} category(ies) created`);
+    }
+    if (skippedInvalid > 0 || skippedDup > 0) {
+      extraPartsAr.push(`تخطي ${skippedInvalid} غير صالح و ${skippedDup} مكرر`);
+      extraPartsEn.push(`skipped ${skippedInvalid} invalid, ${skippedDup} duplicate`);
+    }
+
     setMessage({
       text: isRTL
         ? `تم استيراد ${imported} معاملة بنجاح!${
-            skippedInvalid > 0 || skippedDup > 0
-              ? ` (تم تخطي ${skippedInvalid} غير صالح و ${skippedDup} مكرر)`
-              : ''
+            extraPartsAr.length > 0 ? ` (${extraPartsAr.join(' • ')})` : ''
           }`
         : `Successfully imported ${imported} transactions!${
-            skippedInvalid > 0 || skippedDup > 0
-              ? ` (Skipped ${skippedInvalid} invalid, ${skippedDup} duplicate)`
-              : ''
+            extraPartsEn.length > 0 ? ` (${extraPartsEn.join(' • ')})` : ''
           }`,
     });
   };
@@ -1191,10 +1240,12 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                     </div>
                   )}
 
-                  {/* Target Wallet */}
+                  {/* Optional Fallback Wallet (used only for rows without a wallet name) */}
                   <div>
                     <label className="block text-xs font-semibold text-[var(--color-ink)] mb-1">
-                      {isRTL ? 'المحفظة المستهدفة' : 'Target Wallet'}
+                      {isRTL
+                        ? 'المحفظة الافتراضية (للصفوف بدون عمود محفظة فقط)'
+                        : 'Fallback Wallet (for rows with empty Wallet)'}
                     </label>
                     <select
                       value={targetWalletId}
@@ -1209,6 +1260,13 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                     </select>
                   </div>
 
+                  {/* Smart Parsing Rules Notice */}
+                  <div className="p-2.5 rounded-xl bg-[var(--color-accent)]/8 border border-[var(--color-accent)]/25 text-[11px] text-[var(--color-ink)] leading-relaxed">
+                    {isRTL
+                      ? 'استيراد ذكي تلقائي: المبلغ الموجب يُسجل كـ «دخل»، والسالب كـ «مصروف»، ووجود «إلى المحفظة» يُسجل كـ «تحويل». تُنشأ المحافظ والتصنيفات غير الموجودة تلقائياً.'
+                      : 'Smart import: Positive amounts = Income, negative = Expense, populated "To Wallet" = Transfer. Missing wallets (starting at 0) & categories are created automatically.'}
+                  </div>
+
                   {/* Column Mapping Selectors */}
                   <div className="p-3 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl space-y-2">
                     <div className="flex items-center justify-between gap-2 mb-1">
@@ -1217,7 +1275,9 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                       </span>
                       <button
                         type="button"
-                        onClick={() => setCsvMapping(autoDetectCsvMapping(csvHeaders))}
+                        onClick={() =>
+                          setCsvMapping({ ...autoDetectCsvMapping(csvHeaders), typeIndex: -1 })
+                        }
                         className="text-[10px] font-semibold text-[var(--color-accent)] hover:underline"
                       >
                         {isRTL ? 'إعادة التعرف التلقائي' : 'Auto-detect'}
@@ -1226,10 +1286,10 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                     {(
                       [
                         { key: 'dateIndex', label: isRTL ? 'التاريخ *' : 'Date *' },
-                        { key: 'amountIndex', label: isRTL ? 'المبلغ *' : 'Amount *' },
-                        { key: 'walletIndex', label: isRTL ? 'المحفظة (اختياري)' : 'Wallet (Optional)' },
-                        { key: 'typeIndex', label: isRTL ? 'النوع (اختياري)' : 'Type (Optional)' },
-                        { key: 'categoryIndex', label: isRTL ? 'التصنيف (اختياري)' : 'Category (Optional)' },
+                        { key: 'amountIndex', label: isRTL ? 'المبلغ / التكلفة *' : 'Amount / Cost *' },
+                        { key: 'walletIndex', label: isRTL ? 'المحفظة (توجيه وإنشاء تلقائي)' : 'Wallet (Auto-route/create)' },
+                        { key: 'toWalletIndex', label: isRTL ? 'إلى المحفظة (تحويل)' : 'To Wallet (Transfer)' },
+                        { key: 'categoryIndex', label: isRTL ? 'القسم / التصنيف' : 'Category / Section' },
                         { key: 'notesIndex', label: isRTL ? 'الملاحظات (اختياري)' : 'Notes (Optional)' },
                       ] as Array<{ key: keyof CsvColumnMapping; label: string }>
                     ).map((field) => (
@@ -1256,6 +1316,39 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                       </div>
                     ))}
                   </div>
+
+                  {/* Auto-Creation Summary (Wallets & Categories) */}
+                  {(readyWalletsToCreate.length > 0 || readyCategoriesToCreate.length > 0) && (
+                    <div
+                      data-testid="auto-create-summary"
+                      className="p-3 rounded-xl bg-[var(--color-surface)] border border-[var(--color-accent)]/35 space-y-1.5 text-[11px]"
+                    >
+                      {readyWalletsToCreate.length > 0 && (
+                        <div>
+                          <span className="font-bold text-[var(--color-accent)]">
+                            {isRTL
+                              ? `محافظ جديدة ستُنشأ تلقائياً برصيد 0 (${readyWalletsToCreate.length}): `
+                              : `New wallets to auto-create at 0 (${readyWalletsToCreate.length}): `}
+                          </span>
+                          <span className="text-[var(--color-ink)]">
+                            {readyWalletsToCreate.map((w) => w.name).join('، ')}
+                          </span>
+                        </div>
+                      )}
+                      {readyCategoriesToCreate.length > 0 && (
+                        <div>
+                          <span className="font-bold text-[var(--color-accent)]">
+                            {isRTL
+                              ? `تصنيفات جديدة ستُنشأ تلقائياً (${readyCategoriesToCreate.length}): `
+                              : `New categories to auto-create (${readyCategoriesToCreate.length}): `}
+                          </span>
+                          <span className="text-[var(--color-ink)]">
+                            {readyCategoriesToCreate.map((c) => c.nameAr).join('، ')}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Duplicate Detection Toggle & Stats */}
                   <div className="flex items-center justify-between p-3 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-xs">
@@ -1339,9 +1432,10 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                                 {isRTL ? 'المبلغ' : 'Amount'}
                               </th>
                               <th className="px-2.5 py-1.5 font-semibold text-start">
-                                {isRTL ? 'التصنيف' : 'Category'}
+                                {isRTL ? 'القسم' : 'Category'}
                               </th>
-                              {(csvMapping.walletIndex ?? -1) >= 0 && (
+                              {((csvMapping.walletIndex ?? -1) >= 0 ||
+                                (csvMapping.toWalletIndex ?? -1) >= 0) && (
                                 <th className="px-2.5 py-1.5 font-semibold text-start">
                                   {isRTL ? 'المحفظة' : 'Wallet'}
                                 </th>
@@ -1378,22 +1472,50 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                                       className={
                                         row.type === 'income'
                                           ? 'text-[var(--color-income)]'
+                                          : row.type === 'transfer'
+                                          ? 'text-[var(--color-accent)]'
                                           : 'text-[var(--color-expense)]'
                                       }
                                     >
-                                      {row.type === 'income' ? '+' : '−'}
+                                      {row.type === 'income'
+                                        ? '+'
+                                        : row.type === 'transfer'
+                                        ? '⇄ '
+                                        : '−'}
                                       {row.amount}
                                     </span>
                                   ) : (
                                     '—'
                                   )}
                                 </td>
-                                <td className="px-2.5 py-1.5 max-w-[95px] truncate">
-                                  {row.categoryLabel}
+                                <td className="px-2.5 py-1.5 max-w-[120px] truncate">
+                                  <span>{row.categoryLabel}</span>
+                                  {row.isNewCategory && (
+                                    <span className="ms-1 text-[9px] font-bold text-[var(--color-accent)]">
+                                      {isRTL ? '(جديد)' : '(new)'}
+                                    </span>
+                                  )}
                                 </td>
-                                {(csvMapping.walletIndex ?? -1) >= 0 && (
-                                  <td className="px-2.5 py-1.5 max-w-[95px] truncate text-[var(--color-muted)]">
-                                    {row.walletName || '—'}
+                                {((csvMapping.walletIndex ?? -1) >= 0 ||
+                                  (csvMapping.toWalletIndex ?? -1) >= 0) && (
+                                  <td className="px-2.5 py-1.5 max-w-[150px] truncate text-[var(--color-muted)]">
+                                    <span>{row.walletName || '—'}</span>
+                                    {row.isNewWallet && (
+                                      <span className="ms-1 text-[9px] font-bold text-[var(--color-accent)]">
+                                        {isRTL ? '(جديدة)' : '(new)'}
+                                      </span>
+                                    )}
+                                    {row.type === 'transfer' && row.toWalletName && (
+                                      <span className="text-[var(--color-accent)] font-semibold">
+                                        {' → '}
+                                        {row.toWalletName}
+                                        {row.isNewToWallet
+                                          ? isRTL
+                                            ? ' (جديدة)'
+                                            : ' (new)'
+                                          : ''}
+                                      </span>
+                                    )}
                                   </td>
                                 )}
                                 <td className="px-2.5 py-1.5 max-w-[120px] truncate text-[var(--color-muted)]">

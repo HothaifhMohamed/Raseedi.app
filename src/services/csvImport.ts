@@ -10,10 +10,11 @@ import { normalizeArabicPersianNumerals } from './numbers';
 export interface CsvColumnMapping {
   dateIndex: number; // -1 if unmapped
   amountIndex: number; // -1 if unmapped
-  typeIndex: number; // -1 if unmapped (optional: defaults to expense unless negative or income keyword)
+  typeIndex?: number; // optional legacy override; when -1/omitted uses Smart Amount (>0 income, <0 expense) & To-Wallet (transfer)
   categoryIndex: number; // -1 if unmapped
   notesIndex: number; // -1 if unmapped
-  walletIndex?: number; // -1 or undefined if unmapped (optional: uses target wallet fallback)
+  walletIndex?: number; // -1 or undefined if unmapped (auto-routes & auto-creates wallets)
+  toWalletIndex?: number; // -1 or undefined if unmapped (non-empty value marks row as Transfer & auto-creates destination wallet)
 }
 
 export interface CsvParsedTable {
@@ -44,13 +45,27 @@ export interface CsvPreviewRow {
   type: TransactionType;
   categoryId: string;
   categoryLabel: string;
+  isNewCategory?: boolean;
   walletId?: string;
   walletName?: string;
+  isNewWallet?: boolean;
+  toWalletId?: string;
+  toWalletName?: string;
+  isNewToWallet?: boolean;
   notes: string;
   isDuplicate: boolean;
   isValid: boolean;
   errorReason?: string;
   errorReasonAr?: string;
+}
+
+export interface CsvImportMappingResult {
+  previewRows: CsvPreviewRow[];
+  validCount: number;
+  invalidCount: number;
+  duplicateCount: number;
+  autoCreatedWallets: Wallet[];
+  autoCreatedCategories: Category[];
 }
 
 function isValidCalendarYmd(year: number, month: number, day: number): boolean {
@@ -553,7 +568,8 @@ export function parseArabicDate(dateString: string): string {
 }
 
 /**
- * Smart column mapping detection from Arabic or English header names
+ * Smart column mapping detection from Arabic or English header names.
+ * Note: checks destination transfer wallet ("الى (المحفظة)") BEFORE general wallet ("المحفظة").
  */
 export function autoDetectCsvMapping(headers: string[]): CsvColumnMapping {
   const mapping: CsvColumnMapping = {
@@ -563,7 +579,10 @@ export function autoDetectCsvMapping(headers: string[]): CsvColumnMapping {
     categoryIndex: -1,
     notesIndex: -1,
     walletIndex: -1,
+    toWalletIndex: -1,
   };
+
+  let fallbackCategoryIndex = -1;
 
   headers.forEach((h, idx) => {
     const norm = normalizeArabicText(h);
@@ -589,12 +608,22 @@ export function autoDetectCsvMapping(headers: string[]): CsvColumnMapping {
     ) {
       mapping.amountIndex = idx;
     } else if (
+      mapping.toWalletIndex === -1 &&
+      (norm.includes('الي (المحفظه)') ||
+        norm.includes('الي المحفظه') ||
+        norm.includes('الي محفظه') ||
+        norm.includes('to (wallet)') ||
+        norm.includes('to wallet') ||
+        norm.includes('towallet') ||
+        norm.includes('destination wallet') ||
+        norm.includes('to account') ||
+        norm === 'الي' ||
+        norm === 'to')
+    ) {
+      mapping.toWalletIndex = idx;
+    } else if (
       mapping.walletIndex === -1 &&
-      (norm.includes('محفظه') ||
-        norm.includes('الي (المحفظه)') ||
-        norm.includes('الى (المحفظه)') ||
-        norm.includes('wallet') ||
-        norm.includes('account'))
+      (norm.includes('محفظه') || norm.includes('wallet') || norm.includes('account'))
     ) {
       mapping.walletIndex = idx;
     } else if (
@@ -603,10 +632,23 @@ export function autoDetectCsvMapping(headers: string[]): CsvColumnMapping {
     ) {
       mapping.typeIndex = idx;
     } else if (
-      mapping.categoryIndex === -1 &&
-      (norm.includes('تصنيف') || norm.includes('فئه') || norm.includes('بند') || norm.includes('category'))
+      norm.includes('القسم الرئيسي') ||
+      norm.includes('تصنيف') ||
+      norm.includes('فئه') ||
+      norm.includes('بند') ||
+      norm.includes('category') ||
+      norm.includes('قسم')
     ) {
-      mapping.categoryIndex = idx;
+      const isPrimaryCategory =
+        norm.includes('القسم الرئيسي') ||
+        norm.includes('تصنيف') ||
+        norm.includes('category') ||
+        !norm.includes('فرعي');
+      if (isPrimaryCategory && mapping.categoryIndex === -1) {
+        mapping.categoryIndex = idx;
+      } else if (fallbackCategoryIndex === -1) {
+        fallbackCategoryIndex = idx;
+      }
     } else if (
       mapping.notesIndex === -1 &&
       (norm.includes('ملاحظ') ||
@@ -622,6 +664,10 @@ export function autoDetectCsvMapping(headers: string[]): CsvColumnMapping {
       mapping.notesIndex = idx;
     }
   });
+
+  if (mapping.categoryIndex === -1 && fallbackCategoryIndex !== -1) {
+    mapping.categoryIndex = fallbackCategoryIndex;
+  }
 
   // Fallback heuristics only if headers weren't recognized AND indices aren't already claimed
   const usedIndices = new Set(
@@ -785,8 +831,43 @@ function buildDuplicateKey(date: string, amount: number, type: TransactionType):
   return `${date}|${amount.toFixed(3)}|${type}`;
 }
 
+const AUTO_WALLET_COLORS = [
+  '#3A605B',
+  '#3E4E63',
+  '#6A5243',
+  '#1E6F73',
+  '#5E7F3A',
+  '#7E4C76',
+  '#9E6F38',
+];
+
+const AUTO_CATEGORY_COLORS = [
+  '#1E6F73',
+  '#B5523B',
+  '#5E7F3A',
+  '#C99A2E',
+  '#545E75',
+  '#8F4A63',
+  '#415B76',
+  '#6A5243',
+];
+
+function computeDeterministicIdHash(input: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 /**
- * Map CSV / Excel rows to preview transactions with strict validation and duplicate detection.
+ * Map CSV / Excel rows to preview transactions with:
+ * - Smart Amount Parsing (>0 => income, <0 => expense with Math.abs)
+ * - Transfer detection when "To Wallet" ("الى (المحفظة)") has a value
+ * - Auto-Wallet routing & creation (initialBalance: 0) for unknown wallet names
+ * - Auto-Categorization & creation for unknown categories in the matching transaction type
+ * - Strict date/amount validation and duplicate detection
  */
 export function mapCsvRowsToTransactions(params: {
   rows: string[][];
@@ -794,13 +875,16 @@ export function mapCsvRowsToTransactions(params: {
   categories: Category[];
   existingTransactions: Transaction[];
   wallets?: Wallet[];
-}): {
-  previewRows: CsvPreviewRow[];
-  validCount: number;
-  invalidCount: number;
-  duplicateCount: number;
-} {
-  const { rows, mapping, categories, existingTransactions, wallets = [] } = params;
+  defaultCurrency?: string;
+}): CsvImportMappingResult {
+  const {
+    rows,
+    mapping,
+    categories,
+    existingTransactions,
+    wallets = [],
+    defaultCurrency = wallets[0]?.currency || 'EGP',
+  } = params;
 
   // Pre-index existing transactions in O(N) for fast duplicate detection even at 5,000+ rows
   const existingKeys = new Set<string>();
@@ -812,71 +896,240 @@ export function mapCsvRowsToTransactions(params: {
   const fallbackCategory =
     categories.find((c) => c.id === 'cat-other') || categories[0];
 
+  const walletColIdx = mapping.walletIndex ?? -1;
+  const toWalletColIdx = mapping.toWalletIndex ?? -1;
+  const typeColIdx = mapping.typeIndex ?? -1;
+
+  // Track existing + auto-created wallets deterministically without duplicating within the batch
+  const usedWalletIds = new Set(wallets.map((w) => w.id));
+  const autoCreatedWallets: Wallet[] = [];
+  const autoWalletByNormName = new Map<string, Wallet>();
+
+  const resolveOrCreateWallet = (rawName: string): { wallet?: Wallet; isNew: boolean } => {
+    const trimmed = rawName.trim();
+    if (!trimmed) return { wallet: undefined, isNew: false };
+    const normW = normalizeArabicText(trimmed);
+    if (!normW) return { wallet: undefined, isNew: false };
+
+    // 1. Exact match in existing wallets
+    const exactExisting = wallets.find((w) => normalizeArabicText(w.name) === normW);
+    if (exactExisting) return { wallet: exactExisting, isNew: false };
+
+    // 2. Safe partial match in existing wallets (e.g., "كاش" -> "المحفظة النقدية (كاش)")
+    if (normW.length >= 3) {
+      const partialExisting = wallets.find((w) => {
+        const wNorm = normalizeArabicText(w.name);
+        return wNorm.length >= 3 && (wNorm.includes(normW) || normW.includes(wNorm));
+      });
+      if (partialExisting) return { wallet: partialExisting, isNew: false };
+    }
+
+    // 3. Previously queued auto-created wallet in this import batch
+    const alreadyCreated = autoWalletByNormName.get(normW);
+    if (alreadyCreated) return { wallet: alreadyCreated, isNew: true };
+
+    // 4. Create a brand new wallet with initialBalance: 0
+    const baseHash = computeDeterministicIdHash(normW);
+    let id = `w-imp-${baseHash}`;
+    let suffix = 1;
+    while (usedWalletIds.has(id)) {
+      id = `w-imp-${baseHash}-${suffix++}`;
+    }
+    usedWalletIds.add(id);
+
+    const newWallet: Wallet = {
+      id,
+      name: trimmed,
+      currency: defaultCurrency,
+      initialBalance: 0,
+      initialBalanceMinor: 0,
+      balance: 0,
+      balanceMinor: 0,
+      color: AUTO_WALLET_COLORS[(wallets.length + autoCreatedWallets.length) % AUTO_WALLET_COLORS.length],
+      icon: 'Wallet',
+      isArchived: false,
+      order: wallets.length + autoCreatedWallets.length + 1,
+    };
+    autoCreatedWallets.push(newWallet);
+    autoWalletByNormName.set(normW, newWallet);
+    return { wallet: newWallet, isNew: true };
+  };
+
+  // Track existing + auto-created categories
+  const usedCatIds = new Set(categories.map((c) => c.id));
+  const autoCreatedCategories: Category[] = [];
+  const autoCatByNormName = new Map<string, Category>();
+
+  const resolveOrCreateCategory = (
+    rawCatName: string,
+    txType: TransactionType
+  ): { category: Category; isNew: boolean } => {
+    const trimmed = rawCatName.trim();
+    if (!trimmed) {
+      return {
+        category: fallbackCategory || {
+          id: 'cat-other',
+          nameAr: 'أخرى',
+          nameEn: 'Other',
+          icon: 'Layers',
+          color: '#7A7468',
+          type: 'both',
+          order: 99,
+        },
+        isNew: false,
+      };
+    }
+
+    const normCat = normalizeArabicText(trimmed);
+    const desiredCatType: 'expense' | 'income' = txType === 'income' ? 'income' : 'expense';
+
+    // 1. Exact match in existing categories
+    const exact = categories.find(
+      (c) => normalizeArabicText(c.nameAr) === normCat || normalizeArabicText(c.nameEn) === normCat
+    );
+    if (exact) return { category: exact, isNew: false };
+
+    // 2. Safe partial match in existing non-"other" categories
+    if (normCat.length >= 3) {
+      const partialMatches = categories.filter((c) => {
+        if (c.id === 'cat-other') return false;
+        const ar = normalizeArabicText(c.nameAr);
+        const en = normalizeArabicText(c.nameEn);
+        return (
+          (ar.length >= 3 && (ar.includes(normCat) || normCat.includes(ar))) ||
+          (en.length >= 3 && (en.includes(normCat) || normCat.includes(en)))
+        );
+      });
+      if (partialMatches.length > 0) {
+        const typePreferred =
+          partialMatches.find((c) => c.type === desiredCatType || c.type === 'both') ||
+          partialMatches[0];
+        return { category: typePreferred, isNew: false };
+      }
+    }
+
+    // 3. Previously queued auto-created category in this import batch
+    const alreadyCreated = autoCatByNormName.get(normCat);
+    if (alreadyCreated) {
+      if (alreadyCreated.type !== 'both' && alreadyCreated.type !== desiredCatType) {
+        alreadyCreated.type = 'both';
+      }
+      return { category: alreadyCreated, isNew: true };
+    }
+
+    // 4. Create a brand new category under the appropriate transaction type
+    const baseHash = computeDeterministicIdHash(normCat);
+    let id = `cat-imp-${baseHash}`;
+    let suffix = 1;
+    while (usedCatIds.has(id)) {
+      id = `cat-imp-${baseHash}-${suffix++}`;
+    }
+    usedCatIds.add(id);
+
+    const newCat: Category = {
+      id,
+      nameAr: trimmed,
+      nameEn: trimmed,
+      icon: 'Tag',
+      color:
+        AUTO_CATEGORY_COLORS[(categories.length + autoCreatedCategories.length) % AUTO_CATEGORY_COLORS.length],
+      type: desiredCatType,
+      order: categories.length + autoCreatedCategories.length + 1,
+    };
+    autoCreatedCategories.push(newCat);
+    autoCatByNormName.set(normCat, newCat);
+    return { category: newCat, isNew: true };
+  };
+
   let validCount = 0;
   let invalidCount = 0;
   let duplicateCount = 0;
-  const walletColIdx = mapping.walletIndex ?? -1;
 
   const previewRows: CsvPreviewRow[] = rows.map((row, idx) => {
     const rawDate = mapping.dateIndex >= 0 ? row[mapping.dateIndex] || '' : '';
     const rawAmount = mapping.amountIndex >= 0 ? row[mapping.amountIndex] || '' : '';
-    const rawType = mapping.typeIndex >= 0 ? row[mapping.typeIndex] || '' : '';
+    const rawType = typeColIdx >= 0 ? row[typeColIdx] || '' : '';
     const rawCat = mapping.categoryIndex >= 0 ? row[mapping.categoryIndex] || '' : '';
     const rawNotes = mapping.notesIndex >= 0 ? row[mapping.notesIndex] || '' : '';
     const rawWallet = walletColIdx >= 0 ? row[walletColIdx] || '' : '';
+    const rawToWallet = toWalletColIdx >= 0 ? row[toWalletColIdx] || '' : '';
 
     const normalizedDate = normalizeCsvDate(rawDate);
     const parsedAmount = parseImportAmount(rawAmount);
     const amount = parsedAmount ? parsedAmount.amount : NaN;
+    const isValidAmount = Boolean(parsedAmount && amount > 0);
+    const isValid = Boolean(normalizedDate && isValidAmount);
 
-    // Infer type
+    // Smart transaction type inference:
+    // 1) Non-empty "الى (المحفظة)" (To Wallet) -> Transfer
+    // 2) Negative amount (< 0) -> Expense (stored positive via Math.abs)
+    // 3) Optional explicit legacy type column override (if explicitly mapped & populated)
+    // 4) Positive amount (> 0) -> Income
     const normType = normalizeArabicText(rawType);
-    let type: TransactionType = 'expense';
-    if (
-      normType.includes('دخل') ||
-      normType.includes('ايراد') ||
-      normType.includes('ايداع') ||
-      normType.includes('income') ||
-      normType.includes('credit') ||
-      normType.includes('deposit')
-    ) {
-      type = 'income';
-    } else if (normType.includes('تحويل') || normType.includes('transfer')) {
+    let type: TransactionType = 'income';
+    if (rawToWallet.trim()) {
       type = 'transfer';
-    } else if (mapping.typeIndex === -1 && parsedAmount?.isNegative) {
+    } else if (parsedAmount?.isNegative) {
       type = 'expense';
-    }
-
-    // Match category
-    let matchedCat = fallbackCategory;
-    if (rawCat.trim()) {
-      const normCat = normalizeArabicText(rawCat);
-      const found = categories.find(
-        (c) =>
-          normalizeArabicText(c.nameAr) === normCat ||
-          normalizeArabicText(c.nameEn) === normCat ||
-          normalizeArabicText(c.nameAr).includes(normCat) ||
-          normalizeArabicText(c.nameEn).includes(normCat)
-      );
-      if (found) matchedCat = found;
-    }
-
-    // Match optional wallet column
-    let matchedWalletId: string | undefined;
-    let matchedWalletName: string | undefined;
-    if (rawWallet.trim() && wallets.length > 0) {
-      const normW = normalizeArabicText(rawWallet);
-      const foundWallet = wallets.find((w) => {
-        const wNorm = normalizeArabicText(w.name);
-        return wNorm === normW || wNorm.includes(normW) || normW.includes(wNorm);
-      });
-      if (foundWallet) {
-        matchedWalletId = foundWallet.id;
-        matchedWalletName = foundWallet.name;
+    } else if (typeColIdx >= 0 && normType) {
+      if (normType.includes('تحويل') || normType.includes('transfer')) {
+        type = 'transfer';
+      } else if (
+        normType.includes('مصروف') ||
+        normType.includes('صرف') ||
+        normType.includes('خصم') ||
+        normType.includes('expense') ||
+        normType.includes('debit') ||
+        normType.includes('outflow')
+      ) {
+        type = 'expense';
+      } else if (
+        normType.includes('دخل') ||
+        normType.includes('ايراد') ||
+        normType.includes('ايداع') ||
+        normType.includes('income') ||
+        normType.includes('credit') ||
+        normType.includes('deposit')
+      ) {
+        type = 'income';
+      } else {
+        type = 'income';
       }
+    } else {
+      type = 'income';
     }
 
-    const isValid = Boolean(normalizedDate && parsedAmount && amount > 0);
+    // Only auto-create wallets and categories for valid rows (so invalid/skipped rows never pollute user lists)
+    let matchedWallet: Wallet | undefined;
+    let isNewWallet = false;
+    let matchedToWallet: Wallet | undefined;
+    let isNewToWallet = false;
+    let matchedCat: Category = fallbackCategory;
+    let isNewCategory = false;
+
+    if (isValid) {
+      const srcRes = resolveOrCreateWallet(rawWallet);
+      matchedWallet = srcRes.wallet;
+      isNewWallet = srcRes.isNew;
+
+      if (type === 'transfer' && rawToWallet.trim()) {
+        const dstRes = resolveOrCreateWallet(rawToWallet);
+        matchedToWallet = dstRes.wallet;
+        isNewToWallet = dstRes.isNew;
+      }
+
+      const catRes = resolveOrCreateCategory(rawCat, type);
+      matchedCat = catRes.category;
+      isNewCategory = catRes.isNew;
+    } else if (rawCat.trim()) {
+      // Keep display label clean for invalid preview row without mutating autoCreatedCategories
+      matchedCat = {
+        ...(fallbackCategory || { id: 'cat-other', nameAr: 'أخرى', nameEn: 'Other', icon: 'Layers', color: '#7A7468', type: 'both', order: 99 }),
+        nameAr: rawCat.trim(),
+        nameEn: rawCat.trim(),
+      };
+    }
+
     const key = normalizedDate && isValid ? buildDuplicateKey(normalizedDate, amount, type) : '';
     const isDuplicate = Boolean(isValid && key && existingKeys.has(key));
 
@@ -904,8 +1157,13 @@ export function mapCsvRowsToTransactions(params: {
       type,
       categoryId: matchedCat?.id || 'cat-other',
       categoryLabel: matchedCat?.nameAr || rawCat || 'أخرى',
-      walletId: matchedWalletId,
-      walletName: matchedWalletName || (rawWallet.trim() || undefined),
+      isNewCategory,
+      walletId: matchedWallet?.id,
+      walletName: matchedWallet?.name || (rawWallet.trim() || undefined),
+      isNewWallet,
+      toWalletId: matchedToWallet?.id,
+      toWalletName: matchedToWallet?.name || (rawToWallet.trim() || undefined),
+      isNewToWallet,
       notes: rawNotes.trim(),
       isDuplicate,
       isValid,
@@ -914,5 +1172,12 @@ export function mapCsvRowsToTransactions(params: {
     };
   });
 
-  return { previewRows, validCount, invalidCount, duplicateCount };
+  return {
+    previewRows,
+    validCount,
+    invalidCount,
+    duplicateCount,
+    autoCreatedWallets,
+    autoCreatedCategories,
+  };
 }

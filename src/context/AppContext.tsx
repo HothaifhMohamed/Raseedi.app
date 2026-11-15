@@ -415,7 +415,10 @@ interface AppContextType {
 
   // CRUD Operations
   addTransaction: (data: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>) => Transaction;
-  importTransactionsBatch: (items: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>[]) => number;
+  importTransactionsBatch: (
+    items: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>[],
+    options?: { newWallets?: Wallet[]; newCategories?: Category[] }
+  ) => number;
   updateTransaction: (id: string, data: Partial<Transaction>) => void;
   deleteTransaction: (id: string) => void;
   deleteSelectedTransactions: () => void;
@@ -3614,7 +3617,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   );
 
   const importTransactionsBatch = useCallback(
-    (items: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>[]) => {
+    (
+      items: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>[],
+      options?: { newWallets?: Wallet[]; newCategories?: Category[] }
+    ) => {
       if (items.length === 0) return 0;
 
       const baseNow = Date.now();
@@ -3624,6 +3630,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           ? items.filter((d) => !isDateInLockedPeriod(d.date, activeOrganization.lockedUntilDate))
           : items;
       if (filteredItems.length === 0) return 0;
+
+      const extraWallets = options?.newWallets || [];
+      const extraCategories = options?.newCategories || [];
 
       const newTxs: Transaction[] = filteredItems.map((data, idx) => ({
         ...data,
@@ -3648,7 +3657,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (!canOrgWrite) return 0;
         if (isUsingLocalOrgMode) {
           mutateLocalOrgWorkspace(activeOrganization.id, (ws) => {
-            let nextWallets = [...(ws.wallets || [])];
+            const existingWalletIds = new Set((ws.wallets || []).map((w) => w.id));
+            const uniqueNewWallets = extraWallets.filter((w) => !existingWalletIds.has(w.id));
+            let nextWallets = [...(ws.wallets || []), ...uniqueNewWallets];
             for (const tx of newTxs) {
               nextWallets = applyOrgTxBalanceToWallets(
                 nextWallets,
@@ -3657,9 +3668,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 1
               );
             }
+            const existingCatIds = new Set((ws.categories || []).map((c) => c.id));
+            const uniqueNewCats = extraCategories.filter((c) => !existingCatIds.has(c.id));
+            const nextCategories = [...(ws.categories || []), ...uniqueNewCats];
             return {
               ...ws,
               wallets: nextWallets,
+              categories: nextCategories,
               transactions: [...newTxs, ...(ws.transactions || [])],
               auditLogs: appendLocalOrgAuditLog(
                 ws,
@@ -3673,24 +3688,51 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           });
           return newTxs.length;
         }
-        void importOrgTransactionsBatchCloud(
-          activeOrganization.id,
-          newTxs,
-          activeCloudWallets,
-          settings.customExchangeRates,
-          actor
-        ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Batch import failed'));
+        const existingCloudWalletIds = new Set(activeCloudWallets.map((w) => w.id));
+        const uniqueNewCloudWallets = extraWallets.filter((w) => !existingCloudWalletIds.has(w.id));
+        void (async () => {
+          for (const w of uniqueNewCloudWallets) {
+            await upsertOrgWalletCloud(activeOrganization.id, w, true, actor);
+          }
+          for (const c of extraCategories) {
+            await upsertOrgCategoryCloud(activeOrganization.id, c, true, actor);
+          }
+          await importOrgTransactionsBatchCloud(
+            activeOrganization.id,
+            newTxs,
+            [...activeCloudWallets, ...uniqueNewCloudWallets],
+            settings.customExchangeRates,
+            actor
+          );
+        })().catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Batch import failed'));
         return newTxs.length;
       }
 
-      let updatedWallets = [...personalWallets];
+      const existingPersonalWalletIds = new Set(personalWallets.map((w) => w.id));
+      const uniqueNewPersonalWallets = extraWallets.filter((w) => !existingPersonalWalletIds.has(w.id));
+      let updatedWallets = [...personalWallets, ...uniqueNewPersonalWallets];
       for (const tx of newTxs) {
         updatedWallets = applyDeltasToWallets(updatedWallets, tx, 1);
       }
+
+      const existingPersonalCatIds = new Set(personalCategories.map((c) => c.id));
+      const uniqueNewPersonalCats = extraCategories.filter((c) => !existingPersonalCatIds.has(c.id));
+      const nextCategories =
+        uniqueNewPersonalCats.length > 0
+          ? [...personalCategories, ...uniqueNewPersonalCats]
+          : personalCategories;
+
       const nextTx = [...newTxs, ...personalTransactions];
       setPersonalTransactions(nextTx);
       setPersonalWallets(updatedWallets);
-      savePersonalState({ transactions: nextTx, wallets: updatedWallets });
+      if (uniqueNewPersonalCats.length > 0) {
+        setPersonalCategories(nextCategories);
+      }
+      savePersonalState({
+        transactions: nextTx,
+        wallets: updatedWallets,
+        ...(uniqueNewPersonalCats.length > 0 ? { categories: nextCategories } : {}),
+      });
       return newTxs.length;
     },
     [
@@ -3704,6 +3746,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       mutateLocalOrgWorkspace,
       settings.customExchangeRates,
       personalWallets,
+      personalCategories,
       applyDeltasToWallets,
       personalTransactions,
       savePersonalState,
