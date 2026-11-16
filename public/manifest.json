@@ -1,0 +1,39 @@
+{
+  "id": "/",
+  "name": "Raseedi - رَصِيدِي",
+  "short_name": "رَصِيدِي",
+  "description": "تطبيق عربي شامل لإدارة وتتبع المصاريف، الميزانيات، المحافظ، والديون وحسابات المؤسسات.",
+  "lang": "ar",
+  "dir": "rtl",
+  "theme_color": "#F5EFE3",
+  "background_color": "#F5EFE3",
+  "display": "standalone",
+  "start_url": "/",
+  "scope": "/",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/app-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

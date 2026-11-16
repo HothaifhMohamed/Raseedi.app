@@ -14,6 +14,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { SUPPORT_CONFIG } from '../../constants/support';
 import { isEeaOrUkUser, resetAdConsentChoice } from '../common/AdConsentBanner';
+import { BrandLogo } from '../common/BrandLogo';
 
 export interface SupportAndLegalModalProps {
   isOpen: boolean;
@@ -110,6 +111,21 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
         <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs leading-relaxed text-[var(--color-ink)]">
           {activeTab === 'support' ? (
             <>
+              {/* About Raseedi Brand Banner */}
+              <div className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] flex items-center gap-3">
+                <BrandLogo className="w-12 h-12 rounded-xl object-cover shadow-sm shrink-0" />
+                <div className="min-w-0">
+                  <div className="font-title font-bold text-sm text-[var(--color-ink)]">
+                    {isRTL ? 'رَصِيدِي | Raseedi' : 'Raseedi'}
+                  </div>
+                  <p className="text-[11px] text-[var(--color-muted)] mt-0.5">
+                    {isRTL
+                      ? 'الإدارة المالية الشخصية وإدارة الشركات دون اتصال مع مزامنة سحابية آمنة.'
+                      : 'Smart personal & business finance with offline-first storage and secure cloud sync.'}
+                  </p>
+                </div>
+              </div>
+
               {/* Direct Contact Actions */}
               <div className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-2.5">
                 <div className="font-bold text-[var(--color-ink)] text-xs">

@@ -41,6 +41,7 @@ import {
   Paperclip,
 } from 'lucide-react';
 import { useApp, OrgHubTab } from '../../context/AppContext';
+import { BrandLogo } from '../common/BrandLogo';
 import {
   calculateAgingReport,
   calculateCostCenterReport,
@@ -2542,15 +2543,18 @@ export const OrganizationHubModal: React.FC = () => {
                       className="voucher-print-sheet p-5 rounded-xl bg-white text-[#1F1E1A] border-2 border-[#D4CBB8] space-y-4 shadow-sm"
                     >
                       <div className="flex items-start justify-between border-b-2 border-[#1E6F73]/30 pb-3 gap-3">
-                        <div>
-                          <div className="font-title leading-snug text-lg font-bold text-[#1E6F73]">
-                            {activeOrganization.name}
-                          </div>
-                          {activeOrganization.taxNumber && (
-                            <div className="text-[11px] text-[#5C574D]">
-                              {t('taxNumber')}: <bdi dir="ltr">{activeOrganization.taxNumber}</bdi>
+                        <div className="flex items-center gap-3 min-w-0">
+                          <BrandLogo className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0" />
+                          <div className="min-w-0">
+                            <div className="font-title leading-snug text-lg font-bold text-[#1E6F73]">
+                              {activeOrganization.name}
                             </div>
-                          )}
+                            {activeOrganization.taxNumber && (
+                              <div className="text-[11px] text-[#5C574D]">
+                                {t('taxNumber')}: <bdi dir="ltr">{activeOrganization.taxNumber}</bdi>
+                              </div>
+                            )}
+                          </div>
                         </div>
                         <div className="text-end">
                           <div className="text-sm font-bold px-3 py-1 rounded bg-[#1E6F73]/10 text-[#1E6F73] inline-block">

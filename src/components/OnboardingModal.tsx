@@ -85,8 +85,8 @@ export const OnboardingModal: React.FC = () => {
         {/* Top Indicator */}
         <div>
           <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <BrandLogo className="w-8 h-8 rounded-lg shadow-xs shrink-0" />
+            <div className="flex items-center gap-2.5">
+              <BrandLogo className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0" />
               <span className="font-bold text-sm text-[var(--color-ink)]">{t('appName')}</span>
             </div>
 

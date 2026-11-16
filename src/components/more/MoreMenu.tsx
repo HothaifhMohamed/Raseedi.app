@@ -41,6 +41,7 @@ import { SupportAndLegalModal } from './SupportAndLegalModal';
 import { MoneyCirclesModal } from './MoneyCirclesModal';
 import { SUPPORT_CONFIG } from '../../constants/support';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
+import { BrandLogo } from '../common/BrandLogo';
 
 export const MoreMenu: React.FC = () => {
   const {
@@ -897,8 +898,23 @@ export const MoreMenu: React.FC = () => {
       {/* Free-tier unobtrusive bottom banner */}
       <AdBanner variant="banner" />
 
-      {/* Quick Footer Link for AdSense Reviewers & Users */}
-      <div className="pt-1 pb-2 text-center">
+      {/* Quick Footer & About App Card */}
+      <div className="pt-1 pb-2 flex flex-col items-center gap-2 text-center">
+        <button
+          type="button"
+          onClick={() => setSupportLegalTab('support')}
+          className="inline-flex items-center gap-2.5 px-3.5 py-2 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)] transition-colors"
+        >
+          <BrandLogo className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0" />
+          <div className="text-start">
+            <div className="font-title text-xs font-bold text-[var(--color-ink)]">
+              {isRTL ? 'عن تطبيق رَصِيدِي' : 'About Raseedi'}
+            </div>
+            <div className="text-[10px] text-[var(--color-muted)]">
+              {isRTL ? 'الإدارة المالية للأفراد والشركات' : 'Personal & Business Finance'}
+            </div>
+          </div>
+        </button>
         <button
           type="button"
           onClick={() => setSupportLegalTab('legal')}

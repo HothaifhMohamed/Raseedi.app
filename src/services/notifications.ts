@@ -36,7 +36,7 @@ export function dispatchBrowserNotification(title: string, body: string, tag?: s
     new Notification(title, {
       body,
       tag: tag || 'raseedi-alert',
-      icon: '/pwa-192x192.png',
+      icon: '/app-icon.png',
     });
     return true;
   } catch {

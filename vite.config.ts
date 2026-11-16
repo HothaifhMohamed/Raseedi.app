@@ -27,10 +27,18 @@ export default defineConfig(() => {
       conditionalAdsTxtPlugin(),
       VitePWA({
         registerType: 'autoUpdate',
+        manifestFilename: 'manifest.json',
+        includeAssets: [
+          'favicon.ico',
+          'apple-touch-icon.png',
+          'app-icon.png',
+          'icon-192.png',
+          'icon-512.png',
+        ],
         manifest: {
           id: '/',
           name: 'Raseedi - رَصِيدِي',
-          short_name: 'Raseedi',
+          short_name: 'رَصِيدِي',
           description: 'تطبيق عربي شامل لإدارة وتتبع المصاريف، الميزانيات، المحافظ، والديون وحسابات المؤسسات.',
           lang: 'ar',
           dir: 'rtl',
@@ -41,13 +49,19 @@ export default defineConfig(() => {
           scope: '/',
           icons: [
             {
-              src: '/pwa-192x192.png',
+              src: '/icon-192.png',
               sizes: '192x192',
               type: 'image/png',
               purpose: 'any'
             },
             {
-              src: '/pwa-512x512.png',
+              src: '/icon-512.png',
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'any'
+            },
+            {
+              src: '/app-icon.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any'

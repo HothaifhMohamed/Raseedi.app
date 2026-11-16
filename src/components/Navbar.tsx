@@ -287,7 +287,7 @@ export const Navbar: React.FC = () => {
       >
         {/* Left / Start: Brand Logo + Workspace Switcher */}
         <div className="flex items-center gap-2 min-w-0">
-          <BrandLogo className="w-8 h-8 rounded-lg shadow-sm shrink-0" title={t('appName')} />
+          <BrandLogo className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0" title={t('appName')} />
 
           <div className="relative min-w-0" ref={workspaceRef}>
             <button
