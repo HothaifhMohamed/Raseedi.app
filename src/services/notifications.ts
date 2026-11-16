@@ -4,6 +4,7 @@
 import { AppNotificationItem, AppSettings, Budget, Debt, Transaction } from '../types';
 import { getActiveBudgetAlerts, getUpcomingDebtReminders } from './calculations';
 import type { OrgSubscriptionState } from './entitlements';
+import type { UserSubscriptionSummary } from './subscriptionHelpers';
 
 export function isWebNotificationSupported(): boolean {
   return typeof window !== 'undefined' && 'Notification' in window;
@@ -52,6 +53,7 @@ export function buildAppNotifications(params: {
   isOrgWorkspace?: boolean;
   orgName?: string;
   orgSubscriptionState?: OrgSubscriptionState | null;
+  userSubscriptionSummary?: UserSubscriptionSummary | null;
   now?: Date;
 }): AppNotificationItem[] {
   const {
@@ -63,9 +65,38 @@ export function buildAppNotifications(params: {
     isOrgWorkspace = false,
     orgName = '',
     orgSubscriptionState = null,
+    userSubscriptionSummary = null,
     now = new Date(),
   } = params;
   const items: AppNotificationItem[] = [];
+
+  // 0a. Personal/User Subscription 7-day Expiry Warning
+  if (
+    userSubscriptionSummary &&
+    userSubscriptionSummary.isExpiringSoon &&
+    userSubscriptionSummary.daysRemaining !== null &&
+    !userSubscriptionSummary.isAdminOverride
+  ) {
+    const daysLeft = userSubscriptionSummary.daysRemaining;
+    const tierLabelAr =
+      userSubscriptionSummary.planTier === 'business_pro'
+        ? 'Business PRO للأعمال'
+        : 'Personal PRO للأفراد';
+    const tierLabelEn =
+      userSubscriptionSummary.planTier === 'business_pro' ? 'Business PRO' : 'Personal PRO';
+    items.push({
+      id: `notif-user-sub-expiring-${daysLeft}`,
+      type: 'user_subscription_expiring',
+      titleAr: daysLeft <= 1 ? 'ينتهي اشتراكك خلال يوم' : 'قرب انتهاء اشتراكك',
+      titleEn: daysLeft <= 1 ? 'Subscription Ends Soon' : 'Subscription Expiring Soon',
+      messageAr: `متبقي ${daysLeft} ${daysLeft === 1 ? 'يوم' : daysLeft <= 10 ? 'أيام' : 'يوماً'} على انتهاء باقة ${tierLabelAr}. يمكنك تجديد الاشتراك أو تغيير الباقة الآن.`,
+      messageEn: `${daysLeft} day(s) left on your ${tierLabelEn} subscription. Renew or change plan anytime.`,
+      severity: daysLeft <= 3 ? 'danger' : 'warning',
+      timestamp: now.getTime(),
+      read: false,
+      actionTarget: 'upgrade',
+    });
+  }
 
   // 0. Organization Subscription Lifecycle Alerts (only paid/trial orgs within <= 7d or grace/expired, never free)
   const isPaidOrTrialOrg =

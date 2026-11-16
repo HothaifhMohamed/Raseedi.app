@@ -50,8 +50,9 @@ describe('licenseCodes admin gate and cryptographic coupon engine', () => {
     assert.equal(h1, h2);
   });
 
-  it('validates the secret admin password accurately', () => {
-    assert.equal(verifyAdminPassword(ADMIN_PANEL_PASSCODE), true);
+  it('validates the secret admin password (2026) accurately', () => {
+    assert.equal(ADMIN_PANEL_PASSCODE, '2026');
+    assert.equal(verifyAdminPassword('2026'), true);
     assert.equal(verifyAdminPassword(`  ${ADMIN_PANEL_PASSCODE}  `), true);
     assert.equal(verifyAdminPassword('wrong_password'), false);
     assert.equal(verifyAdminPassword(''), false);

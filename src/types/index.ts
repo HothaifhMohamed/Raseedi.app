@@ -375,7 +375,8 @@ export interface AppNotificationItem {
     | 'pending_approval'
     | 'org_subscription_expiring'
     | 'org_subscription_grace'
-    | 'org_subscription_readonly';
+    | 'org_subscription_readonly'
+    | 'user_subscription_expiring';
   titleAr: string;
   titleEn: string;
   messageAr: string;
@@ -434,6 +435,7 @@ export interface VerifiedProEntitlement {
   proPlan: ProPlanCode;
   planTier?: PlanTier;
   billingCycle?: BillingCycle;
+  startedAt?: number | null;
   expiresAt?: number | null;
   proExpiresAt?: number | null;
   verifiedAt: number;

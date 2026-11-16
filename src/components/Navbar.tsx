@@ -48,6 +48,9 @@ export const Navbar: React.FC = () => {
     setIsUpgradeModalOpen,
     isPro,
     isBusinessPro,
+    subscriptionSummary,
+    isAdminUser,
+    openAdminPanel,
     cloudSyncStatus,
     filters,
     activeWorkspace,
@@ -671,48 +674,65 @@ export const Navbar: React.FC = () => {
                 </div>
 
                 <div className="py-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsUpgradeModalOpen(true);
-                      setIsOverflowOpen(false);
-                    }}
-                    className="w-full px-3 py-2 text-xs flex items-center justify-between text-[var(--color-accent)] font-semibold hover:bg-[var(--color-bg)] transition-colors text-start min-h-[40px]"
-                  >
-                    <div className="flex items-center gap-2">
-                      <Sparkles className="w-4 h-4" />
-                      <span>
-                        {isBusinessPro ? (
-                          isRTL ? (
+                  {isAdminUser ? (
+                    <button
+                      type="button"
+                      data-testid="navbar-admin-panel-btn"
+                      onClick={() => {
+                        openAdminPanel();
+                        setIsOverflowOpen(false);
+                      }}
+                      className="w-full px-3 py-2 text-xs flex items-center justify-between text-[var(--color-accent)] font-semibold hover:bg-[var(--color-bg)] transition-colors text-start min-h-[40px]"
+                    >
+                      <div className="flex items-center gap-2">
+                        <KeyRound className="w-4 h-4 shrink-0" />
+                        <span>{isRTL ? 'لوحة الإدارة وتوليد الأكواد' : 'Admin Code Panel'}</span>
+                      </div>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsUpgradeModalOpen(true);
+                        setIsOverflowOpen(false);
+                      }}
+                      className="w-full px-3 py-2 text-xs flex items-center justify-between text-[var(--color-accent)] font-semibold hover:bg-[var(--color-bg)] transition-colors text-start min-h-[40px]"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="w-4 h-4" />
+                        <span>
+                          {isBusinessPro ? (
+                            isRTL ? (
+                              <>
+                                باقة <bdi dir="ltr">Business PRO</bdi>
+                              </>
+                            ) : (
+                              'Business PRO'
+                            )
+                          ) : isPro ? (
+                            isRTL ? (
+                              <>
+                                حساب <bdi dir="ltr">PRO</bdi> مفعّل
+                              </>
+                            ) : (
+                              'PRO Active'
+                            )
+                          ) : isRTL ? (
                             <>
-                              باقة <bdi dir="ltr">Business PRO</bdi>
+                              ترقية لـ <bdi dir="ltr">PRO</bdi>
                             </>
                           ) : (
-                            'Business PRO'
-                          )
-                        ) : isPro ? (
-                          isRTL ? (
-                            <>
-                              حساب <bdi dir="ltr">PRO</bdi> مفعّل
-                            </>
-                          ) : (
-                            'PRO Active'
-                          )
-                        ) : isRTL ? (
-                          <>
-                            ترقية لـ <bdi dir="ltr">PRO</bdi>
-                          </>
-                        ) : (
-                          'Upgrade PRO'
-                        )}
-                      </span>
-                    </div>
-                    {!isPro && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--color-accent)]/15 text-[var(--color-accent)]">
-                        {isRTL ? 'مزايا' : 'New'}
-                      </span>
-                    )}
-                  </button>
+                            'Upgrade PRO'
+                          )}
+                        </span>
+                      </div>
+                      {!isPro && (
+                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--color-accent)]/15 text-[var(--color-accent)]">
+                          {isRTL ? 'مزايا' : 'New'}
+                        </span>
+                      )}
+                    </button>
+                  )}
 
                   <button
                     type="button"
@@ -789,25 +809,40 @@ export const Navbar: React.FC = () => {
         </div>
       )}
 
-      {isOrgWorkspace && !isOrgReadOnly && activeOrgSubscriptionState?.status === 'grace' && (
-        <div
-          dir={isRTL ? 'rtl' : 'ltr'}
-          className="px-3 py-1.5 bg-amber-500/10 border-b border-amber-500/25 text-[11px] text-amber-800 dark:text-amber-300 flex items-center justify-between gap-2"
-        >
-          <span className="font-medium">
-            {isRTL
-              ? `فترة سماح للاشتراك: متبقي ${activeOrgSubscriptionState.daysRemaining} يوم قبل التحويل لوضع القراءة فقط.`
-              : `Subscription grace period: ${activeOrgSubscriptionState.daysRemaining} day(s) left before read-only mode.`}
-          </span>
-          <button
-            type="button"
-            onClick={() => setIsUpgradeModalOpen(true)}
-            className="px-2 py-0.5 rounded bg-amber-600 text-white text-[10px] font-bold shrink-0"
+      {subscriptionSummary.isExpiringSoon &&
+        !subscriptionSummary.isAdminOverride &&
+        subscriptionSummary.daysRemaining !== null && (
+          <div
+            data-testid="subscription-expiry-banner"
+            dir={isRTL ? 'rtl' : 'ltr'}
+            className="px-3 py-2 bg-amber-500/12 border-b border-amber-500/30 text-[11px] text-amber-800 dark:text-amber-300 flex flex-wrap items-center justify-between gap-2"
           >
-            {isRTL ? 'تجديد' : 'Renew'}
-          </button>
-        </div>
-      )}
+            <div className="flex items-center gap-1.5 min-w-0 font-semibold">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                {isRTL
+                  ? `تنبيه: باقتك (${subscriptionSummary.isBusinessPro ? 'Business PRO' : 'Personal PRO'}) تنتهي خلال ${subscriptionSummary.daysRemaining} أيام`
+                  : `Reminder: Your ${subscriptionSummary.isBusinessPro ? 'Business PRO' : 'Personal PRO'} plan expires in ${subscriptionSummary.daysRemaining} day(s)`}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsUpgradeModalOpen(true)}
+                className="px-2.5 py-1 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-[10px] font-bold"
+              >
+                {isRTL ? 'تجديد الاشتراك' : 'Renew'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsUpgradeModalOpen(true)}
+                className="px-2.5 py-1 rounded-lg bg-[var(--color-surface)] border border-amber-500/40 text-amber-800 dark:text-amber-200 text-[10px] font-bold"
+              >
+                {isRTL ? 'تغيير الباقة' : 'Change Plan'}
+              </button>
+            </div>
+          </div>
+        )}
 
       {!isOrgWorkspace && legacyLocalOrgs.length > 0 && (
         <div

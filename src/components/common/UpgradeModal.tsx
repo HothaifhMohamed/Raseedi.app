@@ -15,6 +15,12 @@ import {
   Clock,
   Users,
   ExternalLink,
+  AlertTriangle,
+  Crown,
+  Calendar,
+  LogOut,
+  LogIn,
+  Lock,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { SUPPORT_CONFIG } from '../../constants/support';
@@ -28,7 +34,11 @@ export const UpgradeModal: React.FC = () => {
     isBusinessPro,
     planTier,
     proEntitlement,
+    subscriptionSummary,
+    isAdminUser,
+    openAdminPanel,
     user,
+    setIsLogoutModalOpen,
     orgRefs,
     organizationsList,
     isOrgWorkspace,
@@ -40,7 +50,6 @@ export const UpgradeModal: React.FC = () => {
     restorePurchases,
     signInWithGoogleAccount,
     isRTL,
-    settings,
     t,
   } = useApp();
 
@@ -66,6 +75,7 @@ export const UpgradeModal: React.FC = () => {
   const [personalCycle, setPersonalCycle] = useState<'monthly' | 'yearly' | 'lifetime'>('yearly');
   const [businessCycle, setBusinessCycle] = useState<'monthly' | 'yearly'>('yearly');
   const [currencyMode, setCurrencyMode] = useState<PricingCurrency>('EGP');
+  const [subscriberActionMode, setSubscriberActionMode] = useState<'none' | 'renew' | 'switch'>('none');
 
   const [restoreStatus, setRestoreStatus] = useState<string | null>(null);
   const [trialMessage, setTrialMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
@@ -76,12 +86,23 @@ export const UpgradeModal: React.FC = () => {
   const [codeSuccess, setCodeSuccess] = useState<string | null>(null);
   const [isRedeeming, setIsRedeeming] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
+  const [isSigningInGoogle, setIsSigningInGoogle] = useState(false);
   const isDev = import.meta.env.DEV;
 
   React.useEffect(() => {
-    if (!isUpgradeModalOpen) return;
-    if (isOrgWorkspace || isBusinessPro) {
-      setTierTab('business_pro');
+    if (!isUpgradeModalOpen) {
+      setSubscriberActionMode('none');
+      return;
+    }
+    if (isAdminUser) {
+      setIsUpgradeModalOpen(false);
+      openAdminPanel();
+      return;
+    }
+    if (isOrgWorkspace || isBusinessPro || subscriptionSummary.isPro) {
+      setTierTab(isBusinessPro ? 'business_pro' : subscriptionSummary.isPro ? 'business_pro' : 'personal_pro');
+    } else {
+      setTierTab('personal_pro');
     }
     const defaultOrgId =
       (activeOrganization && eligibleOrgs.some((o) => o.orgId === activeOrganization.id)
@@ -90,13 +111,67 @@ export const UpgradeModal: React.FC = () => {
     setSelectedOrgId((prev) =>
       prev && eligibleOrgs.some((o) => o.orgId === prev) ? prev : defaultOrgId
     );
-  }, [isUpgradeModalOpen, isOrgWorkspace, isBusinessPro, activeOrganization, eligibleOrgs]);
+  }, [
+    isUpgradeModalOpen,
+    isAdminUser,
+    isOrgWorkspace,
+    isBusinessPro,
+    subscriptionSummary.isPro,
+    activeOrganization,
+    eligibleOrgs,
+    setIsUpgradeModalOpen,
+    openAdminPanel,
+  ]);
 
-  if (!isUpgradeModalOpen) return null;
+  if (!isUpgradeModalOpen || isAdminUser) return null;
 
   const lang = isRTL ? 'ar' : 'en';
   const targetBusinessOrgId =
     tierTab === 'business_pro' && selectedOrgId ? selectedOrgId : undefined;
+  const isSubscribedUser = subscriptionSummary.isPro && !subscriptionSummary.isAdminOverride;
+  const isPersonalSubscribedOnly = isSubscribedUser && !subscriptionSummary.isBusinessPro;
+  const showFullPricingCatalog = !isSubscribedUser || subscriberActionMode !== 'none';
+  const showPersonalCatalog = !isSubscribedUser || subscriberActionMode === 'switch';
+
+  const formatSubDate = (ms: number | null) => {
+    if (!ms) return isRTL ? 'غير محدد' : 'N/A';
+    try {
+      return new Date(ms).toLocaleDateString(isRTL ? 'ar-EG' : 'en-US', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      });
+    } catch {
+      return new Date(ms).toLocaleDateString();
+    }
+  };
+
+  const cycleHumanLabel = (() => {
+    switch (subscriptionSummary.billingCycle) {
+      case 'monthly':
+        return isRTL ? 'شهري' : 'Monthly';
+      case 'yearly':
+        return isRTL ? 'سنوي' : 'Yearly';
+      case 'lifetime':
+        return isRTL ? 'مدى الحياة' : 'Lifetime';
+      case 'trial':
+        return isRTL ? 'فترة تجريبية مجانية' : 'Free Trial';
+      case 'code':
+        return isRTL ? 'كود تفعيل' : 'Activation Code';
+      default:
+        return isRTL ? 'مجاني' : 'Free';
+    }
+  })();
+
+  const handleGoogleSignInInline = async () => {
+    setIsSigningInGoogle(true);
+    setCodeError(null);
+    try {
+      await signInWithGoogleAccount();
+    } finally {
+      setIsSigningInGoogle(false);
+    }
+  };
 
   const handleDevActivate = () => {
     if (isDev) {
@@ -146,6 +221,15 @@ export const UpgradeModal: React.FC = () => {
     e.preventDefault();
     setCodeError(null);
     setCodeSuccess(null);
+
+    if (!user?.isLoggedIn) {
+      setCodeError(
+        isRTL
+          ? 'يلزم تسجيل الدخول بحساب جوجل أولاً قبل تفعيل أي كود اشتراك.'
+          : 'You must sign in with Google before redeeming an activation code.'
+      );
+      return;
+    }
 
     const trimmed = activationCode.trim();
     if (!trimmed) return;
@@ -312,7 +396,11 @@ export const UpgradeModal: React.FC = () => {
             </div>
             <div>
               <h2 className="font-title text-base sm:text-lg font-bold leading-snug text-[var(--color-ink)]">
-                {tierTab === 'business_pro'
+                {isSubscribedUser
+                  ? isRTL
+                    ? 'إدارة اشتراكك في رَصِيدِي'
+                    : 'Manage Your Subscription'
+                  : tierTab === 'business_pro'
                   ? isRTL
                     ? 'رصيدي للأعمال والمؤسسات'
                     : 'Raseedi Business PRO'
@@ -321,7 +409,11 @@ export const UpgradeModal: React.FC = () => {
                   : 'Raseedi Personal PRO'}
               </h2>
               <p className="text-xs text-[var(--color-muted)] mt-0.5">
-                {isRTL
+                {isSubscribedUser
+                  ? isRTL
+                    ? 'تفاصيل الباقة المفعلة، التواريخ، والتجديد'
+                    : 'Active plan details, dates & renewal options'
+                  : isRTL
                   ? 'أسعار واضحة للأفراد والشركات مع تجربة مجانية للأعمال'
                   : 'Transparent plans for Personal & Enterprise with 14-day Business trial'}
               </p>
@@ -338,26 +430,238 @@ export const UpgradeModal: React.FC = () => {
 
         {/* Content */}
         <div className="p-4 sm:p-5 overflow-y-auto space-y-4 flex-1">
-          {/* Active Subscription Banner */}
-          {isPro && (
-            <div className="p-3 bg-[var(--color-income)]/10 border border-[var(--color-income)]/30 rounded-xl text-xs text-[var(--color-income)] font-medium flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <Check className="w-4 h-4 shrink-0" />
-                <span>
-                  {planTier === 'business_pro'
-                    ? isRTL
-                      ? 'اشتراك Business PRO مفعّل على حسابك'
-                      : 'Business PRO is active on your account'
-                    : isRTL
-                    ? 'اشتراك Personal PRO مفعّل على حسابك'
-                    : 'Personal PRO is active on your account'}
+          {/* Google Account Connection Status Bar */}
+          <div
+            data-testid="upgrade-google-status-card"
+            className={`p-3 rounded-xl border flex items-center justify-between gap-2.5 ${
+              user?.isLoggedIn
+                ? 'bg-[var(--color-bg)] border-[var(--color-line)]'
+                : 'bg-amber-500/10 border-amber-500/30'
+            }`}
+          >
+            {user?.isLoggedIn ? (
+              <>
+                <div className="flex items-center gap-2.5 min-w-0">
+                  {user.avatarUrl ? (
+                    <img
+                      src={user.avatarUrl}
+                      alt={user.name}
+                      className="w-9 h-9 rounded-full border border-[var(--color-line)] shrink-0"
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    <div className="w-9 h-9 rounded-full bg-[var(--color-accent)] text-[var(--color-on-accent)] flex items-center justify-center text-xs font-bold shrink-0">
+                      {(user.name || 'R').charAt(0).toUpperCase()}
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-[var(--color-ink)] truncate">
+                      {user.name}
+                    </div>
+                    <div className="text-[11px] text-[var(--color-muted)] truncate" dir="ltr">
+                      {user.email}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsUpgradeModalOpen(false);
+                    setIsLogoutModalOpen(true);
+                  }}
+                  aria-label={isRTL ? 'تسجيل الخروج' : 'Sign Out'}
+                  className="px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-[11px] font-semibold text-[var(--color-muted)] hover:text-[var(--color-expense)] flex items-center gap-1 shrink-0 min-h-[34px]"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>{isRTL ? 'خروج' : 'Sign Out'}</span>
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-amber-800 dark:text-amber-300">
+                    {isRTL ? 'أنت في وضع الزائر (بدون حساب جوجل)' : 'Guest Mode (Not Signed In)'}
+                  </div>
+                  <div className="text-[11px] text-[var(--color-muted)] mt-0.5">
+                    {isRTL
+                      ? 'سجّل الدخول بحساب جوجل لحفظ اشتراكك وتفعيل الأكواد السحابية.'
+                      : 'Sign in with Google to activate license codes and preserve PRO access.'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  data-testid="upgrade-google-signin-btn"
+                  disabled={isSigningInGoogle}
+                  onClick={() => void handleGoogleSignInInline()}
+                  className="px-3 py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center gap-1.5 shrink-0 min-h-[38px] disabled:opacity-60"
+                >
+                  {isSigningInGoogle ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                  ) : (
+                    <LogIn className="w-3.5 h-3.5 shrink-0" />
+                  )}
+                  <span>{isRTL ? 'دخول بجوجل' : 'Google Login'}</span>
+                </button>
+              </>
+            )}
+          </div>
+
+          {/* Subscriber Status Dashboard (Replaces free pricing when already subscribed) */}
+          {isSubscribedUser && (
+            <div
+              data-testid="subscriber-dashboard-card"
+              className="p-4 rounded-2xl bg-[var(--color-income)]/10 border border-[var(--color-income)]/30 space-y-3"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-[var(--color-income)]/20 text-[var(--color-income)] flex items-center justify-center shrink-0">
+                    <Crown className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-semibold text-[var(--color-income)]">
+                      {isRTL ? 'الباقة النشطة حالياً' : 'Current Active Subscription'}
+                    </div>
+                    <h3 className="font-title text-sm sm:text-base font-bold text-[var(--color-ink)]">
+                      {subscriptionSummary.isBusinessPro
+                        ? isRTL
+                          ? 'باقة Business PRO للأعمال'
+                          : 'Business PRO'
+                        : isRTL
+                        ? 'باقة Personal PRO للأفراد'
+                        : 'Personal PRO'}
+                    </h3>
+                  </div>
+                </div>
+                <span className="px-2 py-0.5 rounded-md bg-[var(--color-income)] text-white text-[10px] font-bold shrink-0">
+                  {cycleHumanLabel}
                 </span>
               </div>
-              {proEntitlement?.expiresAt && (
-                <span className="text-[10px] font-mono shrink-0" dir="ltr">
-                  {new Date(proEntitlement.expiresAt).toLocaleDateString()}
-                </span>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1">
+                <div className="p-2.5 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)]">
+                  <div className="text-[10px] text-[var(--color-muted)] flex items-center gap-1">
+                    <Calendar className="w-3 h-3 shrink-0" />
+                    <span>{isRTL ? 'تاريخ البداية' : 'Start Date'}</span>
+                  </div>
+                  <div className="text-xs font-bold text-[var(--color-ink)] mt-0.5">
+                    {formatSubDate(subscriptionSummary.startedAt)}
+                  </div>
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)]">
+                  <div className="text-[10px] text-[var(--color-muted)] flex items-center gap-1">
+                    <Calendar className="w-3 h-3 shrink-0" />
+                    <span>{isRTL ? 'تاريخ الانتهاء' : 'Expiry Date'}</span>
+                  </div>
+                  <div className="text-xs font-bold text-[var(--color-ink)] mt-0.5">
+                    {subscriptionSummary.isLifetime
+                      ? isRTL
+                        ? 'مدى الحياة'
+                        : 'Lifetime'
+                      : formatSubDate(subscriptionSummary.expiresAt)}
+                  </div>
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] col-span-2 sm:col-span-1">
+                  <div className="text-[10px] text-[var(--color-muted)] flex items-center gap-1">
+                    <Clock className="w-3 h-3 shrink-0" />
+                    <span>{isRTL ? 'الأيام المتبقية' : 'Days Remaining'}</span>
+                  </div>
+                  <div
+                    className={`text-xs font-bold mt-0.5 ${
+                      subscriptionSummary.isExpiringSoon
+                        ? 'text-amber-600 dark:text-amber-400'
+                        : 'text-[var(--color-income)]'
+                    }`}
+                  >
+                    {subscriptionSummary.isLifetime
+                      ? isRTL
+                        ? 'دائم بدون انتهاء'
+                        : 'Unlimited'
+                      : isRTL
+                      ? `${subscriptionSummary.daysRemaining ?? 0} يوم`
+                      : `${subscriptionSummary.daysRemaining ?? 0} day(s)`}
+                  </div>
+                </div>
+              </div>
+
+              {subscriptionSummary.isExpiringSoon && (
+                <div
+                  data-testid="upgrade-expiring-soon-alert"
+                  className="p-2.5 rounded-xl bg-amber-500/15 border border-amber-500/35 text-xs text-amber-800 dark:text-amber-300 flex items-center gap-2 font-semibold"
+                >
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>
+                    {isRTL
+                      ? `تنبيه: اشتراكك ينتهي خلال ${subscriptionSummary.daysRemaining} أيام. جدّد الآن لضمان استمرار المزايا.`
+                      : `Heads up: Your subscription expires in ${subscriptionSummary.daysRemaining} day(s). Renew now to stay covered.`}
+                  </span>
+                </div>
               )}
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  data-testid="subscriber-renew-toggle-btn"
+                  onClick={() => {
+                    const next = subscriberActionMode === 'renew' ? 'none' : 'renew';
+                    setSubscriberActionMode(next);
+                    if (next === 'renew') {
+                      setTierTab(subscriptionSummary.isBusinessPro ? 'business_pro' : 'personal_pro');
+                    }
+                  }}
+                  className="flex-1 min-w-[130px] py-2 px-3 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[40px]"
+                >
+                  {isRTL ? 'تجديد الاشتراك' : 'Renew Subscription'}
+                </button>
+                <button
+                  type="button"
+                  data-testid="subscriber-switch-toggle-btn"
+                  onClick={() => {
+                    const next = subscriberActionMode === 'switch' ? 'none' : 'switch';
+                    setSubscriberActionMode(next);
+                    if (next === 'switch') {
+                      setTierTab('business_pro');
+                    }
+                  }}
+                  className="flex-1 min-w-[130px] py-2 px-3 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-ink)] text-xs font-bold hover:border-[var(--color-accent)] min-h-[40px]"
+                >
+                  {isRTL ? 'تغيير الباقة' : 'Change Plan'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Personal PRO exclusive Business Upgrade prompt (when not expanding switcher) */}
+          {isPersonalSubscribedOnly && subscriberActionMode === 'none' && (
+            <div
+              data-testid="personal-pro-upgrade-business-card"
+              className="p-3.5 rounded-xl bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30 flex items-center justify-between gap-3"
+            >
+              <div className="flex items-start gap-2.5 min-w-0">
+                <Building2 className="w-5 h-5 text-[var(--color-accent)] shrink-0 mt-0.5" />
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-[var(--color-ink)]">
+                    {isRTL ? 'الترقية إلى باقة المؤسسات والشركات' : 'Upgrade to Business PRO'}
+                  </div>
+                  <div className="text-[11px] text-[var(--color-muted)] mt-0.5">
+                    {isRTL
+                      ? 'افتح مساحات الشركات، 5 مقاعد فريق، دورة الاعتماد، وضريبة القيمة المضافة.'
+                      : 'Unlock multi-org workspaces, 5 team seats, expense approvals & VAT.'}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                data-testid="open-business-upgrade-btn"
+                onClick={() => {
+                  setTierTab('business_pro');
+                  setSubscriberActionMode('switch');
+                }}
+                className="px-3 py-2 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold shrink-0 min-h-[40px]"
+              >
+                {isRTL ? 'عرض الأعمال' : 'View Business'}
+              </button>
             </div>
           )}
 
@@ -367,55 +671,59 @@ export const UpgradeModal: React.FC = () => {
             </div>
           )}
 
-          {/* Tier Tabs + Currency Toggle */}
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <div className="flex bg-[var(--color-bg)] p-1 rounded-xl border border-[var(--color-line)] flex-1 min-w-[230px]">
-              <button
-                type="button"
-                onClick={() => setTierTab('personal_pro')}
-                className={`flex-1 py-2 px-2.5 rounded-lg text-[11px] sm:text-xs font-bold flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors min-h-[38px] ${
-                  tierTab === 'personal_pro'
-                    ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-sm'
-                    : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
-                }`}
-              >
-                <User className="w-3.5 h-3.5 shrink-0" />
-                <span>{isRTL ? 'باقات الأفراد' : t('personalPlan')}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setTierTab('business_pro')}
-                className={`flex-1 py-2 px-2.5 rounded-lg text-[11px] sm:text-xs font-bold flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors min-h-[38px] ${
-                  tierTab === 'business_pro'
-                    ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-sm'
-                    : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
-                }`}
-              >
-                <Building2 className="w-3.5 h-3.5 shrink-0" />
-                <span>{isRTL ? 'باقات المؤسسات والشركات' : t('businessPlan')}</span>
-              </button>
-            </div>
-
-            <div className="flex bg-[var(--color-bg)] p-1 rounded-xl border border-[var(--color-line)]">
-              {(['EGP', 'USD'] as const).map((cur) => (
+          {/* Tier Tabs + Currency Toggle (Hidden cleanly for active subscribers unless renewing/switching) */}
+          {showFullPricingCatalog && (
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex bg-[var(--color-bg)] p-1 rounded-xl border border-[var(--color-line)] flex-1 min-w-[230px]">
+                {(!isSubscribedUser || (!isBusinessPro && subscriberActionMode === 'renew')) && (
+                  <button
+                    type="button"
+                    onClick={() => setTierTab('personal_pro')}
+                    className={`flex-1 py-2 px-2.5 rounded-lg text-[11px] sm:text-xs font-bold flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors min-h-[38px] ${
+                      tierTab === 'personal_pro'
+                        ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-sm'
+                        : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+                    }`}
+                  >
+                    <User className="w-3.5 h-3.5 shrink-0" />
+                    <span>{isRTL ? 'باقات الأفراد' : t('personalPlan')}</span>
+                  </button>
+                )}
                 <button
-                  key={cur}
                   type="button"
-                  onClick={() => setCurrencyMode(cur)}
-                  className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold transition-colors min-h-[34px] ${
-                    currencyMode === cur
-                      ? 'bg-[var(--color-surface)] text-[var(--color-accent)] border border-[var(--color-line)]'
-                      : 'text-[var(--color-muted)]'
+                  onClick={() => setTierTab('business_pro')}
+                  className={`flex-1 py-2 px-2.5 rounded-lg text-[11px] sm:text-xs font-bold flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors min-h-[38px] ${
+                    tierTab === 'business_pro'
+                      ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-sm'
+                      : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
                   }`}
                 >
-                  {cur}
+                  <Building2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>{isRTL ? 'باقات المؤسسات والشركات' : t('businessPlan')}</span>
                 </button>
-              ))}
+              </div>
+
+              <div className="flex bg-[var(--color-bg)] p-1 rounded-xl border border-[var(--color-line)]">
+                {(['EGP', 'USD'] as const).map((cur) => (
+                  <button
+                    key={cur}
+                    type="button"
+                    onClick={() => setCurrencyMode(cur)}
+                    className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold transition-colors min-h-[34px] ${
+                      currencyMode === cur
+                        ? 'bg-[var(--color-surface)] text-[var(--color-accent)] border border-[var(--color-line)]'
+                        : 'text-[var(--color-muted)]'
+                    }`}
+                  >
+                    {cur}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* PERSONAL PRICING CARDS */}
-          {tierTab === 'personal_pro' && (
+          {showFullPricingCatalog && showPersonalCatalog && tierTab === 'personal_pro' && (
             <div className="grid grid-cols-3 gap-2 pt-2">
               {(['monthly', 'yearly', 'lifetime'] as const).map((cycle) => {
                 const opt = PRICING_CONFIG.personalPro[cycle];
@@ -473,7 +781,7 @@ export const UpgradeModal: React.FC = () => {
           )}
 
           {/* BUSINESS / ENTERPRISE PRICING CARDS (~2x Personal) */}
-          {tierTab === 'business_pro' && (
+          {showFullPricingCatalog && tierTab === 'business_pro' && (
             <div className="space-y-3 pt-1">
               <div className="grid grid-cols-2 gap-3 pt-2">
                 {(['monthly', 'yearly'] as const).map((cycle) => {
@@ -616,42 +924,44 @@ export const UpgradeModal: React.FC = () => {
             </div>
           )}
 
-          {/* Tier Limits Comparison Strip */}
-          <div className="grid grid-cols-3 gap-2 p-2.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] text-center text-[11px]">
-            <div>
-              <div className="text-[var(--color-muted)]">
-                {isRTL ? 'أفراد مجاني ($0)' : 'Free ($0)'}
+          {/* Tier Limits Comparison Strip (Only shown to Free users, never nagging PRO subscribers) */}
+          {!isSubscribedUser && (
+            <div className="grid grid-cols-3 gap-2 p-2.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] text-center text-[11px]">
+              <div>
+                <div className="text-[var(--color-muted)]">
+                  {isRTL ? 'أفراد مجاني ($0)' : 'Free ($0)'}
+                </div>
+                <div className="font-bold text-[var(--color-ink)]">
+                  {PRICING_CONFIG.free.monthlyAiScans} {isRTL ? 'مسح/ش' : 'scans'}
+                </div>
+                <div className="text-[10px] text-[var(--color-muted)] mt-0.5">
+                  {isRTL
+                    ? `${PRICING_CONFIG.free.maxWallets} محافظ • ميزانية واحدة`
+                    : `${PRICING_CONFIG.free.maxWallets} wallets • 1 budget`}
+                </div>
               </div>
-              <div className="font-bold text-[var(--color-ink)]">
-                {PRICING_CONFIG.free.monthlyAiScans} {isRTL ? 'مسح/ش' : 'scans'}
+              <div className="border-x border-[var(--color-line)]">
+                <div className="text-[var(--color-accent)] font-semibold">Personal PRO</div>
+                <div className="font-bold text-[var(--color-ink)]">
+                  {PRICING_CONFIG.personalPro.monthlyAiScans} {isRTL ? 'مسح/ش' : 'scans'}
+                </div>
+                <div className="text-[10px] text-[var(--color-muted)] mt-0.5">
+                  {isRTL ? 'غير محدود' : 'Unlimited'}
+                </div>
               </div>
-              <div className="text-[10px] text-[var(--color-muted)] mt-0.5">
-                {isRTL
-                  ? `${PRICING_CONFIG.free.maxWallets} محافظ • ميزانية واحدة`
-                  : `${PRICING_CONFIG.free.maxWallets} wallets • 1 budget`}
+              <div>
+                <div className="text-[var(--color-accent)] font-semibold">Business PRO</div>
+                <div className="font-bold text-[var(--color-ink)] flex items-center justify-center gap-1">
+                  <span>{PRICING_CONFIG.businessPro.monthlyAiScans}</span>
+                  <Users className="w-3 h-3 text-[var(--color-muted)]" />
+                  <span>5</span>
+                </div>
+                <div className="text-[10px] text-[var(--color-muted)] mt-0.5">
+                  {isRTL ? 'شركات + 5 مقاعد' : 'Orgs + 5 seats'}
+                </div>
               </div>
             </div>
-            <div className="border-x border-[var(--color-line)]">
-              <div className="text-[var(--color-accent)] font-semibold">Personal PRO</div>
-              <div className="font-bold text-[var(--color-ink)]">
-                {PRICING_CONFIG.personalPro.monthlyAiScans} {isRTL ? 'مسح/ش' : 'scans'}
-              </div>
-              <div className="text-[10px] text-[var(--color-muted)] mt-0.5">
-                {isRTL ? 'غير محدود' : 'Unlimited'}
-              </div>
-            </div>
-            <div>
-              <div className="text-[var(--color-accent)] font-semibold">Business PRO</div>
-              <div className="font-bold text-[var(--color-ink)] flex items-center justify-center gap-1">
-                <span>{PRICING_CONFIG.businessPro.monthlyAiScans}</span>
-                <Users className="w-3 h-3 text-[var(--color-muted)]" />
-                <span>5</span>
-              </div>
-              <div className="text-[10px] text-[var(--color-muted)] mt-0.5">
-                {isRTL ? 'شركات + 5 مقاعد' : 'Orgs + 5 seats'}
-              </div>
-            </div>
-          </div>
+          )}
 
           {/* Cloud Backup Note */}
           <div className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] text-[11px] text-[var(--color-muted)] leading-relaxed flex items-start gap-2">
@@ -693,7 +1003,12 @@ export const UpgradeModal: React.FC = () => {
           {/* Activation Code Redemption ("لديك كود تفعيل؟") */}
           <form
             onSubmit={handleRedeemCode}
-            className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-2.5"
+            data-testid="upgrade-coupon-form"
+            className={`p-3 rounded-xl border space-y-2.5 ${
+              !user?.isLoggedIn
+                ? 'bg-amber-500/5 border-amber-500/30'
+                : 'bg-[var(--color-bg)] border-[var(--color-line)]'
+            }`}
           >
             <div className="flex items-center justify-between gap-2">
               <label
@@ -706,13 +1021,30 @@ export const UpgradeModal: React.FC = () => {
               {!user?.isLoggedIn && (
                 <button
                   type="button"
-                  onClick={() => void signInWithGoogleAccount()}
+                  data-testid="upgrade-code-google-required-btn"
+                  disabled={isSigningInGoogle}
+                  onClick={() => void handleGoogleSignInInline()}
                   className="text-[11px] font-semibold text-[var(--color-accent)] hover:underline shrink-0"
                 >
                   {isRTL ? 'تسجيل دخول جوجل' : 'Sign in with Google'}
                 </button>
               )}
             </div>
+
+            {!user?.isLoggedIn && (
+              <div
+                data-testid="upgrade-guest-code-lock"
+                className="p-2 rounded-lg bg-amber-500/12 border border-amber-500/30 text-[11px] text-amber-800 dark:text-amber-300 flex items-center gap-2 font-medium"
+              >
+                <Lock className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  {isRTL
+                    ? 'يلزم تسجيل الدخول بحساب جوجل لتفعيل أكواد الاشتراك وربطها بحسابك.'
+                    : 'Google sign-in is required before activating a license code.'}
+                </span>
+              </div>
+            )}
+
             <div className="flex items-center gap-2">
               <input
                 id="upgrade-coupon-code-input"

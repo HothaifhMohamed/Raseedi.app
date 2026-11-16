@@ -23,6 +23,7 @@ import { ConfirmationModal } from '../common/ConfirmationModal';
 import { MoneyText } from '../common/MoneyText';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
 import { HairlineEmptyState, HairlineFigure } from '../common/HairlineVisuals';
+import { shouldShowPersonalUpgradeUi } from '../../services/subscriptionHelpers';
 
 export const BudgetPage: React.FC = () => {
   const {
@@ -35,6 +36,7 @@ export const BudgetPage: React.FC = () => {
     updateBudget,
     deleteBudget,
     isPro,
+    subscriptionSummary,
     setIsUpgradeModalOpen,
     t,
     isRTL,
@@ -170,14 +172,14 @@ export const BudgetPage: React.FC = () => {
         >
           <Plus className="w-4 h-4" />
           <span>{t('addBudget')}</span>
-          {!isPro && budgets.length >= 1 && (
+          {shouldShowPersonalUpgradeUi(subscriptionSummary) && budgets.length >= 1 && (
             <Crown className="w-3.5 h-3.5 ms-0.5" />
           )}
         </button>
       </div>
 
       {/* Free Limit Warning Banner */}
-      {!isPro && budgets.length >= 1 && (
+      {shouldShowPersonalUpgradeUi(subscriptionSummary) && budgets.length >= 1 && (
         <div className="p-2.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl flex items-center justify-between text-xs text-[var(--color-muted)]">
           <span>
             {isRTL ? (

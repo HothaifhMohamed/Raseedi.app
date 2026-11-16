@@ -263,10 +263,11 @@ function resolveUserEntitlement(userData?: Record<string, unknown>): {
     };
   }
 
-  const rawPlan = String(userData.proPlan || '');
-  const rawTier = String(userData.planTier || '');
+  const rawPlan = String(userData.proPlan || '').trim().toLowerCase();
+  const rawTier = String(userData.planTier || '').trim().toLowerCase();
   const isBusiness =
     rawTier === 'business_pro' ||
+    rawTier === 'business' ||
     rawPlan === 'business_monthly' ||
     rawPlan === 'business_yearly' ||
     rawPlan === 'trial';

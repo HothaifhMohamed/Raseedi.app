@@ -209,8 +209,10 @@ export function resolvePlanTierFromProfile(
   profile: Partial<CloudUserProfile> | Partial<VerifiedProEntitlement> | null | undefined
 ): PlanTier {
   if (!profile || !isEntitlementActive(profile as VerifiedProEntitlement)) return 'free';
+  const rawTier = String(profile.planTier || '').trim().toLowerCase();
   if (
-    profile.planTier === 'business_pro' ||
+    rawTier === 'business_pro' ||
+    rawTier === 'business' ||
     profile.proPlan === 'business_monthly' ||
     profile.proPlan === 'business_yearly' ||
     profile.proPlan === 'trial'

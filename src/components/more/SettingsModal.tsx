@@ -13,25 +13,10 @@ import {
   Coins,
   RefreshCw,
   RotateCcw,
-  KeyRound,
-  ShieldCheck,
-  Copy,
-  Check,
-  Sparkles,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { hashPin } from '../../services/security';
-import {
-  AdminCouponCycle,
-  AdminCouponTier,
-  generateAdminLicenseCode,
-} from '../../services/licenseCodes';
-import {
-  createCouponInFirestore,
-  fetchAdminCouponsFromFirestore,
-  FirestoreCouponRecord,
-} from '../../services/firebase';
 import {
   CURRENCIES,
   getCurrency,
@@ -47,20 +32,17 @@ import {
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
-  initialOpenAdminPanel?: boolean;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
-  initialOpenAdminPanel = false,
 }) => {
   const {
     settings,
     wallets,
     user,
     isPro,
-    isAdminUser,
     updateSettings,
     resetAllData,
     deleteAccountAndData,
@@ -99,32 +81,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     isError?: boolean;
   } | null>(null);
 
-  // Secret Admin Coupon Generator Panel State (strictly restricted to Hapaypal2003@gmail.com)
-  const canAccessAdminPanel = Boolean(
-    isAdminUser && user?.email?.trim().toLowerCase() === 'hapaypal2003@gmail.com'
-  );
-  const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
-  const [adminCouponTier, setAdminCouponTier] = useState<AdminCouponTier>('business');
-  const [adminCouponCycle, setAdminCouponCycle] = useState<AdminCouponCycle>('yearly');
-  const [generatedAdminCode, setGeneratedAdminCode] = useState<string | null>(null);
-  const [adminCodeSyncStatus, setAdminCodeSyncStatus] = useState<
-    'idle' | 'syncing' | 'cloud_synced' | 'error'
-  >('idle');
-  const [adminCodeError, setAdminCodeError] = useState<string | null>(null);
-  const [recentCoupons, setRecentCoupons] = useState<FirestoreCouponRecord[]>([]);
-  const [copiedAdminCode, setCopiedAdminCode] = useState(false);
-
   useEffect(() => {
-    if (!isOpen) {
-      setIsAdminPanelOpen(false);
-      setAdminCodeSyncStatus('idle');
-      setAdminCodeError(null);
-      setCopiedAdminCode(false);
-      return;
-    }
-    if (initialOpenAdminPanel && canAccessAdminPanel) {
-      setIsAdminPanelOpen(true);
-    }
+    if (!isOpen) return;
     setLockDateInput(activeOrganization?.lockedUntilDate || '');
     setOrgVatDraft(String(activeOrganization?.vatRate ?? 14));
     setOrgThresholdDraft(String(activeOrganization?.approvalThreshold ?? 0));
@@ -132,22 +90,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setRateSyncFeedback(null);
   }, [
     isOpen,
-    initialOpenAdminPanel,
-    canAccessAdminPanel,
     activeOrganization?.id,
     activeOrganization?.lockedUntilDate,
   ]);
-
-  useEffect(() => {
-    if (!isOpen || !canAccessAdminPanel || !isAdminPanelOpen) return;
-    let active = true;
-    void fetchAdminCouponsFromFirestore(15).then((records) => {
-      if (active) setRecentCoupons(records);
-    });
-    return () => {
-      active = false;
-    };
-  }, [isOpen, canAccessAdminPanel, isAdminPanelOpen]);
 
   const editableCurrencyCodes = useMemo(() => {
     const base = ['EGP', 'SAR', 'AED', 'KWD', 'QAR', 'BHD', 'OMR', 'JOD', 'EUR', 'GBP', 'TRY'];
@@ -1017,276 +962,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             )}
           </div>
 
-          {/* 7. Secret Admin Coupon Generator Panel (Visible exclusively to Hapaypal2003@gmail.com) */}
-          {canAccessAdminPanel && (
-            <div
-              data-testid="admin-panel-section"
-              className="p-4 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl space-y-3"
-            >
-              <button
-                type="button"
-                onClick={() => setIsAdminPanelOpen((prev) => !prev)}
-                data-testid="admin-panel-toggle"
-                className="w-full flex items-center justify-between text-xs font-bold text-[var(--color-ink)] min-h-[36px]"
-              >
-                <span className="flex items-center gap-2">
-                  <KeyRound className="w-4 h-4 text-[var(--color-accent)]" />
-                  <span>{isRTL ? 'لوحة الإدارة' : 'Admin Panel'}</span>
-                </span>
-                <span className="text-[11px] font-medium text-[var(--color-muted)]">
-                  {isAdminPanelOpen
-                    ? isRTL
-                      ? 'إخفاء'
-                      : 'Hide'
-                    : isRTL
-                    ? 'فتح'
-                    : 'Open'}
-                </span>
-              </button>
-
-              {isAdminPanelOpen && (
-                <div className="pt-3 border-t border-[var(--color-line)] space-y-3" data-testid="admin-coupon-panel">
-                  <div className="flex items-center justify-between">
-                    <span className="flex items-center gap-1.5 text-[11px] font-semibold text-[var(--color-income)]">
-                      <ShieldCheck className="w-3.5 h-3.5" />
-                      <span>{isRTL ? 'توليد أكواد التفعيل (coupons)' : 'License Coupon Generator (coupons)'}</span>
-                    </span>
-                  </div>
-
-                  {/* Tier Selection */}
-                  <div className="space-y-1.5">
-                    <span className="block text-[11px] text-[var(--color-muted)]">
-                      {isRTL ? 'نوع الباقة' : 'Plan Tier'}
-                    </span>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setAdminCouponTier('pro')}
-                        data-testid="admin-tier-pro"
-                        className={`py-2 px-2.5 rounded-lg text-xs font-semibold border transition-colors min-h-[38px] ${
-                          adminCouponTier === 'pro'
-                            ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)]'
-                            : 'bg-[var(--color-surface)] text-[var(--color-ink)] border-[var(--color-line)]'
-                        }`}
-                      >
-                        {isRTL ? 'باقة PRO (pro)' : 'Personal PRO (pro)'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setAdminCouponTier('business')}
-                        data-testid="admin-tier-business"
-                        className={`py-2 px-2.5 rounded-lg text-xs font-semibold border transition-colors min-h-[38px] ${
-                          adminCouponTier === 'business'
-                            ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)]'
-                            : 'bg-[var(--color-surface)] text-[var(--color-ink)] border-[var(--color-line)]'
-                        }`}
-                      >
-                        {isRTL ? 'باقة الأعمال (business)' : 'Business PRO (business)'}
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Cycle Selection */}
-                  <div className="space-y-1.5">
-                    <span className="block text-[11px] text-[var(--color-muted)]">
-                      {isRTL ? 'مدة التفعيل' : 'Activation Duration'}
-                    </span>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      {(
-                        [
-                          { id: 'monthly', ar: 'شهر', en: '1 Month' },
-                          { id: 'yearly', ar: 'سنة', en: '1 Year' },
-                          { id: 'lifetime', ar: 'مدى الحياة', en: 'Lifetime' },
-                        ] as const
-                      ).map((opt) => (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => setAdminCouponCycle(opt.id)}
-                          data-testid={`admin-cycle-${opt.id}`}
-                          className={`py-2 px-2 rounded-lg text-[11px] font-semibold border transition-colors min-h-[36px] ${
-                            adminCouponCycle === opt.id
-                              ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)]'
-                              : 'bg-[var(--color-surface)] text-[var(--color-ink)] border-[var(--color-line)]'
-                          }`}
-                        >
-                          {isRTL ? opt.ar : opt.en}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    disabled={adminCodeSyncStatus === 'syncing'}
-                    onClick={async () => {
-                      const code = generateAdminLicenseCode({
-                        tier: adminCouponTier,
-                        cycle: adminCouponCycle,
-                      });
-                      setGeneratedAdminCode(code);
-                      setCopiedAdminCode(false);
-                      setAdminCodeSyncStatus('syncing');
-                      setAdminCodeError(null);
-
-                      try {
-                        const res = await createCouponInFirestore({
-                          code,
-                          tier: adminCouponTier,
-                          cycle: adminCouponCycle,
-                          planTier: adminCouponTier === 'business' ? 'business_pro' : 'personal_pro',
-                        });
-                        if (res.saved) {
-                          setAdminCodeSyncStatus('cloud_synced');
-                          const updatedList = await fetchAdminCouponsFromFirestore(15);
-                          setRecentCoupons(updatedList);
-                        } else {
-                          setAdminCodeSyncStatus('error');
-                          setAdminCodeError(
-                            isRTL
-                              ? 'تعذر حفظ الكود في قاعدة البيانات. تحقق من تسجيل الدخول بحساب المدير.'
-                              : 'Failed to save coupon to Firestore.'
-                          );
-                        }
-                      } catch (err) {
-                        setAdminCodeSyncStatus('error');
-                        let msg = err instanceof Error ? err.message : '';
-                        try {
-                          const parsed = JSON.parse(msg) as { error?: string };
-                          if (parsed?.error) msg = parsed.error;
-                        } catch {
-                          // ignore JSON parse failure
-                        }
-                        setAdminCodeError(
-                          msg ||
-                            (isRTL
-                              ? 'تعذر حفظ الكود في Firestore.'
-                              : 'Could not save coupon in Firestore.')
-                        );
-                      }
-                    }}
-                    data-testid="admin-generate-code-btn"
-                    className="w-full py-2.5 px-3 bg-[var(--color-accent)] text-[var(--color-on-accent)] font-semibold rounded-lg text-xs flex items-center justify-center gap-2 hover:opacity-95 transition-opacity min-h-[42px] disabled:opacity-60"
-                  >
-                    <Sparkles className="w-4 h-4" />
-                    <span>
-                      {adminCodeSyncStatus === 'syncing'
-                        ? isRTL
-                          ? 'جاري التوليد والحفظ في Firestore...'
-                          : 'Generating & Saving...'
-                        : isRTL
-                        ? 'توليد وحفظ كود تفعيل جديد'
-                        : 'Generate & Save Coupon'}
-                    </span>
-                  </button>
-
-                  {adminCodeError && (
-                    <p className="text-[11px] text-[var(--color-expense)] font-medium">
-                      {adminCodeError}
-                    </p>
-                  )}
-
-                  {generatedAdminCode && (
-                    <div className="p-3 bg-[var(--color-surface)] border border-[var(--color-accent)]/40 rounded-lg space-y-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <code
-                          dir="ltr"
-                          data-testid="admin-generated-code"
-                          className="text-xs font-mono font-bold text-[var(--color-ink)] select-all break-all"
-                        >
-                          {generatedAdminCode}
-                        </code>
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            try {
-                              await navigator.clipboard?.writeText(generatedAdminCode);
-                            } catch {
-                              // Ignore clipboard permission errors
-                            }
-                            setCopiedAdminCode(true);
-                            window.setTimeout(() => setCopiedAdminCode(false), 2500);
-                          }}
-                          data-testid="admin-copy-code-btn"
-                          className="px-2.5 py-1.5 rounded-md bg-[var(--color-bg)] border border-[var(--color-line)] text-[11px] font-semibold text-[var(--color-ink)] hover:border-[var(--color-accent)] flex items-center gap-1 shrink-0 min-h-[32px]"
-                        >
-                          {copiedAdminCode ? (
-                            <>
-                              <Check className="w-3.5 h-3.5 text-[var(--color-income)]" />
-                              <span>{isRTL ? 'تم النسخ' : 'Copied'}</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="w-3.5 h-3.5 text-[var(--color-accent)]" />
-                              <span>{isRTL ? 'نسخ' : 'Copy'}</span>
-                            </>
-                          )}
-                        </button>
-                      </div>
-                      <p className="text-[10px] text-[var(--color-muted)]">
-                        {adminCodeSyncStatus === 'cloud_synced'
-                          ? isRTL
-                            ? 'تم حفظ الكود في مجموعة coupons بحالة: غير مستخدم.'
-                            : 'Saved to Firestore coupons collection (Status: Unused).'
-                          : isRTL
-                          ? 'الكود جاهز للنسخ والمشاركة.'
-                          : 'Code ready to copy.'}
-                      </p>
-                    </div>
-                  )}
-
-                  {recentCoupons.length > 0 && (
-                    <div className="pt-2 border-t border-[var(--color-line)] space-y-1.5">
-                      <div className="text-[10px] font-semibold text-[var(--color-muted)]">
-                        {isRTL ? 'الأكواد المحفوظة في coupons' : 'Saved Coupons in Firestore'}
-                      </div>
-                      <div className="space-y-1 max-h-36 overflow-y-auto">
-                        {recentCoupons.map((rec) => (
-                          <div
-                            key={rec.code}
-                            className="px-2.5 py-1.5 rounded-md bg-[var(--color-surface)] border border-[var(--color-line)] flex items-center justify-between gap-2 text-[10px]"
-                          >
-                            <div className="min-w-0">
-                              <code className="block font-mono font-bold text-[var(--color-ink)] truncate" dir="ltr">
-                                {rec.code}
-                              </code>
-                              <span className="text-[var(--color-muted)]">
-                                {rec.tier === 'business' ? 'Business' : 'PRO'} •{' '}
-                                {rec.cycle === 'monthly'
-                                  ? isRTL
-                                    ? 'شهر'
-                                    : 'Month'
-                                  : rec.cycle === 'yearly'
-                                  ? isRTL
-                                    ? 'سنة'
-                                    : 'Year'
-                                  : isRTL
-                                  ? 'مدى الحياة'
-                                  : 'Lifetime'}
-                              </span>
-                            </div>
-                            <span
-                              className={`shrink-0 font-semibold ${
-                                rec.used ? 'text-[var(--color-muted)]' : 'text-[var(--color-income)]'
-                              }`}
-                            >
-                              {rec.used
-                                ? isRTL
-                                  ? 'مُستخدم'
-                                  : 'Used'
-                                : isRTL
-                                ? 'غير مستخدم'
-                                : 'Unused'}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
         </div>
 
         {/* Footer */}

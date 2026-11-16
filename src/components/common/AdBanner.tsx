@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Crown, Sparkles } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { hasAdSenseConsent, subscribeAdConsentChanges } from './AdConsentBanner';
+import { shouldShowAds } from '../../services/subscriptionHelpers';
 
 export interface AdBannerProps {
   variant?: 'banner' | 'native-card';
@@ -28,7 +29,8 @@ export const AdBanner: React.FC<AdBannerProps> = ({
   fallbackBodyEn,
   className = '',
 }) => {
-  const { isPro, setIsUpgradeModalOpen, isRTL } = useApp();
+  const { isPro, subscriptionSummary, setIsUpgradeModalOpen, isRTL } = useApp();
+  const showAds = shouldShowAds(subscriptionSummary) && !isPro;
   const adRef = useRef<HTMLModElement | null>(null);
   const [isOnline, setIsOnline] = useState<boolean>(
     typeof navigator !== 'undefined' ? navigator.onLine : true
@@ -57,7 +59,7 @@ export const AdBanner: React.FC<AdBannerProps> = ({
   }, []);
 
   useEffect(() => {
-    if (isPro || !canTryAdSense) return;
+    if (!showAds || !canTryAdSense) return;
 
     const scriptId = 'raseedi-adsense-script';
     const existingScript =
@@ -78,9 +80,9 @@ export const AdBanner: React.FC<AdBannerProps> = ({
     } catch {
       setAdLoadFailed(true);
     }
-  }, [isPro, canTryAdSense, adSenseClient]);
+  }, [showAds, canTryAdSense, adSenseClient]);
 
-  if (isPro || !adSenseClient) return null;
+  if (!showAds || !adSenseClient) return null;
 
   const titleText = isRTL
     ? fallbackTitleAr || 'رَصِيدِي برو — تحكم مالي أذكى بدون إعلانات'

@@ -7,7 +7,7 @@ import type { BillingCycle, PlanTier, ProPlanCode } from '../types';
 export type AdminCouponTier = 'pro' | 'business';
 export type AdminCouponCycle = 'monthly' | 'yearly' | 'lifetime';
 
-export const ADMIN_PANEL_PASSCODE = 'raseedi_admin_2026';
+export const ADMIN_PANEL_PASSCODE = '2026';
 export const LICENSE_CODE_PREFIX = 'RSD-PRO-';
 export const BUSINESS_LICENSE_CODE_PREFIX = 'RSD-BIZ-';
 export const AUTHORIZED_ADMIN_EMAILS = ['hapaypal2003@gmail.com'] as const;

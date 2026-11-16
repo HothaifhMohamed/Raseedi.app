@@ -559,11 +559,56 @@ export async function saveOrgWorkspaces(
   });
 }
 
+const GUEST_MODE_LS_KEY = 'raseedi_guest_mode_v1';
+const DIRTY_SYNC_LS_KEY = 'raseedi_unsynced_dirty_v1';
+
+export function loadGuestModePref(): boolean {
+  try {
+    return localStorage.getItem(GUEST_MODE_LS_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function saveGuestModePref(isGuest: boolean): void {
+  try {
+    if (isGuest) {
+      localStorage.setItem(GUEST_MODE_LS_KEY, '1');
+    } else {
+      localStorage.removeItem(GUEST_MODE_LS_KEY);
+    }
+  } catch {
+    // Ignore storage failures
+  }
+}
+
+export function loadUnsyncedDirtyFlag(): boolean {
+  try {
+    return localStorage.getItem(DIRTY_SYNC_LS_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function saveUnsyncedDirtyFlag(dirty: boolean): void {
+  try {
+    if (dirty) {
+      localStorage.setItem(DIRTY_SYNC_LS_KEY, '1');
+    } else {
+      localStorage.removeItem(DIRTY_SYNC_LS_KEY);
+    }
+  } catch {
+    // Ignore storage failures
+  }
+}
+
 export async function clearLocalAppStorageAndDb(): Promise<void> {
   memoryCache = null;
   try {
     localStorage.removeItem(LEGACY_LS_KEY);
     localStorage.removeItem(SETTINGS_LS_KEY);
+    localStorage.removeItem(GUEST_MODE_LS_KEY);
+    localStorage.removeItem(DIRTY_SYNC_LS_KEY);
     localStorage.removeItem('raseedi_live_rates_v1');
     const keysToRemove: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
@@ -573,6 +618,21 @@ export async function clearLocalAppStorageAndDb(): Promise<void> {
       }
     }
     keysToRemove.forEach((k) => localStorage.removeItem(k));
+  } catch {
+    // Ignore
+  }
+
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      const sessionKeys: string[] = [];
+      for (let i = 0; i < window.sessionStorage.length; i++) {
+        const k = window.sessionStorage.key(i);
+        if (k && k.startsWith('raseedi_')) {
+          sessionKeys.push(k);
+        }
+      }
+      sessionKeys.forEach((k) => window.sessionStorage.removeItem(k));
+    }
   } catch {
     // Ignore
   }

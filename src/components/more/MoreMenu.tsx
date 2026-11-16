@@ -28,6 +28,8 @@ import {
   CircleDollarSign,
   UploadCloud,
   KeyRound,
+  LogOut,
+  LogIn,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ReportsModal } from './ReportsModal';
@@ -61,12 +63,16 @@ export const MoreMenu: React.FC = () => {
     openCurrencyPicker,
     updateSettings,
     isPro,
+    isBusinessPro,
+    subscriptionSummary,
     setIsUpgradeModalOpen,
     setIsBackupOpen,
     setIsSettingsOpen,
     user,
+    signInWithGoogleAccount,
+    setIsLogoutModalOpen,
     isAdminUser,
-    openAdminSettingsPanel,
+    openAdminPanel,
     t,
     isRTL,
   } = useApp();
@@ -123,67 +129,129 @@ export const MoreMenu: React.FC = () => {
 
   return (
     <div className="flex flex-col flex-1 px-4 py-3 pb-24 space-y-4" dir={isRTL ? 'rtl' : 'ltr'}>
-      {/* 1. PRO UPGRADE / STATUS HERO CARD (Bare accent icon, no tinted square) */}
-      <div
-        onClick={() => setIsUpgradeModalOpen(true)}
-        className="cursor-pointer p-4 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] shadow-sm hover:border-[var(--color-accent)] transition-all flex items-center justify-between gap-3"
-      >
-        <div className="flex items-center gap-3 min-w-0">
-          {isPro ? (
-            <Crown className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
-          ) : (
-            <Sparkles className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
-          )}
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <h2 className="font-title text-sm font-bold text-[var(--color-ink)]">
-                {isPro ? (
-                  isRTL ? (
+      {/* 1. HERO CARD: Admin Code Panel for Admin, Active Subscriber Summary, or Free Upgrade */}
+      {isAdminUser ? (
+        <div
+          onClick={() => openAdminPanel()}
+          data-testid="more-admin-hero-card"
+          className="cursor-pointer p-4 rounded-xl bg-[var(--color-surface)] border border-[var(--color-accent)]/40 shadow-sm hover:border-[var(--color-accent)] transition-all flex items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            <KeyRound className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <h2 className="font-title text-sm font-bold text-[var(--color-ink)]">
+                  {isRTL ? 'لوحة الإدارة وتوليد الأكواد' : 'Admin Panel & Code Generator'}
+                </h2>
+                <span className="text-[10px] px-1.5 py-0.2 rounded font-semibold bg-[var(--color-income)]/15 text-[var(--color-income)]">
+                  {isRTL ? 'إدارة' : 'Admin'}
+                </span>
+              </div>
+              <p className="text-xs text-[var(--color-muted)] mt-0.5">
+                {isRTL
+                  ? 'حساب المدير مفعّل مدى الحياة (Business PRO) • اضغط لتوليد أكواد التفعيل'
+                  : 'Admin lifetime Business PRO active • Tap to generate coupon codes'}
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            className="shrink-0 px-3 py-1.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-medium hover:opacity-95 transition-opacity min-h-[38px]"
+          >
+            {isRTL ? 'فتح اللوحة' : 'Open Panel'}
+          </button>
+        </div>
+      ) : (
+        <div
+          onClick={() => setIsUpgradeModalOpen(true)}
+          data-testid="more-subscription-hero-card"
+          className="cursor-pointer p-4 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] shadow-sm hover:border-[var(--color-accent)] transition-all flex items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            {isPro ? (
+              <Crown className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
+            ) : (
+              <Sparkles className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
+            )}
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <h2 className="font-title text-sm font-bold text-[var(--color-ink)]">
+                  {isBusinessPro ? (
+                    isRTL ? (
+                      <>
+                        باقة <bdi dir="ltr">Business PRO</bdi> مفعّلة
+                      </>
+                    ) : (
+                      'Business PRO Active'
+                    )
+                  ) : isPro ? (
+                    isRTL ? (
+                      <>
+                        رصيدي <bdi dir="ltr">PRO</bdi> مفعّل
+                      </>
+                    ) : (
+                      'Raseedi PRO Active'
+                    )
+                  ) : isRTL ? (
                     <>
-                      رصيدي <bdi dir="ltr">PRO</bdi> مفعّل
+                      الترقية إلى رصيدي <bdi dir="ltr">PRO</bdi>
                     </>
                   ) : (
-                    'Raseedi PRO Active'
+                    'Upgrade to Raseedi PRO'
+                  )}
+                </h2>
+                {!isPro && (
+                  <span className="text-[10px] px-1.5 py-0.2 rounded font-semibold bg-[var(--color-accent)]/15 text-[var(--color-accent)]">
+                    {isRTL ? 'مميز' : 'PRO'}
+                  </span>
+                )}
+                {subscriptionSummary.isExpiringSoon && subscriptionSummary.daysRemaining !== null && (
+                  <span className="text-[10px] px-1.5 py-0.2 rounded font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300">
+                    {isRTL
+                      ? `متبقي ${subscriptionSummary.daysRemaining} أيام`
+                      : `${subscriptionSummary.daysRemaining}d left`}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-[var(--color-muted)] mt-0.5">
+                {isPro ? (
+                  subscriptionSummary.isLifetime ? (
+                    isRTL ? (
+                      'اشتراك دائم مدى الحياة • جميع المزايا مفتوحة'
+                    ) : (
+                      'Lifetime subscription • All features unlocked'
+                    )
+                  ) : subscriptionSummary.daysRemaining !== null ? (
+                    isRTL ? (
+                      `متبقي ${subscriptionSummary.daysRemaining} يوم على انتهاء الاشتراك`
+                    ) : (
+                      `${subscriptionSummary.daysRemaining} day(s) remaining on your plan`
+                    )
+                  ) : isRTL ? (
+                    'جميع الميزات الاحترافية مفتوحة بالكامل بدون حدود'
+                  ) : (
+                    'All professional features unlocked without limits'
                   )
                 ) : isRTL ? (
                   <>
-                    الترقية إلى رصيدي <bdi dir="ltr">PRO</bdi>
+                    محافظ غير محدودة، تقارير <bdi dir="ltr">PDF</bdi>، ميزانيات مخصصة، وبدون إعلانات
                   </>
                 ) : (
-                  'Upgrade to Raseedi PRO'
+                  'Unlimited wallets, PDF reports, category budgets, ad-free'
                 )}
-              </h2>
-              {!isPro && (
-                <span className="text-[10px] px-1.5 py-0.2 rounded font-semibold bg-[var(--color-accent)]/15 text-[var(--color-accent)]">
-                  {isRTL ? 'مميز' : 'PRO'}
-                </span>
-              )}
+              </p>
             </div>
-            <p className="text-xs text-[var(--color-muted)] mt-0.5">
-              {isPro ? (
-                isRTL ? (
-                  'جميع الميزات الاحترافية مفتوحة بالكامل بدون حدود'
-                ) : (
-                  'All professional features unlocked without limits'
-                )
-              ) : isRTL ? (
-                <>
-                  محافظ غير محدودة، تقارير <bdi dir="ltr">PDF</bdi>، ميزانيات مخصصة، وبدون إعلانات
-                </>
-              ) : (
-                'Unlimited wallets, PDF reports, category budgets, ad-free'
-              )}
-            </p>
           </div>
-        </div>
 
-        <button
-          type="button"
-          className="shrink-0 px-3 py-1.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-medium hover:opacity-95 transition-opacity min-h-[38px]"
-        >
-          {isPro ? (isRTL ? 'إدارة' : 'Manage') : isRTL ? 'ترقية' : 'Upgrade'}
-        </button>
-      </div>
+          <button
+            type="button"
+            className="shrink-0 px-3 py-1.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-medium hover:opacity-95 transition-opacity min-h-[38px]"
+          >
+            {isPro ? (isRTL ? 'إدارة الاشتراك' : 'Manage') : isRTL ? 'ترقية' : 'Upgrade'}
+          </button>
+        </div>
+      )}
 
       {/* LEGACY LOCAL ORGS MIGRATION BANNER */}
       {legacyLocalOrgs.length > 0 && (
@@ -634,25 +702,98 @@ export const MoreMenu: React.FC = () => {
             <button
               type="button"
               data-testid="more-admin-panel-btn"
-              onClick={() => openAdminSettingsPanel()}
+              onClick={() => openAdminPanel()}
               className="w-full p-3.5 flex items-center justify-between text-xs hover:bg-[var(--color-bg)] transition-colors text-start min-h-[44px]"
             >
               <div className="flex items-center gap-3">
                 <KeyRound className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
                 <div>
                   <div className="font-semibold text-[var(--color-ink)]">
-                    {isRTL ? 'لوحة الإدارة' : 'Admin Panel'}
+                    {isRTL ? 'لوحة الإدارة وتوليد الأكواد' : 'Admin Panel & Coupons'}
                   </div>
                   <div className="text-[11px] text-[var(--color-muted)]">
                     {isRTL
-                      ? 'توليد أكواد التفعيل وحفظها في قاعدة البيانات (للمدير فقط)'
-                      : 'Generate & manage license coupons in Firestore (Admin only)'}
+                      ? 'توليد أكواد التفعيل وحفظها في قاعدة البيانات (محمي برمز مرور)'
+                      : 'Generate & manage license coupons in Firestore (passcode protected)'}
                   </div>
                 </div>
               </div>
               <ArrowIcon className="w-4 h-4 text-[var(--color-muted)]" />
             </button>
           )}
+        </div>
+      </div>
+
+      {/* SECTION 4.5: ACCOUNT & DEVICE PRIVACY (الحساب وتسجيل الخروج) */}
+      <div className="space-y-1.5">
+        <h3 className="text-xs font-semibold text-[var(--color-muted)] px-1 uppercase tracking-wider">
+          {isRTL ? 'الحساب والخصوصية' : 'Account & Session'}
+        </h3>
+        <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-3.5 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              {user?.isLoggedIn && user.avatarUrl ? (
+                <img
+                  src={user.avatarUrl}
+                  alt={user.name}
+                  className="w-9 h-9 rounded-full border border-[var(--color-line)] shrink-0"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <div className="w-9 h-9 rounded-full bg-[var(--color-accent)]/15 text-[var(--color-accent)] flex items-center justify-center text-xs font-bold shrink-0">
+                  {user?.isLoggedIn ? (user.name || 'R').charAt(0).toUpperCase() : <User className="w-4 h-4" />}
+                </div>
+              )}
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-[var(--color-ink)] truncate">
+                  {user?.isLoggedIn
+                    ? user.name
+                    : isRTL
+                    ? 'وضع الزائر (حساب محلي)'
+                    : 'Guest Session (Local Only)'}
+                </div>
+                <div className="text-[11px] text-[var(--color-muted)] truncate" dir={user?.isLoggedIn ? 'ltr' : undefined}>
+                  {user?.isLoggedIn
+                    ? user.email
+                    : isRTL
+                    ? 'البيانات محفوظة على هذا المتصفح فقط'
+                    : 'Data is saved locally on this device only'}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {!user?.isLoggedIn && (
+              <button
+                type="button"
+                data-testid="more-google-signin-btn"
+                onClick={() => void signInWithGoogleAccount()}
+                className="flex-1 min-w-[140px] py-2 px-3 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center justify-center gap-1.5 min-h-[42px]"
+              >
+                <LogIn className="w-4 h-4 shrink-0" />
+                <span>{isRTL ? 'ربط حساب جوجل' : 'Sign in with Google'}</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              data-testid="more-signout-btn"
+              onClick={() => setIsLogoutModalOpen(true)}
+              className="flex-1 min-w-[140px] py-2 px-3 rounded-xl bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/30 text-[var(--color-expense)] text-xs font-bold flex items-center justify-center gap-1.5 hover:bg-[var(--color-expense)]/15 transition-colors min-h-[42px]"
+            >
+              <LogOut className="w-4 h-4 shrink-0" />
+              <span>
+                {user?.isLoggedIn
+                  ? isRTL
+                    ? 'تسجيل الخروج'
+                    : 'Sign Out'
+                  : isRTL
+                  ? 'خروج ومسح بيانات الزائر'
+                  : 'Exit Guest & Wipe Device'}
+              </span>
+            </button>
+          </div>
         </div>
       </div>
 

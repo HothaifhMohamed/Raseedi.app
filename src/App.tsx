@@ -36,11 +36,16 @@ import {
 } from './components/common/AdConsentBanner';
 import { OrganizationHubModal } from './components/organization/OrganizationHubModal';
 import { OrgMigrationWizardModal } from './components/organization/OrgMigrationWizardModal';
+import { AuthGateScreen } from './components/auth/AuthGateScreen';
+import { LogoutConfirmationModal } from './components/more/LogoutConfirmationModal';
+import { AdminCodePanelModal } from './components/more/AdminCodePanelModal';
 
 const MainLayout: React.FC = () => {
   const {
     isLoading,
     hasCompletedOnboarding,
+    user,
+    isGuestMode,
     isAppLocked,
     unlockApp,
     activeNav,
@@ -60,11 +65,14 @@ const MainLayout: React.FC = () => {
     setIsFilterOpen,
     isSettingsOpen,
     setIsSettingsOpen,
-    openAdminPanelRequested,
     isBackupOpen,
     setIsBackupOpen,
     isUpgradeModalOpen,
     setIsUpgradeModalOpen,
+    isLogoutModalOpen,
+    setIsLogoutModalOpen,
+    isAdminCodeModalOpen,
+    setIsAdminCodeModalOpen,
     isOrgHubOpen,
     setIsOrgHubOpen,
     isPro,
@@ -105,12 +113,19 @@ const MainLayout: React.FC = () => {
     document.head.appendChild(script);
   }, [isPro, hasConsentForAds]);
 
-  const isMainShellReady = !isLoading && !isAppLocked && hasCompletedOnboarding;
+  const isMainShellReady =
+    !isLoading && !isAppLocked && (Boolean(user?.isLoggedIn) || isGuestMode) && hasCompletedOnboarding;
   useModalBackHandler(isMainShellReady && isAddModalOpen, () => setIsAddModalOpen(false), 'add-tx');
   useModalBackHandler(isMainShellReady && isFilterOpen, () => setIsFilterOpen(false), 'filters');
   useModalBackHandler(isMainShellReady && isSettingsOpen, () => setIsSettingsOpen(false), 'settings');
   useModalBackHandler(isMainShellReady && isBackupOpen, () => setIsBackupOpen(false), 'backup');
   useModalBackHandler(isMainShellReady && isUpgradeModalOpen, () => setIsUpgradeModalOpen(false), 'upgrade');
+  useModalBackHandler(isMainShellReady && isLogoutModalOpen, () => setIsLogoutModalOpen(false), 'logout');
+  useModalBackHandler(
+    isMainShellReady && isAdminCodeModalOpen,
+    () => setIsAdminCodeModalOpen(false),
+    'admin-code'
+  );
   useModalBackHandler(isMainShellReady && isOrgHubOpen, () => setIsOrgHubOpen(false), 'org-hub');
   useModalBackHandler(
     isMainShellReady && currencyPickerOpen && Boolean(onCurrencySelectCallback),
@@ -140,6 +155,11 @@ const MainLayout: React.FC = () => {
         onCancel={undefined}
       />
     );
+  }
+
+  // Mandatory Auth Gate before Onboarding when neither Google signed-in nor Guest Mode is active
+  if (!user?.isLoggedIn && !isGuestMode) {
+    return <AuthGateScreen />;
   }
 
   // First-run onboarding wizard
@@ -257,9 +277,12 @@ const MainLayout: React.FC = () => {
         <SettingsModal
           isOpen={isSettingsOpen}
           onClose={() => setIsSettingsOpen(false)}
-          initialOpenAdminPanel={openAdminPanelRequested}
         />
         <BackupModal isOpen={isBackupOpen} onClose={() => setIsBackupOpen(false)} />
+
+        {/* Strict Logout Confirmation & Passcode-Protected Admin Code Generator */}
+        <LogoutConfirmationModal />
+        <AdminCodePanelModal />
 
         {/* Unified Enterprise Workspace Hub Modal */}
         <OrganizationHubModal />

@@ -28,6 +28,7 @@ import { hashPin } from '../../services/security';
 import { MoneyText } from '../common/MoneyText';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
 import { HairlineEmptyState } from '../common/HairlineVisuals';
+import { shouldShowPersonalUpgradeUi } from '../../services/subscriptionHelpers';
 
 const SOLID_MUTED_PALETTE = [
   { id: 'teal', label: 'تركواز ترابي', hex: '#3A605B' },
@@ -58,6 +59,7 @@ export const WalletsPage: React.FC = () => {
     unlockWallet,
     setActiveWalletId,
     isPro,
+    subscriptionSummary,
     setIsUpgradeModalOpen,
     t,
     isRTL,
@@ -260,14 +262,14 @@ export const WalletsPage: React.FC = () => {
         >
           <Plus className="w-4 h-4" />
           <span>{t('addWallet')}</span>
-          {!isPro && wallets.length >= 3 && (
+          {shouldShowPersonalUpgradeUi(subscriptionSummary) && wallets.length >= 3 && (
             <Crown className="w-3.5 h-3.5 ms-0.5" />
           )}
         </button>
       </div>
 
-      {/* Free limit hint if at 3 wallets and not Pro */}
-      {!isPro && wallets.length >= 3 && (
+      {/* Free limit hint if at 3 wallets and eligible for Personal upgrade */}
+      {shouldShowPersonalUpgradeUi(subscriptionSummary) && wallets.length >= 3 && (
         <div className="p-2.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl flex items-center justify-between text-xs text-[var(--color-muted)]">
           <span>{isRTL ? 'وصلت للحد الأقصى المجاني (3 محافظ)' : 'Free limit reached (3 wallets)'}</span>
           <button

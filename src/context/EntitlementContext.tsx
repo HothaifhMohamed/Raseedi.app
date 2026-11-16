@@ -1,12 +1,18 @@
 import React, { createContext, useContext } from 'react';
 import type { PlanTier, VerifiedProEntitlement } from '../types';
 import type { ScanQuotaInfo } from '../services/firebase';
+import type { UserSubscriptionSummary } from '../services/subscriptionHelpers';
 
 export interface EntitlementContextValue {
   isPro: boolean;
   isBusinessPro: boolean;
   planTier: PlanTier;
   proEntitlement: VerifiedProEntitlement | null;
+  subscriptionSummary: UserSubscriptionSummary;
+  isAdminUser: boolean;
+  isAdminCodeModalOpen: boolean;
+  setIsAdminCodeModalOpen: (open: boolean) => void;
+  openAdminPanel: () => void;
   scanQuota: ScanQuotaInfo | null;
   setScanQuota: React.Dispatch<React.SetStateAction<ScanQuotaInfo | null>>;
   refreshScanQuota: () => Promise<void>;

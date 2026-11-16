@@ -39,11 +39,16 @@ import {
   DEFAULT_CATEGORIES,
   DEFAULT_SETTINGS,
   DEFAULT_WALLETS,
+  createCleanDefaultWallet,
   mergeSettingsWithDefaults,
   AppDatabaseData,
   saveVerifiedProCache,
   loadVerifiedProCache,
   clearLocalAppStorageAndDb,
+  loadGuestModePref,
+  saveGuestModePref,
+  loadUnsyncedDirtyFlag,
+  saveUnsyncedDirtyFlag,
   savePreRestoreSnapshot,
   loadPreRestoreSnapshot,
   loadOrgWorkspaces,
@@ -123,6 +128,11 @@ import {
 } from '../services/firebase';
 import type { BackupHistorySummary } from '../services/backupHistory';
 import { isAuthorizedAdminUser, verifySignedLicenseCode } from '../services/licenseCodes';
+import {
+  UserSubscriptionSummary,
+  computeUserSubscriptionSummary,
+  resolvePostGoogleSignInAction,
+} from '../services/subscriptionHelpers';
 import { extractAccountDeleteErrorCode, shouldFallbackAccountDeleteError } from '../services/accountDeletion';
 import { EntitlementProvider, EntitlementContextValue, useEntitlement } from './EntitlementContext';
 import { OrgProvider, OrgContextValue, useOrg } from './OrgContext';
@@ -231,6 +241,8 @@ interface AppContextType {
   settings: AppSettings;
   user: UserAccount | null;
   hasCompletedOnboarding: boolean;
+  isGuestMode: boolean;
+  enterGuestMode: () => void;
 
   // Dual Workspace & Cloud Enterprise State
   activeWorkspace: string; // 'personal' | orgId
@@ -347,6 +359,13 @@ interface AppContextType {
   openAdminPanelRequested: boolean;
   openAdminSettingsPanel: () => void;
   isAdminUser: boolean;
+  isAdminCodeModalOpen: boolean;
+  setIsAdminCodeModalOpen: (open: boolean) => void;
+  openAdminPanel: () => void;
+  isLogoutModalOpen: boolean;
+  setIsLogoutModalOpen: (open: boolean) => void;
+  hasUnsyncedLocalChanges: boolean;
+  signOutAndResetDevice: (options?: { backupFirst?: boolean }) => Promise<{ ok: boolean; error?: string }>;
   isFilterOpen: boolean;
   setIsFilterOpen: (open: boolean) => void;
   isBackupOpen: boolean;
@@ -388,6 +407,7 @@ interface AppContextType {
   isBusinessPro: boolean;
   planTier: PlanTier;
   proEntitlement: VerifiedProEntitlement | null;
+  subscriptionSummary: UserSubscriptionSummary;
   redeemProCode: (
     code: string,
     orgId?: string
@@ -529,6 +549,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [user, setUser] = useState<UserAccount | null>(null);
   const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState(false);
+  const [isGuestMode, setIsGuestMode] = useState<boolean>(() => loadGuestModePref());
+  const isGuestModeRef = React.useRef<boolean>(isGuestMode);
+  isGuestModeRef.current = isGuestMode;
+  const [hasUnsyncedLocalChanges, setHasUnsyncedLocalChanges] = useState<boolean>(() =>
+    loadUnsyncedDirtyFlag()
+  );
 
   // Dual Workspace / Cloud Enterprise State
   const [activeWorkspace, setActiveWorkspace] = useState<string>('personal');
@@ -708,6 +734,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [openAdminPanelRequested, setOpenAdminPanelRequested] = useState(false);
+  const [isAdminCodeModalOpen, setIsAdminCodeModalOpen] = useState(false);
+  const [isLogoutModalOpen, setIsLogoutModalOpen] = useState(false);
   const [firebaseAuthUser, setFirebaseAuthUser] = useState<{
     email?: string | null;
     emailVerified?: boolean;
@@ -753,17 +781,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Notifications Read State
   const [readNotificationIds, setReadNotificationIds] = useState<Set<string>>(new Set());
 
-  // Entitlement computations (strictly checking expiresAt)
-  const isPro =
-    isEntitlementActive(verifiedPro) || (import.meta.env.DEV && devProTierPreview !== null);
-
-  const planTier: PlanTier = useMemo(() => {
-    if (import.meta.env.DEV && devProTierPreview) return devProTierPreview;
-    return resolvePlanTierFromProfile(verifiedPro);
-  }, [verifiedPro, devProTierPreview]);
-
-  const isBusinessPro = planTier === 'business_pro';
-
   const isAdminUser = useMemo(() => {
     if (!user?.isLoggedIn || !firebaseAuthUser) return false;
     return isAuthorizedAdminUser({
@@ -773,6 +790,33 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     });
   }, [user?.isLoggedIn, firebaseAuthUser]);
 
+  const isAdminUserRef = React.useRef<boolean>(isAdminUser);
+  isAdminUserRef.current = isAdminUser;
+
+  // Unified entitlement summary (recognizes 'business' + 'business_pro' + Admin lifetime override)
+  const subscriptionSummary: UserSubscriptionSummary = useMemo(
+    () =>
+      computeUserSubscriptionSummary({
+        verifiedPro,
+        isAdminUser,
+        devPreviewTier: import.meta.env.DEV ? devProTierPreview : null,
+      }),
+    [verifiedPro, isAdminUser, devProTierPreview]
+  );
+
+  const isPro = subscriptionSummary.isPro;
+  const planTier = subscriptionSummary.planTier;
+  const isBusinessPro = subscriptionSummary.isBusinessPro;
+
+  const handleSetIsUpgradeModalOpen = useCallback((open: boolean) => {
+    if (open && isAdminUserRef.current) {
+      setIsUpgradeModalOpen(false);
+      setIsAdminCodeModalOpen(true);
+      return;
+    }
+    setIsUpgradeModalOpen(open);
+  }, []);
+
   const handleSetIsSettingsOpen = useCallback((open: boolean) => {
     if (!open) {
       setOpenAdminPanelRequested(false);
@@ -780,11 +824,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setIsSettingsOpen(open);
   }, []);
 
-  const openAdminSettingsPanel = useCallback(() => {
-    if (!isAdminUser) return;
-    setOpenAdminPanelRequested(true);
-    setIsSettingsOpen(true);
-  }, [isAdminUser]);
+  const openAdminPanel = useCallback(() => {
+    if (!isAdminUserRef.current) return;
+    setIsUpgradeModalOpen(false);
+    setIsAdminCodeModalOpen(true);
+  }, []);
+
+  const openAdminSettingsPanel = openAdminPanel;
 
   // Active workspace projection (Cloud Organization OR Local-first Organization)
   const activeOrgRef = useMemo(
@@ -943,6 +989,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const activeOrgSubscriptionState: OrgSubscriptionState | null = useMemo(() => {
     if (!isOrgWorkspace || !activeOrganization) return null;
     const sourceOrg = isCloudActiveOrg ? activeCloudOrg || activeOrganization : activeOrganization;
+    if (isAdminUser) {
+      return computeOrgSubscriptionState({
+        planTier: 'business_pro',
+        billingCycle: 'lifetime',
+        expiresAt: null,
+        extraSeats: sourceOrg.extraSeats || 0,
+        seatLimit: sourceOrg.seatLimit ?? computeOrgSeatLimit(sourceOrg.extraSeats || 0),
+      });
+    }
     return computeOrgSubscriptionState({
       planTier: sourceOrg.planTier || 'business_pro',
       billingCycle: sourceOrg.billingCycle || 'trial',
@@ -950,7 +1005,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       extraSeats: sourceOrg.extraSeats || 0,
       seatLimit: sourceOrg.seatLimit ?? computeOrgSeatLimit(sourceOrg.extraSeats || 0),
     });
-  }, [isOrgWorkspace, isCloudActiveOrg, activeCloudOrg, activeOrganization]);
+  }, [isOrgWorkspace, isCloudActiveOrg, activeCloudOrg, activeOrganization, isAdminUser]);
 
   const isOrgReadOnly = Boolean(isOrgWorkspace && activeOrgSubscriptionState?.isReadOnly);
 
@@ -1011,7 +1066,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [user?.id, user?.name, settings.language]);
 
   const savePersonalState = useCallback(
-    (updates?: Partial<AppDatabaseData>) => {
+    (updates?: Partial<AppDatabaseData>, options?: { skipDirty?: boolean }) => {
       const snap = latestPersonalRef.current;
       const nextData: AppDatabaseData = {
         transactions: updates?.transactions ?? snap.transactions,
@@ -1026,6 +1081,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         user: updates?.user !== undefined ? updates.user : snap.user,
         hasCompletedOnboarding: updates?.hasCompletedOnboarding ?? snap.hasCompletedOnboarding,
       };
+      if (!options?.skipDirty) {
+        saveUnsyncedDirtyFlag(true);
+        setHasUnsyncedLocalChanges(true);
+      }
       void persistData(nextData);
     },
     []
@@ -1245,6 +1304,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setCloudConflict(null);
       setCloudSyncStatus('synced');
       setCloudSyncError(null);
+      saveUnsyncedDirtyFlag(false);
+      setHasUnsyncedLocalChanges(false);
 
       if (backup.orgWorkspaces && typeof backup.orgWorkspaces === 'object' && !Array.isArray(backup.orgWorkspaces)) {
         const validEntries = Object.entries(backup.orgWorkspaces).filter(
@@ -1312,6 +1373,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }> => {
       const isEn = latestPersonalRef.current.settings.language === 'en';
 
+      // Strict identity requirement: guests cannot redeem activation codes without binding Google account
+      if (!auth.currentUser || !latestPersonalRef.current.user?.isLoggedIn) {
+        return {
+          ok: false,
+          error: isEn
+            ? 'Guest accounts cannot activate license codes. Please sign in with Google first to bind your subscription to your account.'
+            : 'لا يمكن لحساب الزائر تفعيل أكواد الاشتراك. يرجى تسجيل الدخول بحساب جوجل أولاً لربط الاشتراك بحسابك.',
+        };
+      }
+
       const applyRedeemedEntitlement = async (params: {
         uid: string;
         codePreview?: string;
@@ -1320,6 +1391,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         billingCycle: BillingCycle;
         expiresAt: number | null;
       }) => {
+        const now = Date.now();
         const entitlement: VerifiedProEntitlement = {
           uid: params.uid,
           isPro: true,
@@ -1327,9 +1399,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           proPlan: params.proPlan,
           planTier: params.planTier,
           billingCycle: params.billingCycle,
+          startedAt: now,
           expiresAt: params.expiresAt,
           proExpiresAt: params.expiresAt,
-          verifiedAt: Date.now(),
+          verifiedAt: now,
           activatedViaCode: true,
           codePreview: params.codePreview,
         };
@@ -1358,7 +1431,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
           if (targetIds.length > 0) {
             const nextMap: Record<string, OrgWorkspaceData> = { ...currentMap };
-            const now = Date.now();
             for (const tid of targetIds) {
               const ws = nextMap[tid];
               if (!ws) continue;
@@ -2120,13 +2192,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         void refreshScanQuota();
 
         const snap = latestPersonalRef.current;
-        if (cloudMeta && snap.transactions.length === 0 && !snap.hasCompletedOnboarding) {
+        const postAction = resolvePostGoogleSignInAction({
+          hasCloudBackup: Boolean(cloudMeta),
+          wasActiveGuest: isGuestModeRef.current,
+          hasLocalOnboarding: Boolean(snap.hasCompletedOnboarding),
+          localTransactionsCount: snap.transactions.length,
+        });
+
+        saveGuestModePref(false);
+        setIsGuestMode(false);
+
+        if (postAction === 'restore_cloud_and_enter') {
           const cloudBackup = await fetchCloudBackup(firebaseUser.uid);
           if (cloudBackup) {
             applyCloudBackupLocally(cloudBackup, nextUser);
+          } else {
+            savePersonalState({ user: nextUser }, { skipDirty: true });
           }
+        } else if (postAction === 'start_onboarding') {
+          setHasCompletedOnboarding(false);
+          setCloudConflict(null);
+          savePersonalState({ user: nextUser, hasCompletedOnboarding: false }, { skipDirty: true });
         } else {
           setCloudConflict(null);
+          savePersonalState({ user: nextUser }, { skipDirty: true });
         }
       } catch (err) {
         console.warn('Cloud auth sync warning:', err);
@@ -2318,12 +2407,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return () => window.removeEventListener('online', handleFlush);
   }, [user?.isLoggedIn]);
 
+  const enterGuestMode = useCallback(() => {
+    saveGuestModePref(true);
+    setIsGuestMode(true);
+  }, []);
+
   const signInWithGoogleAccount = useCallback(async (): Promise<{
     restored: boolean;
     isProRestored: boolean;
   } | null> => {
     setIsCloudSyncing(true);
     setCloudSyncError(null);
+    const wasActiveGuest = isGuestModeRef.current;
     try {
       const { firebaseUser, profile } = await signInWithGoogle();
       const nextUser: UserAccount = {
@@ -2333,6 +2428,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         avatarUrl: firebaseUser.photoURL || undefined,
         isLoggedIn: true,
       };
+      setFirebaseAuthUser({
+        email: firebaseUser.email,
+        emailVerified: firebaseUser.emailVerified,
+      });
       setUser(nextUser);
 
       const active = isEntitlementActive(profile);
@@ -2352,16 +2451,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setLastCloudBackupExists(Boolean(cloudMeta));
 
       const snap = latestPersonalRef.current;
+      const postAction = resolvePostGoogleSignInAction({
+        hasCloudBackup: Boolean(cloudMeta),
+        wasActiveGuest,
+        hasLocalOnboarding: Boolean(snap.hasCompletedOnboarding),
+        localTransactionsCount: snap.transactions.length,
+      });
+
+      saveGuestModePref(false);
+      setIsGuestMode(false);
+
       let restored = false;
-      if (cloudMeta && (snap.transactions.length === 0 || !snap.hasCompletedOnboarding)) {
+      if (postAction === 'restore_cloud_and_enter') {
         const cloudBackup = await fetchCloudBackup(firebaseUser.uid);
         if (cloudBackup) {
           applyCloudBackupLocally(cloudBackup, nextUser);
           restored = true;
         }
+      } else if (postAction === 'start_onboarding') {
+        setHasCompletedOnboarding(false);
+        setCloudConflict(null);
+        savePersonalState({ user: nextUser, hasCompletedOnboarding: false }, { skipDirty: true });
       } else {
         setCloudConflict(null);
-        savePersonalState({ user: nextUser });
+        savePersonalState({ user: nextUser }, { skipDirty: true });
       }
 
       void fetchCloudBackupHistory(firebaseUser.uid)
@@ -2383,23 +2496,156 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   }, [applyCloudBackupLocally, applyVerifiedProState, refreshScanQuota, savePersonalState]);
 
-  const signOutGoogleAccount = useCallback(async () => {
-    setIsCloudSyncing(true);
-    try {
-      await signOutGoogle();
-      setUser(null);
-      setLastCloudBackupExists(false);
-      setCloudBackupHistory([]);
-      setCloudConflict(null);
-      setCloudSyncStatus('idle');
+  const signOutAndResetDevice = useCallback(
+    async (options?: { backupFirst?: boolean }): Promise<{ ok: boolean; error?: string }> => {
+      setIsCloudSyncing(true);
       setCloudSyncError(null);
-      setScanQuota(null);
-      await applyVerifiedProState(null);
-      savePersonalState({ user: null });
-    } finally {
-      setIsCloudSyncing(false);
-    }
-  }, [applyVerifiedProState, savePersonalState]);
+      try {
+        if (options?.backupFirst && auth.currentUser) {
+          const snap = latestPersonalRef.current;
+          try {
+            await ensureUserProfile(auth.currentUser);
+            await saveCloudBackup(
+              auth.currentUser.uid,
+              {
+                transactions: snap.transactions,
+                wallets: snap.wallets,
+                categories: snap.categories,
+                budgets: snap.budgets,
+                debts: snap.debts,
+                goals: snap.goals,
+                templates: snap.templates,
+                moneyCircles: snap.moneyCircles,
+                orgWorkspaces: latestLocalOrgWorkspacesRef.current,
+                activeWorkspace: activeWorkspaceRef.current || 'personal',
+                settings: snap.settings,
+                hasCompletedOnboarding: snap.hasCompletedOnboarding,
+              },
+              { source: 'manual', recordHistory: true }
+            );
+          } catch (err) {
+            const msg =
+              err instanceof Error
+                ? err.message
+                : snap.settings.language === 'en'
+                ? 'Final cloud backup failed before sign out.'
+                : 'تعذر رفع النسخة الاحتياطية السحابية قبل الخروج.';
+            setCloudSyncError(msg);
+            return { ok: false, error: msg };
+          }
+        }
+
+        await signOutGoogle().catch(() => {});
+        await clearLocalAppStorageAndDb().catch(() => {});
+
+        latestVerifiedProRef.current = null;
+        const cleanWallets = [createCleanDefaultWallet('EGP', 'ar')];
+
+        setPersonalTransactions([]);
+        setPersonalWallets(cleanWallets);
+        setPersonalCategories(DEFAULT_CATEGORIES);
+        setPersonalBudgets([]);
+        setPersonalDebts([]);
+        setPersonalGoals([]);
+        setPersonalTemplates([]);
+        setPersonalMoneyCircles([]);
+
+        setOrgRefs([]);
+        setOrgRefsLoaded(false);
+        setActiveCloudOrg(null);
+        setActiveCloudMembers([]);
+        setActiveCloudWallets([]);
+        setActiveCloudCategories([]);
+        setActiveCloudBudgets([]);
+        setActiveCloudCostCenters([]);
+        setActiveCloudParties([]);
+        setActiveCloudTransactions([]);
+        setActiveCloudTrashTransactions([]);
+        setExtraOrgTransactions([]);
+        setExtraOrgTrashTransactions([]);
+        setOrgTxLastCursor(null);
+        setOrgHasMoreTx(false);
+        setActiveCloudAuditLogs([]);
+
+        setLocalOrgWorkspaces({});
+        latestLocalOrgWorkspacesRef.current = {};
+        setLegacyLocalOrgs([]);
+        setIsOrgMigrationModalOpen(false);
+        setOrgMigrationSuccessMessage(null);
+        setOrgActionError(null);
+        setActiveWorkspace('personal');
+
+        setSettings(DEFAULT_SETTINGS);
+        setUser(null);
+        setFirebaseAuthUser(null);
+        setVerifiedPro(null);
+        setDevProTierPreview(null);
+        setScanQuota(null);
+        setPreRestoreSnapshotDate(null);
+        setLastCloudBackupExists(false);
+        setCloudBackupHistory([]);
+        setCloudConflict(null);
+        setCloudSyncStatus('idle');
+        setCloudSyncError(null);
+
+        saveGuestModePref(false);
+        saveUnsyncedDirtyFlag(false);
+        setIsGuestMode(false);
+        setHasCompletedOnboarding(false);
+        setHasUnsyncedLocalChanges(false);
+
+        setActiveNavState('home');
+        setHomeTabState('transactions');
+        setActiveWalletIdState(null);
+        setIsAddModalOpen(false);
+        setEditingTransaction(null);
+        setIsSettingsOpen(false);
+        setOpenAdminPanelRequested(false);
+        setIsAdminCodeModalOpen(false);
+        setIsLogoutModalOpen(false);
+        setIsOrgHubOpen(false);
+        setIsFilterOpen(false);
+        setIsBackupOpen(false);
+        setIsReportsOpen(false);
+        setIsCategoriesManagerOpen(false);
+        setIsCurrenciesManagerOpen(false);
+        setIsUpgradeModalOpen(false);
+        setIsAppLocked(false);
+        setLockedWalletIds([]);
+        setSelectedTransactionIds([]);
+        setUndoAction(null);
+
+        if (typeof window !== 'undefined') {
+          const cleanUrl = `${window.location.pathname}${window.location.search}`;
+          window.history.replaceState(
+            {
+              raseediNav: { activeNav: 'home', homeTab: 'transactions', activeWalletId: null },
+              raseediDepth: 0,
+            } satisfies RaseediHistoryState,
+            '',
+            cleanUrl
+          );
+          historyDepthRef.current = 0;
+          historyTrailRef.current = [{ activeNav: 'home', homeTab: 'transactions', activeWalletId: null }];
+          currentSyncedRouteRef.current = {
+            activeNav: 'home',
+            homeTab: 'transactions',
+            activeWalletId: null,
+          };
+          modalBackStackRef.current = [];
+        }
+
+        return { ok: true };
+      } finally {
+        setIsCloudSyncing(false);
+      }
+    },
+    []
+  );
+
+  const signOutGoogleAccount = useCallback(async () => {
+    await signOutAndResetDevice({ backupFirst: false });
+  }, [signOutAndResetDevice]);
 
   const refreshCloudBackupHistory = useCallback(async () => {
     if (!auth.currentUser) {
@@ -2447,6 +2693,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setLastCloudBackupExists(true);
       setCloudConflict(null);
       setCloudSyncStatus('synced');
+      saveUnsyncedDirtyFlag(false);
+      setHasUnsyncedLocalChanges(false);
       void refreshCloudBackupHistory();
       skipNextAutoSyncRef.current = true;
       setSettings((prev) => {
@@ -2588,7 +2836,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setIsOrgMigrationModalOpen(false);
         setOrgActionError(null);
         setActiveWorkspace('personal');
-        saveActiveWorkspacePref('personal');
         setSettings(DEFAULT_SETTINGS);
         setUser(null);
         setVerifiedPro(null);
@@ -2599,6 +2846,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setCloudConflict(null);
         setCloudSyncStatus('idle');
         setCloudSyncError(null);
+        setIsGuestMode(false);
+        setHasUnsyncedLocalChanges(false);
         setHasCompletedOnboarding(false);
         return { ok: true };
       } catch (err) {
@@ -2654,6 +2903,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setCloudConflict(null);
         setCloudSyncStatus('synced');
         setCloudSyncError(null);
+        saveUnsyncedDirtyFlag(false);
+        setHasUnsyncedLocalChanges(false);
         void refreshCloudBackupHistory();
         skipNextAutoSyncRef.current = true;
         setSettings((prev) => {
@@ -2705,6 +2956,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       isOrgWorkspace,
       orgName: activeOrganization?.name,
       orgSubscriptionState: activeOrgSubscriptionState,
+      userSubscriptionSummary: subscriptionSummary,
     });
     return raw.map((item) => ({
       ...item,
@@ -2719,6 +2971,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     isOrgWorkspace,
     activeOrganization?.name,
     activeOrgSubscriptionState,
+    subscriptionSummary,
     readNotificationIds,
   ]);
 
@@ -6113,6 +6366,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (demo.budgets) setPersonalBudgets(demo.budgets);
     if (demo.debts) setPersonalDebts(demo.debts);
     if (demo.goals) setPersonalGoals(demo.goals);
+    saveGuestModePref(true);
+    setIsGuestMode(true);
     setHasCompletedOnboarding(true);
     setActiveWorkspace('personal');
     saveActiveWorkspacePref('personal');
@@ -6129,9 +6384,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [settings.mainCurrency, savePersonalState]);
 
   const resetAllData = useCallback(() => {
+    const cleanWallets = [createCleanDefaultWallet('EGP', settings.language)];
     const freshData: AppDatabaseData = {
       transactions: [],
-      wallets: DEFAULT_WALLETS,
+      wallets: cleanWallets,
       categories: DEFAULT_CATEGORIES,
       budgets: [],
       debts: [],
@@ -6144,7 +6400,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     setPersonalTransactions([]);
-    setPersonalWallets(DEFAULT_WALLETS);
+    setPersonalWallets(cleanWallets);
     setPersonalCategories(DEFAULT_CATEGORIES);
     setPersonalBudgets([]);
     setPersonalDebts([]);
@@ -6157,7 +6413,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setHasCompletedOnboarding(false);
 
     void persistData(freshData);
-  }, []);
+  }, [settings.language]);
 
   const isRTL = settings.language === 'ar';
 
@@ -6167,11 +6423,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       isBusinessPro,
       planTier,
       proEntitlement: verifiedPro,
+      subscriptionSummary,
+      isAdminUser,
+      isAdminCodeModalOpen,
+      setIsAdminCodeModalOpen,
+      openAdminPanel,
       scanQuota,
       setScanQuota,
       refreshScanQuota,
       isUpgradeModalOpen,
-      setIsUpgradeModalOpen,
+      setIsUpgradeModalOpen: handleSetIsUpgradeModalOpen,
       redeemProCode,
       startBusinessTrial,
       devActivateProPreview,
@@ -6182,9 +6443,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       isBusinessPro,
       planTier,
       verifiedPro,
+      subscriptionSummary,
+      isAdminUser,
+      isAdminCodeModalOpen,
+      openAdminPanel,
       scanQuota,
       refreshScanQuota,
       isUpgradeModalOpen,
+      handleSetIsUpgradeModalOpen,
       redeemProCode,
       startBusinessTrial,
       devActivateProPreview,
@@ -6339,6 +6605,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         settings,
         user,
         hasCompletedOnboarding,
+        isGuestMode,
+        enterGuestMode,
 
         activeWorkspace,
         orgRefs,
@@ -6426,6 +6694,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         openAdminPanelRequested,
         openAdminSettingsPanel,
         isAdminUser,
+        isAdminCodeModalOpen,
+        setIsAdminCodeModalOpen,
+        openAdminPanel,
+        isLogoutModalOpen,
+        setIsLogoutModalOpen,
+        hasUnsyncedLocalChanges,
+        signOutAndResetDevice,
         isFilterOpen,
         setIsFilterOpen,
         isBackupOpen,
@@ -6437,7 +6712,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         isCurrenciesManagerOpen,
         setIsCurrenciesManagerOpen,
         isUpgradeModalOpen,
-        setIsUpgradeModalOpen,
+        setIsUpgradeModalOpen: handleSetIsUpgradeModalOpen,
 
         currencyPickerOpen,
         currencyPickerSelectedCode,
@@ -6463,6 +6738,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         isBusinessPro,
         planTier,
         proEntitlement: verifiedPro,
+        subscriptionSummary,
         redeemProCode,
         startBusinessTrial,
         devActivateProPreview,

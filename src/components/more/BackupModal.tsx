@@ -70,7 +70,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     createPreRestoreSnapshot,
     revertPreRestoreSnapshot,
     signInWithGoogleAccount,
-    signOutGoogleAccount,
+    setIsLogoutModalOpen,
     syncToCloudNow,
     restoreFromCloudNow,
     updateSettings,
@@ -685,7 +685,10 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                       </div>
                       <button
                         type="button"
-                        onClick={() => void signOutGoogleAccount()}
+                        onClick={() => {
+                          onClose();
+                          setIsLogoutModalOpen(true);
+                        }}
                         disabled={isCloudSyncing}
                         aria-label={isRTL ? 'تسجيل الخروج' : 'Sign Out'}
                         className="p-2 rounded-lg border border-[var(--color-line)] text-[var(--color-muted)] hover:text-[var(--color-expense)] transition-colors min-h-[36px] min-w-[36px] flex items-center justify-center shrink-0"

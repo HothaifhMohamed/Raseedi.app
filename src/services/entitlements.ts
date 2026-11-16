@@ -76,7 +76,11 @@ export function resolveOrgExpiresAt(
 export function resolveOrgPlanTier(
   org: Pick<Organization, 'planTier' | 'plan'>
 ): PlanTier {
-  if (org.planTier === 'free' || org.planTier === 'personal_pro' || org.planTier === 'business_pro') {
+  const rawTier = typeof org.planTier === 'string' ? org.planTier.trim().toLowerCase() : '';
+  if (rawTier === 'business' || rawTier === 'business_pro') {
+    return 'business_pro';
+  }
+  if (org.planTier === 'free' || org.planTier === 'personal_pro') {
     return org.planTier;
   }
   if (org.plan === 'trial' || org.plan === 'business_monthly' || org.plan === 'business_yearly') {
