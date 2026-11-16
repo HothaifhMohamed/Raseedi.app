@@ -71,6 +71,7 @@ import {
   convertCurrency,
   fetchLiveExchangeRates,
   getCachedExchangeRatesMeta,
+  getLiveExchangeRatesRuntime,
   roundCurrency,
   setLiveExchangeRatesRuntime,
   toMinor,
@@ -122,6 +123,7 @@ import {
   deleteOrgOnServer,
   flushPendingOrgUploads,
   syncOrganizationMetaToCloud,
+  syncUserCurrencyRatesToCloud,
   isEntitlementActive,
   resolvePlanTierFromProfile,
   CloudBackupPayload,
@@ -1224,10 +1226,37 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         );
         setRatesLastUpdated(formatted);
         setSettings((prev) => {
-          const next = { ...prev, ratesLastUpdated: formatted, ratesUpdatedAtMs: result.fetchedAtMs };
+          const next = {
+            ...prev,
+            useUpdatedExchangeRates: force ? true : prev.useUpdatedExchangeRates,
+            ratesLastUpdated: formatted,
+            ratesUpdatedAtMs: result.fetchedAtMs,
+          };
           void persistData({ ...latestPersonalRef.current, settings: next });
           return next;
         });
+
+        const currentAuthUser = auth.currentUser;
+        const activeUser = latestPersonalRef.current.user;
+        if (
+          currentAuthUser &&
+          activeUser?.isLoggedIn &&
+          currentAuthUser.uid === activeUser.id &&
+          (typeof navigator === 'undefined' || navigator.onLine)
+        ) {
+          try {
+            await syncUserCurrencyRatesToCloud(currentAuthUser.uid, {
+              rates: result.rates,
+              fetchedAtMs: result.fetchedAtMs,
+              ratesLastUpdated: formatted,
+              useUpdatedExchangeRates: force ? true : latestPersonalRef.current.settings.useUpdatedExchangeRates,
+              customExchangeRates: latestPersonalRef.current.settings.customExchangeRates,
+            });
+            setCloudSyncError(null);
+          } catch (syncErr) {
+            console.warn('Currency rates cloud sync warning:', syncErr);
+          }
+        }
         return true;
       }
       return false;
@@ -6386,6 +6415,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Settings & Onboarding
   const updateSettings = useCallback(
     (partial: Partial<AppSettings>) => {
+      const mergedNext = mergeSettingsWithDefaults({
+        ...latestPersonalRef.current.settings,
+        ...partial,
+        socialLinks: partial.socialLinks
+          ? { ...(latestPersonalRef.current.settings.socialLinks || {}), ...partial.socialLinks }
+          : latestPersonalRef.current.settings.socialLinks,
+      });
       setSettings((prev) => {
         const next = mergeSettingsWithDefaults({
           ...prev,
@@ -6397,6 +6433,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         savePersonalState({ settings: next });
         return next;
       });
+      if (
+        (partial.customExchangeRates !== undefined ||
+          partial.useUpdatedExchangeRates !== undefined) &&
+        auth.currentUser &&
+        latestPersonalRef.current.user?.isLoggedIn &&
+        auth.currentUser.uid === latestPersonalRef.current.user.id &&
+        (typeof navigator === 'undefined' || navigator.onLine)
+      ) {
+        void syncUserCurrencyRatesToCloud(auth.currentUser.uid, {
+          rates: getLiveExchangeRatesRuntime() || undefined,
+          fetchedAtMs: mergedNext.ratesUpdatedAtMs,
+          ratesLastUpdated: mergedNext.ratesLastUpdated,
+          useUpdatedExchangeRates: mergedNext.useUpdatedExchangeRates,
+          customExchangeRates: mergedNext.customExchangeRates,
+        }).catch((err) => {
+          console.warn('Currency settings cloud sync warning:', err);
+        });
+      }
     },
     [savePersonalState]
   );

@@ -144,22 +144,24 @@ service cloud.firestore {
     function isValidUserProfileUpdate(data, userId) {
       return data.keys().hasAll(['updatedAt'])
         && (!('uid' in data) || (data.uid is string && data.uid.size() <= 128 && data.uid == userId && (data.uid == request.auth.uid || isAdmin())))
-        && (!('email' in data) || (data.email is string && data.email.size() <= 254))
+        && (!('email' in data) || data.email == null || (data.email is string && data.email.size() <= 254))
         && (!('displayName' in data) || data.displayName == null || (data.displayName is string && data.displayName.size() <= 120))
         && (!('photoURL' in data) || data.photoURL == null || (data.photoURL is string && data.photoURL.size() <= 512))
-        && (!('isPro' in data) || data.isPro is bool)
-        && (!('proActive' in data) || data.proActive is bool)
-        && (!('proPlan' in data) || data.proPlan in ['free', 'monthly', 'yearly', 'lifetime', 'business_monthly', 'business_yearly', 'trial', 'code'])
-        && (!('planTier' in data) || data.planTier in ['free', 'personal_pro', 'business_pro'])
-        && (!('billingCycle' in data) || data.billingCycle in ['free', 'monthly', 'yearly', 'lifetime', 'trial', 'code'])
-        && (!('startedAt' in data) || data.startedAt == null || data.startedAt is number)
-        && (!('expiresAt' in data) || data.expiresAt == null || data.expiresAt is number)
-        && (!('proExpiresAt' in data) || data.proExpiresAt == null || data.proExpiresAt is number)
-        && (!('hasUsedBusinessTrial' in data) || data.hasUsedBusinessTrial is bool)
+        && (!('isPro' in data) || data.isPro == null || data.isPro is bool)
+        && (!('proActive' in data) || data.proActive == null || data.proActive is bool)
+        && (!('proPlan' in data) || data.proPlan == null || data.proPlan in ['free', 'monthly', 'yearly', 'lifetime', 'business_monthly', 'business_yearly', 'trial', 'code'])
+        && (!('planTier' in data) || data.planTier == null || data.planTier in ['free', 'personal_pro', 'business_pro', 'business'])
+        && (!('billingCycle' in data) || data.billingCycle == null || data.billingCycle in ['free', 'monthly', 'yearly', 'lifetime', 'trial', 'code'])
+        && (!('startedAt' in data) || data.startedAt == null || data.startedAt is number || data.startedAt is timestamp)
+        && (!('expiresAt' in data) || data.expiresAt == null || data.expiresAt is number || data.expiresAt is timestamp)
+        && (!('proExpiresAt' in data) || data.proExpiresAt == null || data.proExpiresAt is number || data.proExpiresAt is timestamp)
+        && (!('hasUsedBusinessTrial' in data) || data.hasUsedBusinessTrial == null || data.hasUsedBusinessTrial is bool)
         && (!('activationCodeHash' in data) || data.activationCodeHash == null || (data.activationCodeHash is string && data.activationCodeHash.size() <= 128))
-        && (!('redeemedCouponCode' in data) || data.redeemedCouponCode == null || (data.redeemedCouponCode is string && data.redeemedCouponCode.size() <= 128 && data.redeemedCouponCode.matches('^[a-zA-Z0-9_\\-]+$')))
-        && (!('lastSyncedAt' in data) || data.lastSyncedAt is number)
-        && (!('createdAt' in data) || data.createdAt is timestamp || data.createdAt is number)
+        && (!('redeemedCouponCode' in data) || data.redeemedCouponCode == null || data.redeemedCouponCode == '' || (data.redeemedCouponCode is string && data.redeemedCouponCode.size() <= 128 && data.redeemedCouponCode.matches('^[a-zA-Z0-9_\\-]+$')))
+        && (!('currencyRates' in data) || data.currencyRates == null || (data.currencyRates is map && data.currencyRates.size() <= 250))
+        && (!('settings' in data) || data.settings == null || (data.settings is map && data.settings.size() <= 60))
+        && (!('lastSyncedAt' in data) || data.lastSyncedAt == null || data.lastSyncedAt is number)
+        && (!('createdAt' in data) || data.createdAt == null || data.createdAt is timestamp || data.createdAt is number)
         && data.updatedAt is timestamp;
     }
 
@@ -637,6 +639,8 @@ service cloud.firestore {
               'email',
               'displayName',
               'photoURL',
+              'currencyRates',
+              'settings',
               'lastSyncedAt',
               'updatedAt'
             ])

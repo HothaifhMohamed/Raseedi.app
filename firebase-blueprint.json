@@ -81,6 +81,14 @@
           "type": "number",
           "description": "Epoch milliseconds of last cloud backup sync"
         },
+        "currencyRates": {
+          "type": "object",
+          "description": "Cached live USD exchange rates map synced via merge update"
+        },
+        "settings": {
+          "type": "object",
+          "description": "Non-privileged user currency and app settings synced via merge update"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

@@ -74,6 +74,11 @@ import {
   getBackupIdsToPrune,
   MAX_AUTO_CLOUD_BACKUPS,
 } from './backupHistory';
+import {
+  buildSafeCloudLastSyncedPatch,
+  buildSafeUserCurrencyRatesPatch,
+  UserCurrencyRatesSyncInput,
+} from './currencySync';
 
 const app = initializeApp(firebaseConfig);
 
@@ -352,7 +357,7 @@ export async function ensureUserProfile(firebaseUser: User): Promise<CloudUserPr
       if (firebaseUser.photoURL) {
         profilePayload.photoURL = firebaseUser.photoURL.slice(0, 512);
       }
-      await setDoc(ref, profilePayload);
+      await setDoc(ref, profilePayload, { merge: true });
       return {
         uid: firebaseUser.uid,
         email: firebaseUser.email || '',
@@ -382,7 +387,7 @@ export async function ensureUserProfile(firebaseUser: User): Promise<CloudUserPr
       updates.photoURL = firebaseUser.photoURL.slice(0, 512);
     }
 
-    await updateDoc(ref, updates);
+    await setDoc(ref, updates, { merge: true });
     const active = isEntitlementActive(existingData);
     const resolvedExpiry = existingData.proExpiresAt ?? existingData.expiresAt ?? null;
     return {
@@ -775,12 +780,17 @@ export async function saveCloudBackup(
 
   try {
     const userSnap = await getDoc(userRef);
-    if (userSnap.exists()) {
-      await updateDoc(userRef, {
-        lastSyncedAt: updatedAtMs,
-        updatedAt: serverTimestamp(),
-      });
+    if (!userSnap.exists() && auth.currentUser?.uid === uid) {
+      await ensureUserProfile(auth.currentUser);
     }
+    await setDoc(
+      userRef,
+      {
+        ...buildSafeCloudLastSyncedPatch(updatedAtMs),
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `users/${uid}`);
   }
@@ -834,6 +844,37 @@ export async function saveCloudBackup(
   }
 
   return { syncedAt: updatedAtMs, updatedAtMs, skippedAttachmentsCount };
+}
+
+/**
+ * Syncs only exchange rates and currency preferences into users/{uid} using setDoc(..., { merge: true })
+ * without touching protected subscription/system fields or overwriting the root document.
+ */
+export async function syncUserCurrencyRatesToCloud(
+  uid: string,
+  input: UserCurrencyRatesSyncInput
+): Promise<void> {
+  if (!uid || !auth.currentUser || auth.currentUser.uid !== uid) return;
+  const userPath = `users/${uid}`;
+  const userRef = doc(db, 'users', uid);
+
+  try {
+    const userSnap = await getDoc(userRef);
+    if (!userSnap.exists()) {
+      await ensureUserProfile(auth.currentUser);
+    }
+    const patch = buildSafeUserCurrencyRatesPatch(input);
+    await setDoc(
+      userRef,
+      {
+        ...patch,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, userPath);
+  }
 }
 
 export async function fetchCloudBackupHistory(uid: string): Promise<BackupHistorySummary[]> {
