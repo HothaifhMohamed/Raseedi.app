@@ -438,3 +438,92 @@ test('Coupons collection restricts creation/listing to Hapaypal2003@gmail.com an
   await assertFails(replayBatch.commit());
 });
 
+test('Personal cloud backup, chunks, and history allow owner access and block outsiders', async () => {
+  const ownerDb = authContext(OWNER_UID, false).firestore();
+  const outsiderDb = authContext(OUTSIDER_UID).firestore();
+
+  // Seed legacy/server-created user doc missing createdAt and proActive
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'users', OWNER_UID), {
+      uid: OWNER_UID,
+      isPro: true,
+      proPlan: 'yearly',
+      planTier: 'personal_pro',
+      billingCycle: 'yearly',
+      expiresAt: Date.now() + 86400000,
+      proExpiresAt: Date.now() + 86400000,
+      updatedAt: serverTimestamp(),
+    });
+  });
+
+  // Owner (even unverified email) can update email/lastSyncedAt without touching subscription fields
+  await assertSucceeds(
+    updateDoc(doc(ownerDb, 'users', OWNER_UID), {
+      email: `${OWNER_UID}@raseedi.test`,
+      lastSyncedAt: Date.now(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Owner can write and update backup/meta + backupChunks/chunk_0
+  await assertSucceeds(
+    setDoc(doc(ownerDb, 'users', OWNER_UID, 'backup', 'meta'), {
+      uid: OWNER_UID,
+      schemaVersion: 2,
+      chunkCount: 1,
+      totalTransactions: 1,
+      wallets: [{ id: 'w1', name: 'الخزينة الرئيسية', balance: 0 }],
+      categories: [{ id: 'c1', name: 'طعام' }],
+      budgets: [],
+      debts: [],
+      goals: [],
+      templates: [],
+      moneyCircles: [],
+      settings: { currency: 'EGP', isPro: false },
+      hasCompletedOnboarding: true,
+      updatedAtMs: Date.now(),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  await assertSucceeds(
+    updateDoc(doc(ownerDb, 'users', OWNER_UID, 'backup', 'meta'), {
+      totalTransactions: 2,
+      updatedAtMs: Date.now(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  await assertSucceeds(
+    setDoc(doc(ownerDb, 'users', OWNER_UID, 'backupChunks', 'chunk_0'), {
+      uid: OWNER_UID,
+      chunkIndex: 0,
+      transactions: [{ id: 'tx1', amount: 50 }],
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Owner can create and list backupHistory
+  await assertSucceeds(
+    setDoc(doc(ownerDb, 'users', OWNER_UID, 'backupHistory', 'auto_1000'), {
+      id: 'auto_1000',
+      uid: OWNER_UID,
+      source: 'auto',
+      createdAtMs: 1000,
+      totalTransactions: 1,
+      storedTransactionsCount: 1,
+      walletsCount: 1,
+      snapshotJson: '{"schemaVersion":2}',
+      createdAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(getDocs(collection(ownerDb, 'users', OWNER_UID, 'backupHistory')));
+
+  // Outsider cannot read or write owner's backup docs
+  await assertFails(getDoc(doc(outsiderDb, 'users', OWNER_UID, 'backup', 'meta')));
+  await assertFails(getDoc(doc(outsiderDb, 'users', OWNER_UID, 'backupChunks', 'chunk_0')));
+  await assertFails(getDocs(collection(outsiderDb, 'users', OWNER_UID, 'backupHistory')));
+});
+
+

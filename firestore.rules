@@ -140,36 +140,12 @@ service cloud.firestore {
     }
 
     function isValidUserProfileUpdate(data, userId) {
-      return data.keys().hasAll(['uid', 'email', 'isPro', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly([
-          'uid',
-          'email',
-          'displayName',
-          'photoURL',
-          'isPro',
-          'proActive',
-          'proPlan',
-          'planTier',
-          'billingCycle',
-          'expiresAt',
-          'proExpiresAt',
-          'hasUsedBusinessTrial',
-          'activationCodeHash',
-          'redeemedCouponCode',
-          'lastSyncedAt',
-          'createdAt',
-          'updatedAt'
-        ])
-        && data.uid is string
-        && data.uid.size() <= 128
-        && data.uid == userId
-        && data.uid == request.auth.uid
-        && data.email is string
-        && data.email.size() > 0
-        && data.email.size() <= 254
-        && (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 120))
-        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 512))
-        && data.isPro is bool
+      return data.keys().hasAll(['updatedAt'])
+        && (!('uid' in data) || (data.uid is string && data.uid.size() <= 128 && data.uid == userId && data.uid == request.auth.uid))
+        && (!('email' in data) || (data.email is string && data.email.size() <= 254))
+        && (!('displayName' in data) || data.displayName == null || (data.displayName is string && data.displayName.size() <= 120))
+        && (!('photoURL' in data) || data.photoURL == null || (data.photoURL is string && data.photoURL.size() <= 512))
+        && (!('isPro' in data) || data.isPro is bool)
         && (!('proActive' in data) || data.proActive is bool)
         && (!('proPlan' in data) || data.proPlan in ['free', 'monthly', 'yearly', 'lifetime', 'business_monthly', 'business_yearly', 'trial', 'code'])
         && (!('planTier' in data) || data.planTier in ['free', 'personal_pro', 'business_pro'])
@@ -180,7 +156,7 @@ service cloud.firestore {
         && (!('activationCodeHash' in data) || data.activationCodeHash == null || (data.activationCodeHash is string && data.activationCodeHash.size() <= 128))
         && (!('redeemedCouponCode' in data) || data.redeemedCouponCode == null || (data.redeemedCouponCode is string && data.redeemedCouponCode.size() <= 128 && data.redeemedCouponCode.matches('^[a-zA-Z0-9_\\-]+$')))
         && (!('lastSyncedAt' in data) || data.lastSyncedAt is number)
-        && data.createdAt is timestamp
+        && (!('createdAt' in data) || data.createdAt is timestamp || data.createdAt is number)
         && data.updatedAt is timestamp;
     }
 
@@ -199,7 +175,6 @@ service cloud.firestore {
         'settings',
         'hasCompletedOnboarding',
         'updatedAtMs',
-        'createdAt',
         'updatedAt'
       ])
         && data.keys().hasOnly([
@@ -227,7 +202,7 @@ service cloud.firestore {
         && data.uid == request.auth.uid
         && data.uid.size() <= 128
         && data.schemaVersion is int
-        && data.schemaVersion >= 2
+        && data.schemaVersion >= 1
         && data.schemaVersion <= 10
         && data.chunkCount is int
         && data.chunkCount >= 0
@@ -253,13 +228,13 @@ service cloud.firestore {
         && data.templates is list
         && data.templates.size() <= 300
         && (data.templates.size() == 0 || data.templates[0] is map)
-        && (!('moneyCircles' in data) || (data.moneyCircles is list && data.moneyCircles.size() <= 200))
-        && (!('orgWorkspaces' in data) || (data.orgWorkspaces is map && data.orgWorkspaces.size() <= 50))
-        && (!('activeWorkspace' in data) || (data.activeWorkspace is string && data.activeWorkspace.size() > 0 && data.activeWorkspace.size() <= 128))
+        && (!('moneyCircles' in data) || data.moneyCircles == null || (data.moneyCircles is list && data.moneyCircles.size() <= 200))
+        && (!('orgWorkspaces' in data) || data.orgWorkspaces == null || (data.orgWorkspaces is map && data.orgWorkspaces.size() <= 50))
+        && (!('activeWorkspace' in data) || data.activeWorkspace == null || (data.activeWorkspace is string && data.activeWorkspace.size() > 0 && data.activeWorkspace.size() <= 128))
         && data.settings is map
         && data.hasCompletedOnboarding is bool
         && data.updatedAtMs is number
-        && data.createdAt is timestamp
+        && (!('createdAt' in data) || data.createdAt is timestamp || data.createdAt is number)
         && data.updatedAt is timestamp;
     }
 
@@ -618,21 +593,19 @@ service cloud.firestore {
       allow get: if isValidId(userId) && isOwner(userId);
       allow list: if false;
       allow create: if isValidId(userId)
-        && isVerifiedUser()
         && isOwner(userId)
         && isValidUserProfileCreate(incoming(), userId)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isValidId(userId)
-        && isVerifiedUser()
         && isOwner(userId)
         && isValidUserProfileUpdate(incoming(), userId)
-        && incoming().uid == existing().uid
-        && incoming().createdAt == existing().createdAt
+        && (!('uid' in existing()) || incoming().uid == existing().uid)
+        && (!('createdAt' in existing()) || incoming().get('createdAt', null) == existing().get('createdAt', null))
         && incoming().updatedAt == request.time
         && (
           (
-            incoming().isPro == existing().isPro
+            incoming().get('isPro', false) == existing().get('isPro', false)
             && incoming().get('proActive', false) == existing().get('proActive', false)
             && incoming().get('proPlan', 'free') == existing().get('proPlan', 'free')
             && incoming().get('planTier', 'free') == existing().get('planTier', 'free')
@@ -642,6 +615,7 @@ service cloud.firestore {
             && incoming().get('hasUsedBusinessTrial', false) == existing().get('hasUsedBusinessTrial', false)
             && incoming().get('redeemedCouponCode', null) == existing().get('redeemedCouponCode', null)
             && incoming().diff(existing()).affectedKeys().hasOnly([
+              'uid',
               'email',
               'displayName',
               'photoURL',
@@ -651,7 +625,8 @@ service cloud.firestore {
           )
           ||
           (
-            ('redeemedCouponCode' in incoming())
+            isVerifiedUser()
+            && ('redeemedCouponCode' in incoming())
             && incoming().redeemedCouponCode is string
             && canRedeemCouponAtomically(incoming(), incoming().redeemedCouponCode)
             && incoming().diff(existing()).affectedKeys().hasOnly([
@@ -667,7 +642,7 @@ service cloud.firestore {
             ])
           )
         );
-      allow delete: if isValidId(userId) && isVerifiedUser() && isOwner(userId);
+      allow delete: if isValidId(userId) && isOwner(userId);
 
       // Server-only monthly receipt scan quota
       match /scanQuotas/{monthKey} {
@@ -685,28 +660,23 @@ service cloud.firestore {
         allow get: if isValidId(userId)
           && isValidId(docId)
           && docId == 'meta'
-          && isOwner(userId)
-          && exists(/databases/$(database)/documents/users/$(userId))
-          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+          && isOwner(userId);
         allow list: if false;
         allow create: if isValidId(userId)
           && isValidId(docId)
           && docId == 'meta'
-          && isVerifiedUser()
           && isOwner(userId)
           && isValidBackupMeta(incoming(), userId)
+          && ('createdAt' in incoming())
           && incoming().createdAt == request.time
-          && incoming().updatedAt == request.time
-          && exists(/databases/$(database)/documents/users/$(userId))
-          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+          && incoming().updatedAt == request.time;
         allow update: if isValidId(userId)
           && isValidId(docId)
           && docId == 'meta'
-          && isVerifiedUser()
           && isOwner(userId)
           && isValidBackupMeta(incoming(), userId)
-          && incoming().uid == existing().uid
-          && incoming().createdAt == existing().createdAt
+          && (!('uid' in existing()) || incoming().uid == existing().uid)
+          && (!('createdAt' in existing()) || incoming().get('createdAt', null) == existing().get('createdAt', null))
           && incoming().updatedAt == request.time
           && incoming().diff(existing()).affectedKeys().hasOnly([
             'schemaVersion',
@@ -725,100 +695,69 @@ service cloud.firestore {
             'hasCompletedOnboarding',
             'updatedAtMs',
             'updatedAt'
-          ])
-          && exists(/databases/$(database)/documents/users/$(userId))
-          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+          ]);
         allow delete: if isValidId(userId)
           && isValidId(docId)
           && docId == 'meta'
-          && isVerifiedUser()
-          && isOwner(userId)
-          && exists(/databases/$(database)/documents/users/$(userId))
-          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+          && isOwner(userId);
       }
 
       // Chunked personal backup transaction slices
       match /backupChunks/{chunkId} {
         allow get: if isValidId(userId)
           && isValidId(chunkId)
-          && isOwner(userId)
-          && exists(/databases/$(database)/documents/users/$(userId))
-          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+          && isOwner(userId);
         allow list: if false;
         allow create: if isValidId(userId)
           && isValidId(chunkId)
-          && isVerifiedUser()
           && isOwner(userId)
           && isValidBackupChunk(incoming(), userId)
-          && incoming().updatedAt == request.time
-          && exists(/databases/$(database)/documents/users/$(userId))
-          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+          && incoming().updatedAt == request.time;
         allow update: if isValidId(userId)
           && isValidId(chunkId)
-          && isVerifiedUser()
           && isOwner(userId)
           && isValidBackupChunk(incoming(), userId)
-          && incoming().uid == existing().uid
+          && (!('uid' in existing()) || incoming().uid == existing().uid)
           && incoming().updatedAt == request.time
           && incoming().diff(existing()).affectedKeys().hasOnly([
             'chunkIndex',
             'transactions',
             'updatedAt'
-          ])
-          && exists(/databases/$(database)/documents/users/$(userId))
-          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+          ]);
         allow delete: if isValidId(userId)
           && isValidId(chunkId)
-          && isVerifiedUser()
-          && isOwner(userId)
-          && exists(/databases/$(database)/documents/users/$(userId))
-          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+          && isOwner(userId);
       }
 
       // Legacy single-document backup: read/delete only
       match /backups/{backupId} {
         allow get: if isValidId(userId)
           && isValidId(backupId)
-          && isOwner(userId)
-          && exists(/databases/$(database)/documents/users/$(userId))
-          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+          && isOwner(userId);
         allow list: if false;
         allow create, update: if false;
         allow delete: if isValidId(userId)
           && isValidId(backupId)
-          && isVerifiedUser()
-          && isOwner(userId)
-          && exists(/databases/$(database)/documents/users/$(userId))
-          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+          && isOwner(userId);
       }
 
       // Rolling history of the last 7 automatic cloud backups
       match /backupHistory/{backupId} {
         allow get: if isValidId(userId)
           && isValidId(backupId)
-          && isOwner(userId)
-          && exists(/databases/$(database)/documents/users/$(userId))
-          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+          && isOwner(userId);
         allow list: if isValidId(userId)
           && isOwner(userId)
-          && (request.query.limit == null || request.query.limit <= 30)
-          && exists(/databases/$(database)/documents/users/$(userId))
-          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+          && (request.query.limit == null || request.query.limit <= 30);
         allow create: if isValidId(userId)
           && isValidId(backupId)
-          && isVerifiedUser()
           && isOwner(userId)
           && isValidBackupHistoryEntry(incoming(), userId, backupId)
-          && incoming().createdAt == request.time
-          && exists(/databases/$(database)/documents/users/$(userId))
-          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+          && incoming().createdAt == request.time;
         allow update: if false;
         allow delete: if isValidId(userId)
           && isValidId(backupId)
-          && isVerifiedUser()
-          && isOwner(userId)
-          && exists(/databases/$(database)/documents/users/$(userId))
-          && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+          && isOwner(userId);
       }
     }
 
