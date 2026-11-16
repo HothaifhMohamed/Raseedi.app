@@ -187,10 +187,10 @@ export const ReportsModal: React.FC<ReportsModalProps> = ({ isOpen, onClose }) =
           <div className="p-4 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] print:bg-white print:border-black print:text-black space-y-4">
             <div className="border-b pb-3 border-[var(--color-line)] print:border-black flex items-center justify-between gap-3">
               <div className="flex items-center gap-3 min-w-0">
-                <BrandLogo className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0" />
+                <BrandLogo className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0" title={t('appName')} />
                 <div className="min-w-0">
                   <h1 className="text-base font-bold text-[var(--color-ink)] print:text-black">
-                    رَصِيدِي — {periodLabel}
+                    {t('appName')} — {periodLabel}
                   </h1>
                   <p className="text-xs text-[var(--color-muted)] print:text-gray-600 mt-0.5">
                     {isRTL ? `الفترة من ${startDate} إلى ${endDate}` : `From ${startDate} to ${endDate}`}

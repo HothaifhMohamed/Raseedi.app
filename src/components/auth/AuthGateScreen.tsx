@@ -62,7 +62,10 @@ export const AuthGateScreen: React.FC = () => {
         {/* Top Row: Brand & Language Toggle */}
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <BrandLogo className="w-12 h-12 rounded-xl object-cover shadow-sm shrink-0" />
+            <BrandLogo
+              className="w-12 h-12 rounded-xl object-cover shadow-sm shrink-0"
+              title={isRTL ? 'رَصِيدِي' : 'Raseedi'}
+            />
             <div>
               <h1 className="font-title text-xl font-bold text-[var(--color-ink)] tracking-tight">
                 {isRTL ? 'رَصِيدِي' : 'Raseedi'}

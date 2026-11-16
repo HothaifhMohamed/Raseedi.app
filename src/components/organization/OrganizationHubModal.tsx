@@ -2544,7 +2544,7 @@ export const OrganizationHubModal: React.FC = () => {
                     >
                       <div className="flex items-start justify-between border-b-2 border-[#1E6F73]/30 pb-3 gap-3">
                         <div className="flex items-center gap-3 min-w-0">
-                          <BrandLogo className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0" />
+                          <BrandLogo className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0" title={t('appName')} />
                           <div className="min-w-0">
                             <div className="font-title leading-snug text-lg font-bold text-[#1E6F73]">
                               {activeOrganization.name}

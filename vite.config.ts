@@ -37,8 +37,8 @@ export default defineConfig(() => {
         ],
         manifest: {
           id: '/',
-          name: 'Raseedi - رَصِيدِي',
-          short_name: 'رَصِيدِي',
+          name: 'رَصِيدِي - Raseedi',
+          short_name: 'Raseedi',
           description: 'تطبيق عربي شامل لإدارة وتتبع المصاريف، الميزانيات، المحافظ، والديون وحسابات المؤسسات.',
           lang: 'ar',
           dir: 'rtl',

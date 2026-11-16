@@ -1787,11 +1787,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     });
   }, []);
 
-  // Sync HTML dir and dark class
+  // Sync HTML dir, lang, document.title, and dark class
   useEffect(() => {
     const isRtl = settings.language === 'ar';
     document.documentElement.dir = isRtl ? 'rtl' : 'ltr';
     document.documentElement.lang = settings.language;
+    document.title = isRtl
+      ? 'رَصِيدِي - متتبع المصاريف'
+      : 'Raseedi - Expense Tracker';
     if (settings.theme === 'dark') {
       document.documentElement.classList.add('dark');
     } else {

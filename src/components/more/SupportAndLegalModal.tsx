@@ -113,10 +113,13 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
             <>
               {/* About Raseedi Brand Banner */}
               <div className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] flex items-center gap-3">
-                <BrandLogo className="w-12 h-12 rounded-xl object-cover shadow-sm shrink-0" />
+                <BrandLogo
+                  className="w-12 h-12 rounded-xl object-cover shadow-sm shrink-0"
+                  title={isRTL ? 'رَصِيدِي' : 'Raseedi'}
+                />
                 <div className="min-w-0">
                   <div className="font-title font-bold text-sm text-[var(--color-ink)]">
-                    {isRTL ? 'رَصِيدِي | Raseedi' : 'Raseedi'}
+                    {isRTL ? 'رَصِيدِي' : 'Raseedi'}
                   </div>
                   <p className="text-[11px] text-[var(--color-muted)] mt-0.5">
                     {isRTL

@@ -905,7 +905,7 @@ export const MoreMenu: React.FC = () => {
           onClick={() => setSupportLegalTab('support')}
           className="inline-flex items-center gap-2.5 px-3.5 py-2 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)] transition-colors"
         >
-          <BrandLogo className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0" />
+          <BrandLogo className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0" title={t('appName')} />
           <div className="text-start">
             <div className="font-title text-xs font-bold text-[var(--color-ink)]">
               {isRTL ? 'عن تطبيق رَصِيدِي' : 'About Raseedi'}
