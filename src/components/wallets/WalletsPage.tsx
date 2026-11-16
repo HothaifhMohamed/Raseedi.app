@@ -15,12 +15,18 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowUpDown,
+  MoreHorizontal,
+  PauseCircle,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { Wallet, WalletType } from '../../types';
 import { IconRenderer } from '../common/IconRenderer';
 import { formatCurrencyAmount, calculateTotalBalance } from '../../services/calculations';
 import { reorderWalletsBySwap, sortWalletsByOrder } from '../../services/walletOrder';
+import {
+  buildWalletActionPreset,
+  canToggleWalletArchive,
+} from '../../services/walletQuickActions';
 import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../../services/numbers';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { PinLockModal } from '../common/PinLockModal';
@@ -29,6 +35,7 @@ import { MoneyText } from '../common/MoneyText';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
 import { HairlineEmptyState } from '../common/HairlineVisuals';
 import { shouldShowPersonalUpgradeUi } from '../../services/subscriptionHelpers';
+import { WalletQuickActionsSheet } from './WalletQuickActionsSheet';
 
 const SOLID_MUTED_PALETTE = [
   { id: 'teal', label: 'تركواز ترابي', hex: '#3A605B' },
@@ -58,6 +65,8 @@ export const WalletsPage: React.FC = () => {
     lockedWalletIds,
     unlockWallet,
     setActiveWalletId,
+    openTransactionWithPreset,
+    showToast,
     isPro,
     subscriptionSummary,
     setIsUpgradeModalOpen,
@@ -67,6 +76,7 @@ export const WalletsPage: React.FC = () => {
 
   const [hiddenBalances, setHiddenBalances] = useState<Record<string, boolean>>({});
   const [isReorderMode, setIsReorderMode] = useState(false);
+  const [quickActionWalletId, setQuickActionWalletId] = useState<string | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingWallet, setEditingWallet] = useState<Wallet | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -78,6 +88,12 @@ export const WalletsPage: React.FC = () => {
   const [settingPinForWallet, setSettingPinForWallet] = useState<Wallet | null>(null);
   const [newWalletPin, setNewWalletPin] = useState('');
 
+  const quickActionWallet = useMemo(
+    () => wallets.find((w) => w.id === quickActionWalletId) || null,
+    [wallets, quickActionWalletId]
+  );
+
+  useModalBackHandler(quickActionWallet !== null, () => setQuickActionWalletId(null), 'wallet-quick-actions');
   useModalBackHandler(isEditModalOpen, () => setIsEditModalOpen(false), 'wallet-edit');
   useModalBackHandler(pinModalTargetWallet !== null, () => setPinModalTargetWallet(null), 'wallet-pin-verify');
   useModalBackHandler(settingPinForWallet !== null, () => setSettingPinForWallet(null), 'wallet-pin-set');
@@ -203,12 +219,29 @@ export const WalletsPage: React.FC = () => {
     setIsEditModalOpen(false);
   };
 
-  // Tap wallet card logic: check if locked first, else open full page
+  // Tap wallet card logic: check if locked first, else open quick actions menu
   const handleCardClick = (w: Wallet) => {
     if (w.isLocked && w.pin && lockedWalletIds.includes(w.id)) {
       setPinModalTargetWallet(w);
     } else {
-      setActiveWalletId(w.id);
+      setQuickActionWalletId(w.id);
+    }
+  };
+
+  const handleRequestDeleteWallet = (w: Wallet) => {
+    if (wallets.length <= 1) {
+      deleteWallet(w.id);
+      return;
+    }
+    const deps = getWalletDependencies(w.id);
+    setIsEditModalOpen(false);
+    setQuickActionWalletId(null);
+    if (deps.totalCount > 0) {
+      const firstOther = wallets.find((other) => other.id !== w.id);
+      setMigrationTargetWalletId(firstOther?.id || '');
+      setDependencyWalletId(w.id);
+    } else {
+      setConfirmDeleteId(w.id);
     }
   };
 
@@ -368,7 +401,7 @@ export const WalletsPage: React.FC = () => {
                 isReorderMode
                   ? 'cursor-default ring-1 ring-[var(--color-accent)]/40'
                   : 'cursor-pointer hover:opacity-95'
-              }`}
+              } ${w.isArchived ? 'opacity-80' : ''}`}
               style={{ backgroundColor: cardColor }}
             >
               <div>
@@ -381,6 +414,12 @@ export const WalletsPage: React.FC = () => {
                     <div className="min-w-0">
                       <h3 className="text-sm font-bold tracking-tight leading-tight flex items-center gap-1.5 flex-wrap">
                         <span>{w.name}</span>
+                        {w.isArchived && (
+                          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md bg-black/25 text-white/95 font-medium">
+                            <PauseCircle className="w-3 h-3 shrink-0" />
+                            <span>{isRTL ? 'متوقفة مؤقتاً' : 'Paused'}</span>
+                          </span>
+                        )}
                         {w.excludeFromTotal && (
                           <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md bg-white/15 border border-white/20 text-white/95 font-medium backdrop-blur-[2px]">
                             <EyeOff className="w-3 h-3 shrink-0" />
@@ -501,8 +540,9 @@ export const WalletsPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <span className="text-[11px] text-white/90 font-medium px-2 py-0.5 rounded bg-black/20">
-                    {isRTL ? 'عرض المعاملات ←' : 'View Transactions →'}
+                  <span className="inline-flex items-center gap-1 text-[11px] text-white/90 font-medium px-2 py-0.5 rounded bg-black/20">
+                    <MoreHorizontal className="w-3.5 h-3.5" />
+                    <span>{isRTL ? 'إجراءات سريعة' : 'Quick actions'}</span>
                   </span>
                 </div>
               </div>
@@ -710,21 +750,7 @@ export const WalletsPage: React.FC = () => {
                 {editingWallet && (
                   <button
                     type="button"
-                    onClick={() => {
-                      if (wallets.length <= 1) {
-                        deleteWallet(editingWallet.id);
-                        return;
-                      }
-                      const deps = getWalletDependencies(editingWallet.id);
-                      setIsEditModalOpen(false);
-                      if (deps.totalCount > 0) {
-                        const firstOther = wallets.find((w) => w.id !== editingWallet.id);
-                        setMigrationTargetWalletId(firstOther?.id || '');
-                        setDependencyWalletId(editingWallet.id);
-                      } else {
-                        setConfirmDeleteId(editingWallet.id);
-                      }
-                    }}
+                    onClick={() => handleRequestDeleteWallet(editingWallet)}
                     className="p-2.5 bg-[var(--color-expense)]/10 text-[var(--color-expense)] border border-[var(--color-expense)]/20 rounded-xl min-h-[44px] min-w-[44px] flex items-center justify-center"
                     title={t('deleteWallet')}
                     aria-label={t('deleteWallet')}
@@ -806,10 +832,71 @@ export const WalletsPage: React.FC = () => {
         title={isRTL ? `فتح محفظة ${pinModalTargetWallet?.name || ''}` : `Unlock ${pinModalTargetWallet?.name || ''}`}
         onSuccess={() => {
           if (pinModalTargetWallet) {
-            setActiveWalletId(pinModalTargetWallet.id);
+            setQuickActionWalletId(pinModalTargetWallet.id);
             setPinModalTargetWallet(null);
           }
         }}
+      />
+
+      {/* Wallet Quick Actions Bottom Sheet */}
+      <WalletQuickActionsSheet
+        wallet={quickActionWallet}
+        allWallets={wallets}
+        isBalanceHidden={quickActionWallet ? Boolean(hiddenBalances[quickActionWallet.id]) : false}
+        isRTL={isRTL}
+        onClose={() => setQuickActionWalletId(null)}
+        onDeposit={(w) => {
+          const preset = buildWalletActionPreset(w, 'deposit', wallets);
+          setQuickActionWalletId(null);
+          if (preset) openTransactionWithPreset(preset);
+        }}
+        onWithdraw={(w) => {
+          const preset = buildWalletActionPreset(w, 'withdraw', wallets);
+          setQuickActionWalletId(null);
+          if (preset) openTransactionWithPreset(preset);
+        }}
+        onTransfer={(w) => {
+          const preset = buildWalletActionPreset(w, 'transfer', wallets);
+          if (!preset) {
+            showToast(
+              isRTL
+                ? 'أضف محفظة أخرى أولاً لإجراء تحويل بين المحافظ.'
+                : 'Add another wallet first to transfer.',
+              'warning'
+            );
+            return;
+          }
+          setQuickActionWalletId(null);
+          openTransactionWithPreset(preset);
+        }}
+        onViewTransactions={(w) => {
+          setQuickActionWalletId(null);
+          setActiveWalletId(w.id);
+        }}
+        onEdit={(w) => {
+          setQuickActionWalletId(null);
+          handleOpenEdit(w);
+        }}
+        onToggleArchive={(w) => {
+          const check = canToggleWalletArchive(w, wallets);
+          if (!check.allowed) {
+            showToast(isRTL ? check.reasonAr || '' : check.reasonEn || '', 'warning');
+            return;
+          }
+          updateWallet(w.id, { isArchived: check.nextArchived });
+          showToast(
+            check.nextArchived
+              ? isRTL
+                ? `تم إيقاف محفظة "${w.name}" مؤقتاً واستبعادها من الإجمالي`
+                : `Paused "${w.name}" and excluded from total`
+              : isRTL
+              ? `تمت إعادة تفعيل محفظة "${w.name}"`
+              : `Resumed "${w.name}"`,
+            'success'
+          );
+          setQuickActionWalletId(null);
+        }}
+        onDelete={handleRequestDeleteWallet}
       />
 
       {/* Delete Wallet Confirmation (No Dependencies) */}

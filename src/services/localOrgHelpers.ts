@@ -9,6 +9,7 @@ import {
   Wallet,
 } from '../types';
 import { convertCurrency, fromMinor, roundCurrency, toMinor } from './currency';
+import { getEffectiveTransactionAmount } from './calculations';
 import { createStarterCostCentersForIndustry, createStarterOrgCategories } from './db';
 import { DAY_MS, computeOrgSeatLimit, normalizeApprovalStatus } from './entitlements';
 
@@ -166,11 +167,12 @@ export function applyOrgTxBalanceToWallets(
 ): Wallet[] {
   if (!doesOrgTxCountTowardBalance(tx)) return wallets;
 
+  const effectiveAmount = getEffectiveTransactionAmount(tx);
   return wallets.map((w) => {
     let delta = 0;
 
     if (w.id === tx.walletId) {
-      const converted = convertCurrency(tx.amount, tx.currency, w.currency, customRates);
+      const converted = convertCurrency(effectiveAmount, tx.currency, w.currency, customRates);
       const feeConverted =
         tx.type === 'transfer' && tx.transferFee
           ? convertCurrency(tx.transferFee, tx.currency, w.currency, customRates)
@@ -188,7 +190,7 @@ export function applyOrgTxBalanceToWallets(
       const destAmt =
         tx.convertedAmount !== undefined
           ? tx.convertedAmount
-          : convertCurrency(tx.amount, tx.currency, w.currency, customRates);
+          : convertCurrency(effectiveAmount, tx.currency, w.currency, customRates);
       delta += destAmt * direction;
     }
 

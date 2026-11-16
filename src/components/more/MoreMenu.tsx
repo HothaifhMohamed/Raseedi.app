@@ -42,6 +42,10 @@ import { MoneyCirclesModal } from './MoneyCirclesModal';
 import { SUPPORT_CONFIG } from '../../constants/support';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
 import { BrandLogo } from '../common/BrandLogo';
+import {
+  doesTransactionAffectAccounting,
+  getEffectiveTransactionAmount,
+} from '../../services/calculations';
 
 export const MoreMenu: React.FC = () => {
   const {
@@ -94,12 +98,14 @@ export const MoreMenu: React.FC = () => {
   const groupsList = React.useMemo(() => {
     const map = new Map<string, { count: number; totalExpense: number; totalIncome: number }>();
     transactions.forEach((tx) => {
+      if (!doesTransactionAffectAccounting(tx)) return;
       if (tx.group?.trim()) {
         const g = tx.group.trim();
         const cur = map.get(g) || { count: 0, totalExpense: 0, totalIncome: 0 };
+        const amt = getEffectiveTransactionAmount(tx);
         cur.count++;
-        if (tx.type === 'expense') cur.totalExpense += tx.amount;
-        if (tx.type === 'income') cur.totalIncome += tx.amount;
+        if (tx.type === 'expense') cur.totalExpense += amt;
+        if (tx.type === 'income') cur.totalIncome += amt;
         map.set(g, cur);
       }
     });
@@ -110,11 +116,13 @@ export const MoreMenu: React.FC = () => {
   const contactsList = React.useMemo(() => {
     const map = new Map<string, { count: number; totalExpense: number }>();
     transactions.forEach((tx) => {
+      if (!doesTransactionAffectAccounting(tx)) return;
       if (tx.contact?.trim()) {
         const c = tx.contact.trim();
         const cur = map.get(c) || { count: 0, totalExpense: 0 };
+        const amt = getEffectiveTransactionAmount(tx);
         cur.count++;
-        if (tx.type === 'expense') cur.totalExpense += tx.amount;
+        if (tx.type === 'expense') cur.totalExpense += amt;
         map.set(c, cur);
       }
     });

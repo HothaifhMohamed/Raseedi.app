@@ -2809,8 +2809,32 @@ Return JSON matching the schema with:
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(__dirname, 'dist');
-    app.use(express.static(distDir));
+    const setNoStoreHeaders = (res: Response) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    };
+
+    app.use(
+      express.static(distDir, {
+        setHeaders: (res, filePath) => {
+          const baseName = path.basename(filePath);
+          if (
+            baseName === 'index.html' ||
+            baseName === 'version.json' ||
+            baseName === 'sw.js' ||
+            baseName === 'registerSW.js' ||
+            baseName === 'manifest.json'
+          ) {
+            setNoStoreHeaders(res);
+          } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
+      setNoStoreHeaders(res);
       res.sendFile(path.join(distDir, 'index.html'));
     });
   }

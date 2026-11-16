@@ -35,6 +35,7 @@ import {
   Wallet,
 } from '../types';
 import { convertCurrency, fromMinor, toMinor } from './currency';
+import { getEffectiveTransactionAmount } from './calculations';
 import { normalizeApprovalStatus } from './entitlements';
 
 export interface OrgActorInfo {
@@ -630,9 +631,15 @@ function computeWalletBalanceDeltas(
     (!status || status === 'approved' || status === 'paid');
   if (!countsTowardBalance) return deltas;
 
+  const effectiveAmount = getEffectiveTransactionAmount(tx);
   const sourceWallet = wallets.find((w) => w.id === tx.walletId);
   if (sourceWallet) {
-    const converted = convertCurrency(tx.amount, tx.currency, sourceWallet.currency, customRates);
+    const converted = convertCurrency(
+      effectiveAmount,
+      tx.currency,
+      sourceWallet.currency,
+      customRates
+    );
     const feeConverted =
       tx.type === 'transfer' && tx.transferFee
         ? convertCurrency(tx.transferFee, tx.currency, sourceWallet.currency, customRates)
@@ -650,7 +657,10 @@ function computeWalletBalanceDeltas(
   if (tx.type === 'transfer' && tx.toWalletId) {
     const destWallet = wallets.find((w) => w.id === tx.toWalletId);
     if (destWallet) {
-      const convertedDest = convertCurrency(tx.amount, tx.currency, destWallet.currency, customRates);
+      const convertedDest =
+        tx.convertedAmount !== undefined
+          ? tx.convertedAmount
+          : convertCurrency(effectiveAmount, tx.currency, destWallet.currency, customRates);
       const destDeltaMinor = toMinor(convertedDest, destWallet.currency) * direction;
       deltas.set(destWallet.id, (deltas.get(destWallet.id) || 0) + destDeltaMinor);
     }

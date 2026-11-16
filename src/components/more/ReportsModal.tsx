@@ -1,7 +1,11 @@
 import React, { useState, useMemo } from 'react';
 import { FileText, Download, Printer, X, Lock } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { getTransactionsInDateRange } from '../../services/calculations';
+import {
+  doesTransactionAffectAccounting,
+  getEffectiveTransactionAmount,
+  getTransactionsInDateRange,
+} from '../../services/calculations';
 import { convertCurrency } from '../../services/currency';
 import { MoneyText } from '../common/MoneyText';
 import { HairlineFigure } from '../common/HairlineVisuals';
@@ -43,8 +47,13 @@ export const ReportsModal: React.FC<ReportsModalProps> = ({ isOpen, onClose }) =
     let inc = 0;
     let exp = 0;
     for (const tx of reportTransactions) {
-      if (tx.doesNotAffectBalance || tx.type === 'transfer') continue;
-      const inMain = convertCurrency(tx.amount, tx.currency, settings.mainCurrency, settings.customExchangeRates);
+      if (!doesTransactionAffectAccounting(tx) || tx.type === 'transfer') continue;
+      const inMain = convertCurrency(
+        getEffectiveTransactionAmount(tx),
+        tx.currency,
+        settings.mainCurrency,
+        settings.customExchangeRates
+      );
       if (tx.type === 'income') inc += inMain;
       if (tx.type === 'expense') exp += inMain;
     }

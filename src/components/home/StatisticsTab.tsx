@@ -10,6 +10,8 @@ import { useApp } from '../../context/AppContext';
 import { IconRenderer } from '../common/IconRenderer';
 import { convertCurrency } from '../../services/currency';
 import {
+  doesTransactionAffectAccounting,
+  getEffectiveTransactionAmount,
   getTransactionsInDateRange,
   calculateMonthEndForecast,
   getActiveFiscalMonthStr,
@@ -55,7 +57,7 @@ export const StatisticsTab: React.FC = () => {
   // Filter transactions
   const filteredTx = useMemo(() => {
     return getTransactionsInDateRange(transactions, activeDateRange.start, activeDateRange.end).filter(
-      (tx) => !tx.doesNotAffectBalance
+      (tx) => doesTransactionAffectAccounting(tx)
     );
   }, [transactions, activeDateRange]);
 
@@ -64,7 +66,12 @@ export const StatisticsTab: React.FC = () => {
     let inc = 0;
     let exp = 0;
     for (const tx of filteredTx) {
-      const inMain = convertCurrency(tx.amount, tx.currency, settings.mainCurrency, settings.customExchangeRates);
+      const inMain = convertCurrency(
+        getEffectiveTransactionAmount(tx),
+        tx.currency,
+        settings.mainCurrency,
+        settings.customExchangeRates
+      );
       if (tx.type === 'income') inc += inMain;
       if (tx.type === 'expense') exp += inMain;
     }
@@ -76,7 +83,12 @@ export const StatisticsTab: React.FC = () => {
     const map = new Map<string, number>();
     for (const tx of filteredTx) {
       if (tx.type !== 'expense') continue;
-      const inMain = convertCurrency(tx.amount, tx.currency, settings.mainCurrency, settings.customExchangeRates);
+      const inMain = convertCurrency(
+        getEffectiveTransactionAmount(tx),
+        tx.currency,
+        settings.mainCurrency,
+        settings.customExchangeRates
+      );
       map.set(tx.categoryId, (map.get(tx.categoryId) || 0) + inMain);
     }
 
@@ -105,7 +117,12 @@ export const StatisticsTab: React.FC = () => {
 
     for (const tx of filteredTx) {
       if (tx.type !== 'expense') continue;
-      const inMain = convertCurrency(tx.amount, tx.currency, settings.mainCurrency, settings.customExchangeRates);
+      const inMain = convertCurrency(
+        getEffectiveTransactionAmount(tx),
+        tx.currency,
+        settings.mainCurrency,
+        settings.customExchangeRates
+      );
       if (tx.priority === 'essential') essential += inMain;
       else if (tx.priority === 'leisure') leisure += inMain;
       else normal += inMain;
@@ -126,7 +143,12 @@ export const StatisticsTab: React.FC = () => {
     for (const tx of filteredTx) {
       if (tx.type === 'transfer') continue;
       const cur = map.get(tx.walletId) || { income: 0, expense: 0 };
-      const inMain = convertCurrency(tx.amount, tx.currency, settings.mainCurrency, settings.customExchangeRates);
+      const inMain = convertCurrency(
+        getEffectiveTransactionAmount(tx),
+        tx.currency,
+        settings.mainCurrency,
+        settings.customExchangeRates
+      );
       if (tx.type === 'income') cur.income += inMain;
       if (tx.type === 'expense') cur.expense += inMain;
       map.set(tx.walletId, cur);

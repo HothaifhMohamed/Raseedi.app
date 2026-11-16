@@ -19,6 +19,10 @@ import { useApp } from '../../context/AppContext';
 import { MoneyText } from '../common/MoneyText';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
 import { HairlineEmptyState } from '../common/HairlineVisuals';
+import {
+  doesTransactionAffectAccounting,
+  getEffectiveTransactionAmount,
+} from '../../services/calculations';
 
 interface WalletDetailPageProps {
   walletId: string;
@@ -108,12 +112,13 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
     const catTotals: Record<string, number> = {};
 
     for (const tx of walletTransactions) {
-      if (tx.doesNotAffectBalance) continue;
+      if (!doesTransactionAffectAccounting(tx)) continue;
+      const effectiveAmount = getEffectiveTransactionAmount(tx);
       if (tx.type === 'income') {
-        income += tx.amount;
+        income += effectiveAmount;
       } else if (tx.type === 'expense') {
-        expense += tx.amount;
-        catTotals[tx.categoryId] = (catTotals[tx.categoryId] || 0) + tx.amount;
+        expense += effectiveAmount;
+        catTotals[tx.categoryId] = (catTotals[tx.categoryId] || 0) + effectiveAmount;
       }
     }
 

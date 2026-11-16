@@ -67,6 +67,11 @@ import {
   isDateInLockedPeriod,
   parseLocalDate,
 } from '../services/calculations';
+import { TransactionDraftPreset } from '../services/walletQuickActions';
+import {
+  buildUpdatedTransaction,
+  computeTransactionUpdate,
+} from '../services/transactionUpdate';
 import {
   convertCurrency,
   fetchLiveExchangeRates,
@@ -358,6 +363,8 @@ interface AppContextType {
   setIsAddModalOpen: (open: boolean) => void;
   editingTransaction: Transaction | null;
   setEditingTransaction: (t: Transaction | null) => void;
+  transactionDraft: TransactionDraftPreset | null;
+  openTransactionWithPreset: (preset?: TransactionDraftPreset) => void;
   isSettingsOpen: boolean;
   setIsSettingsOpen: (open: boolean) => void;
   openAdminPanelRequested: boolean;
@@ -737,8 +744,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setActiveWalletIdState(null);
   }, []);
 
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isAddModalOpen, setIsAddModalOpenState] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
+  const [transactionDraft, setTransactionDraft] = useState<TransactionDraftPreset | null>(null);
+  const handleSetIsAddModalOpen = useCallback((open: boolean) => {
+    setIsAddModalOpenState(open);
+    if (!open) {
+      setTransactionDraft(null);
+    }
+  }, []);
+  const openTransactionWithPreset = useCallback((preset?: TransactionDraftPreset) => {
+    setEditingTransaction(null);
+    setTransactionDraft(preset ?? null);
+    setIsAddModalOpenState(true);
+  }, []);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [openAdminPanelRequested, setOpenAdminPanelRequested] = useState(false);
   const [isAdminCodeModalOpen, setIsAdminCodeModalOpen] = useState(false);
@@ -2707,7 +2726,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setActiveNavState('home');
         setHomeTabState('transactions');
         setActiveWalletIdState(null);
-        setIsAddModalOpen(false);
+        setIsAddModalOpenState(false);
+        setTransactionDraft(null);
         setEditingTransaction(null);
         setIsSettingsOpen(false);
         setOpenAdminPanelRequested(false);
@@ -4555,39 +4575,43 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }
         }
 
-        const mergedTx: Transaction = {
-          ...oldTx,
-          ...updates,
-          approvalStatus:
-            normalizeApprovalStatus(updates.approvalStatus ?? oldTx.approvalStatus) || 'approved',
-          updatedAt: Date.now(),
-        };
+        const mergedTx = buildUpdatedTransaction(
+          oldTx,
+          {
+            ...updates,
+            approvalStatus:
+              normalizeApprovalStatus(updates.approvalStatus ?? oldTx.approvalStatus) || 'approved',
+          },
+          isUsingLocalOrgMode ? wallets : activeCloudWallets,
+          settings.customExchangeRates
+        );
         if (isUsingLocalOrgMode) {
           const actor = getOrgActor();
           mutateLocalOrgWorkspace(activeOrganization.id, (ws) => {
-            const walletsReversed = applyOrgTxBalanceToWallets(
-              ws.wallets || [],
+            const { mergedTx: nextMergedTx, updatedWallets } = computeTransactionUpdate(
               oldTx,
-              settings.customExchangeRates,
-              -1
-            );
-            const walletsApplied = applyOrgTxBalanceToWallets(
-              walletsReversed,
-              mergedTx,
-              settings.customExchangeRates,
-              1
+              {
+                ...updates,
+                approvalStatus:
+                  normalizeApprovalStatus(updates.approvalStatus ?? oldTx.approvalStatus) ||
+                  'approved',
+              },
+              ws.wallets || [],
+              settings.customExchangeRates
             );
             return {
               ...ws,
-              wallets: walletsApplied,
-              transactions: (ws.transactions || []).map((tx) => (tx.id === id ? mergedTx : tx)),
+              wallets: updatedWallets,
+              transactions: (ws.transactions || []).map((tx) =>
+                tx.id === id ? nextMergedTx : tx
+              ),
               auditLogs: appendLocalOrgAuditLog(
                 ws,
                 'update',
                 'transaction',
                 id,
                 actor,
-                `تعديل معاملة (${mergedTx.amount} ${mergedTx.currency})`
+                `تعديل معاملة (${nextMergedTx.amount} ${nextMergedTx.currency})`
               ),
             };
           });
@@ -4604,13 +4628,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return;
       }
 
-      let updatedWallets = applyDeltasToWallets(personalWallets, oldTx, -1);
-      const mergedTx: Transaction = {
-        ...oldTx,
-        ...updates,
-        updatedAt: Date.now(),
-      };
-      updatedWallets = applyDeltasToWallets(updatedWallets, mergedTx, 1);
+      const { mergedTx, updatedWallets } = computeTransactionUpdate(
+        oldTx,
+        updates,
+        personalWallets,
+        settings.customExchangeRates
+      );
 
       const nextTx = personalTransactions.map((t) => (t.id === id ? mergedTx : t));
       setPersonalTransactions(nextTx);
@@ -4627,10 +4650,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       activeOrgMember,
       settings.language,
       settings.customExchangeRates,
+      wallets,
       activeCloudWallets,
       getOrgActor,
       mutateLocalOrgWorkspace,
-      applyDeltasToWallets,
       personalWallets,
       personalTransactions,
       savePersonalState,
@@ -6821,9 +6844,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         registerModalBackHandler,
         unregisterModalBackHandler,
         isAddModalOpen,
-        setIsAddModalOpen,
+        setIsAddModalOpen: handleSetIsAddModalOpen,
         editingTransaction,
         setEditingTransaction,
+        transactionDraft,
+        openTransactionWithPreset,
         isSettingsOpen,
         setIsSettingsOpen: handleSetIsSettingsOpen,
         openAdminPanelRequested,

@@ -19,14 +19,64 @@ function conditionalAdsTxtPlugin(): Plugin {
   };
 }
 
-export default defineConfig(() => {
+function readAppVersion(): string {
+  try {
+    const pkgPath = path.resolve(__dirname, 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as { version?: string };
+    return pkg.version?.trim() || '1.0.0';
+  } catch {
+    return '1.0.0';
+  }
+}
+
+function versionManifestPlugin(version: string, buildId: string): Plugin {
+  const payload = JSON.stringify(
+    {
+      version,
+      buildId,
+      builtAt: new Date().toISOString(),
+    },
+    null,
+    2
+  );
+
   return {
+    name: 'raseedi-version-manifest',
+    configureServer(server) {
+      server.middlewares.use('/version.json', (_req, res) => {
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+        res.end(payload);
+      });
+    },
+    closeBundle() {
+      const distDir = path.resolve(__dirname, 'dist');
+      if (!fs.existsSync(distDir)) return;
+      fs.writeFileSync(path.join(distDir, 'version.json'), payload, 'utf8');
+    },
+  };
+}
+
+export default defineConfig(() => {
+  const appVersion = readAppVersion();
+  const buildId = `${appVersion}-${Date.now().toString(36)}`;
+
+  return {
+    define: {
+      __APP_VERSION__: JSON.stringify(appVersion),
+      __APP_BUILD_ID__: JSON.stringify(buildId),
+    },
     plugins: [
       react(),
       tailwindcss(),
       conditionalAdsTxtPlugin(),
+      versionManifestPlugin(appVersion, buildId),
       VitePWA({
         registerType: 'autoUpdate',
+        injectRegister: null,
         manifestFilename: 'manifest.json',
         includeAssets: [
           'favicon.ico',
@@ -76,7 +126,45 @@ export default defineConfig(() => {
         },
         workbox: {
           maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
-          navigateFallbackDenylist: [/^\/ads\.txt$/, /^\/api\//],
+          skipWaiting: true,
+          clientsClaim: true,
+          cleanupOutdatedCaches: true,
+          globPatterns: ['**/*.{js,css,ico,png,svg,woff,woff2}'],
+          globIgnores: ['**/index.html', '**/version.json'],
+          navigateFallback: null,
+          navigateFallbackDenylist: [/^\/ads\.txt$/, /^\/api\//, /^\/version\.json$/],
+          runtimeCaching: [
+            {
+              urlPattern: /\/version\.json(\?.*)?$/i,
+              handler: 'NetworkOnly',
+            },
+            {
+              urlPattern: ({ request }) => request.mode === 'navigate',
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'raseedi-html-navigation',
+                networkTimeoutSeconds: 3,
+                expiration: {
+                  maxEntries: 5,
+                  maxAgeSeconds: 60 * 60 * 24,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+            {
+              urlPattern: /\/manifest\.json$/i,
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'raseedi-manifest',
+                networkTimeoutSeconds: 3,
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+          ],
         },
         devOptions: {
           enabled: false

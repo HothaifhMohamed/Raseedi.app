@@ -28,6 +28,7 @@ import { UndoSnackbar } from './components/common/UndoSnackbar';
 import { ToastNotification } from './components/common/ToastNotification';
 import { PinLockModal } from './components/common/PinLockModal';
 import { PWAInstallPrompt, OfflineIndicator } from './components/common/PWAInstallPrompt';
+import { AppUpdateBanner } from './components/common/AppUpdateBanner';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
 import {
   AdConsentBanner,
@@ -57,6 +58,7 @@ const MainLayout: React.FC = () => {
     isAddModalOpen,
     setIsAddModalOpen,
     editingTransaction,
+    transactionDraft,
     currencyPickerOpen,
     currencyPickerSelectedCode,
     closeCurrencyPicker,
@@ -258,6 +260,7 @@ const MainLayout: React.FC = () => {
           isOpen={isAddModalOpen}
           onClose={() => setIsAddModalOpen(false)}
           editTransaction={editingTransaction}
+          presetDraft={transactionDraft}
         />
 
         {/* Multidimensional Filter Modal */}
@@ -308,6 +311,7 @@ export default function App() {
   return (
     <ErrorBoundary>
       <AppProvider>
+        <AppUpdateBanner />
         <MainLayout />
       </AppProvider>
     </ErrorBoundary>

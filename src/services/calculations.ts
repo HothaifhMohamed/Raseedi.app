@@ -335,7 +335,8 @@ export function calculateIncomeExpenseNet(
 
     const rateOverride =
       useTransactionRate && t.exchangeRate ? { [t.currency]: t.exchangeRate } : customRates;
-    const amountInMain = convertCurrency(t.amount, t.currency, mainCurrency, rateOverride);
+    const effectiveAmount = getEffectiveTransactionAmount(t);
+    const amountInMain = convertCurrency(effectiveAmount, t.currency, mainCurrency, rateOverride);
 
     if (t.type === 'income') {
       income += amountInMain;
@@ -386,7 +387,12 @@ export function groupTransactionsByDay(
 
     for (const t of list) {
       if (!doesTransactionAffectAccounting(t) || t.type === 'transfer') continue;
-      const converted = convertCurrency(t.amount, t.currency, mainCurrency, customRates);
+      const converted = convertCurrency(
+        getEffectiveTransactionAmount(t),
+        t.currency,
+        mainCurrency,
+        customRates
+      );
       if (t.type === 'income') incomeTotal += converted;
       if (t.type === 'expense') expenseTotal += converted;
     }
@@ -590,7 +596,12 @@ export function calculateBudgetProgress(
 
   let spent = 0;
   for (const t of monthTransactions) {
-    spent += convertCurrency(t.amount, t.currency, mainCurrency, customRates);
+    spent += convertCurrency(
+      getEffectiveTransactionAmount(t),
+      t.currency,
+      mainCurrency,
+      customRates
+    );
   }
   spent = roundCurrency(spent, mainCurrency);
 
@@ -780,11 +791,21 @@ export function calculateWeeklyInsight(
   for (const tx of transactions) {
     if (!doesTransactionAffectAccounting(tx) || tx.type !== 'expense') continue;
     if (tx.date >= sThis && tx.date <= eThis) {
-      const val = convertCurrency(tx.amount, tx.currency, mainCurrency, customRates);
+      const val = convertCurrency(
+        getEffectiveTransactionAmount(tx),
+        tx.currency,
+        mainCurrency,
+        customRates
+      );
       thisWeekTotal += val;
       thisByCat.set(tx.categoryId, (thisByCat.get(tx.categoryId) || 0) + val);
     } else if (tx.date >= sLast && tx.date <= eLast) {
-      const val = convertCurrency(tx.amount, tx.currency, mainCurrency, customRates);
+      const val = convertCurrency(
+        getEffectiveTransactionAmount(tx),
+        tx.currency,
+        mainCurrency,
+        customRates
+      );
       lastWeekTotal += val;
       lastByCat.set(tx.categoryId, (lastByCat.get(tx.categoryId) || 0) + val);
     }
@@ -876,7 +897,12 @@ export function calculateMonthEndForecast(
   for (const tx of transactions) {
     if (!doesTransactionAffectAccounting(tx) || tx.type !== 'expense') continue;
     if (tx.date >= startDate && tx.date <= todayStr) {
-      spentSoFar += convertCurrency(tx.amount, tx.currency, mainCurrency, customRates);
+      spentSoFar += convertCurrency(
+        getEffectiveTransactionAmount(tx),
+        tx.currency,
+        mainCurrency,
+        customRates
+      );
     }
   }
 
@@ -973,7 +999,12 @@ export function calculateMonthlySummary(
 
   for (const tx of transactions) {
     if (!doesTransactionAffectAccounting(tx) || tx.type === 'transfer') continue;
-    const inMain = convertCurrency(tx.amount, tx.currency, mainCurrency, customRates);
+    const inMain = convertCurrency(
+      getEffectiveTransactionAmount(tx),
+      tx.currency,
+      mainCurrency,
+      customRates
+    );
 
     if (tx.date >= curRange.startDate && tx.date <= curRange.endDate) {
       if (tx.type === 'income') {

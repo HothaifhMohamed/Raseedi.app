@@ -47,6 +47,8 @@ import {
 } from '../services/numbers';
 import { prepareReceiptImageDataUrl, ReceiptScanError, scanReceiptWithAI } from '../services/receiptScanner';
 
+import { TransactionDraftPreset } from '../services/walletQuickActions';
+
 const QUICK_CAT_COLORS = ['#1E6F73', '#B5523B', '#5E7F3A', '#C99A2E', '#6A5243', '#545E75'];
 const QUICK_CAT_ICONS = ['ShoppingBag', 'Utensils', 'Coffee', 'Car', 'Receipt', 'HeartPulse', 'Sparkles', 'Layers'];
 
@@ -54,12 +56,14 @@ interface TransactionModalProps {
   isOpen: boolean;
   onClose: () => void;
   editTransaction?: Transaction | null;
+  presetDraft?: TransactionDraftPreset | null;
 }
 
 export const TransactionModal: React.FC<TransactionModalProps> = ({
   isOpen,
   onClose,
   editTransaction,
+  presetDraft,
 }) => {
   const {
     wallets,
@@ -281,23 +285,37 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       const todayStr = formatLocalDate(now);
       const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
 
-      const rememberedType: TransactionType = settings.lastUsedTransactionType || 'expense';
+      const initialType: TransactionType =
+        presetDraft?.type || settings.lastUsedTransactionType || 'expense';
+      const presetWallet = presetDraft?.walletId
+        ? wallets.find((w) => w.id === presetDraft.walletId)
+        : null;
       const defaultWallet =
+        presetWallet ||
         (settings.useLastUsedWallet && settings.lastUsedWalletId
           ? wallets.find((w) => w.id === settings.lastUsedWalletId)
-          : null) || wallets[0];
+          : null) ||
+        wallets[0];
 
-      setType(rememberedType);
+      const presetToWallet =
+        presetDraft?.toWalletId && presetDraft.toWalletId !== defaultWallet?.id
+          ? wallets.find((w) => w.id === presetDraft.toWalletId)
+          : null;
+      const fallbackToWallet =
+        wallets.find((w) => !w.isArchived && w.id !== defaultWallet?.id) ||
+        wallets.find((w) => w.id !== defaultWallet?.id);
+
+      setType(initialType);
       setAmountExpr('');
-      setCurrency(defaultWallet?.currency || settings.mainCurrency);
+      setCurrency(presetDraft?.currency || defaultWallet?.currency || settings.mainCurrency);
       setWalletId(defaultWallet?.id || '');
-      setToWalletId(wallets.length > 1 ? wallets.find((w) => w.id !== defaultWallet?.id)?.id || '' : '');
+      setToWalletId((presetToWallet || fallbackToWallet)?.id || '');
       setTransferFeeInput('');
 
       const defaultCat = categories.find((c) => {
         if (c.isHidden) return false;
-        if (rememberedType === 'transfer') return true;
-        return c.type === rememberedType || c.type === 'both';
+        if (initialType === 'transfer') return true;
+        return c.type === initialType || c.type === 'both';
       });
       setCategoryId(defaultCat?.id || categories[0]?.id || '');
       setNotes('');
@@ -334,7 +352,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     setSplitValueInput('');
     setReceiptAuthPrompt(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, editTransaction]);
+  }, [isOpen, editTransaction, presetDraft]);
 
   // Resolve Firebase Storage download URLs for existing org attachment paths
   useEffect(() => {
@@ -370,6 +388,12 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     const selected = wallets.find((w) => w.id === wId);
     if (selected) {
       setCurrency(selected.currency);
+    }
+    if (toWalletId === wId) {
+      const nextTo =
+        wallets.find((w) => !w.isArchived && w.id !== wId) ||
+        wallets.find((w) => w.id !== wId);
+      setToWalletId(nextTo?.id || '');
     }
   };
 
