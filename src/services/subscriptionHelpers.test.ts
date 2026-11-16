@@ -1,6 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  calculateSubscriptionDatesUpdate,
+  computeAdminDirectSubscriptionPayload,
   computeUserSubscriptionSummary,
   normalizePlanTierInput,
   resolveAppEntryStage,
@@ -8,6 +10,7 @@ import {
   shouldShowAds,
   shouldShowBusinessUpgradeUi,
   shouldShowPersonalUpgradeUi,
+  shouldShowUpgradeActionButtons,
   SUBSCRIPTION_DAY_MS,
 } from './subscriptionHelpers';
 
@@ -40,6 +43,7 @@ describe('subscriptionHelpers tier resolution, expiry alerts & auth gate transit
     assert.equal(shouldShowPersonalUpgradeUi(summary), false);
     assert.equal(shouldShowBusinessUpgradeUi(summary), false);
     assert.equal(shouldShowAds(summary), false);
+    assert.equal(shouldShowUpgradeActionButtons(summary), true);
   });
 
   it('grants Admin lifetime Business PRO and suppresses all upgrade UI and ads', () => {
@@ -58,6 +62,113 @@ describe('subscriptionHelpers tier resolution, expiry alerts & auth gate transit
     assert.equal(shouldShowPersonalUpgradeUi(summary), false);
     assert.equal(shouldShowBusinessUpgradeUi(summary), false);
     assert.equal(shouldShowAds(summary), false);
+    assert.equal(shouldShowUpgradeActionButtons(summary), false);
+  });
+
+  it('hides Renew and Change Plan buttons for Business PRO + Lifetime subscribers', () => {
+    const nowMs = 1_760_000_000_000;
+    const businessLifetime = computeUserSubscriptionSummary({
+      verifiedPro: {
+        uid: 'u-biz-life',
+        isPro: true,
+        proActive: true,
+        planTier: 'business_pro',
+        proPlan: 'code',
+        billingCycle: 'lifetime',
+        expiresAt: null,
+        verifiedAt: nowMs - 15 * SUBSCRIPTION_DAY_MS,
+      },
+      nowMs,
+    });
+
+    assert.equal(businessLifetime.isBusinessPro, true);
+    assert.equal(businessLifetime.isLifetime, true);
+    assert.equal(shouldShowUpgradeActionButtons(businessLifetime), false);
+
+    // Personal Lifetime CAN still upgrade/switch to Business PRO
+    const personalLifetime = computeUserSubscriptionSummary({
+      verifiedPro: {
+        uid: 'u-per-life',
+        isPro: true,
+        proActive: true,
+        planTier: 'personal_pro',
+        proPlan: 'lifetime',
+        billingCycle: 'lifetime',
+        expiresAt: null,
+        verifiedAt: nowMs - 15 * SUBSCRIPTION_DAY_MS,
+      },
+      nowMs,
+    });
+    assert.equal(shouldShowUpgradeActionButtons(personalLifetime), true);
+  });
+
+  it('stacks duration cumulatively when renewing the same active tier', () => {
+    const nowMs = 1_760_000_000_000;
+    const existingExpiry = nowMs + 12 * SUBSCRIPTION_DAY_MS;
+    const result = calculateSubscriptionDatesUpdate({
+      currentTier: 'personal_pro',
+      currentExpiresAt: existingExpiry,
+      currentBillingCycle: 'monthly',
+      currentIsPro: true,
+      newTier: 'personal_pro',
+      newCycle: 'monthly',
+      nowMs,
+    });
+
+    assert.equal(result.actionMode, 'cumulative_renewal');
+    assert.equal(result.isCumulativeRenewal, true);
+    assert.equal(result.isPlanSwitch, false);
+    assert.equal(result.shouldWarnForfeiture, false);
+    assert.equal(result.baseMs, existingExpiry);
+    assert.equal(result.expiresAt, existingExpiry + 30 * SUBSCRIPTION_DAY_MS);
+  });
+
+  it('flags plan switch warning and resets expiry to nowMs when switching to a different tier with remaining days', () => {
+    const nowMs = 1_760_000_000_000;
+    const existingExpiry = nowMs + 18 * SUBSCRIPTION_DAY_MS;
+    const result = calculateSubscriptionDatesUpdate({
+      currentTier: 'personal_pro',
+      currentExpiresAt: existingExpiry,
+      currentBillingCycle: 'monthly',
+      currentIsPro: true,
+      newTier: 'business_pro',
+      newCycle: 'yearly',
+      nowMs,
+    });
+
+    assert.equal(result.actionMode, 'plan_switch');
+    assert.equal(result.isCumulativeRenewal, false);
+    assert.equal(result.isPlanSwitch, true);
+    assert.equal(result.shouldWarnForfeiture, true);
+    assert.equal(result.replacedDaysRemaining, 18);
+    assert.equal(result.replacedIsLifetime, false);
+    assert.equal(result.baseMs, nowMs);
+    assert.equal(result.expiresAt, nowMs + 365 * SUBSCRIPTION_DAY_MS);
+  });
+
+  it('builds Admin direct edit and cancel payloads cleanly', () => {
+    const nowMs = 1_760_000_000_000;
+    const bizMonthly = computeAdminDirectSubscriptionPayload({
+      planTier: 'business_pro',
+      billingCycle: 'monthly',
+      nowMs,
+    });
+    assert.equal(bizMonthly.isPro, true);
+    assert.equal(bizMonthly.proActive, true);
+    assert.equal(bizMonthly.planTier, 'business_pro');
+    assert.equal(bizMonthly.proPlan, 'business_monthly');
+    assert.equal(bizMonthly.expiresAt, nowMs + 30 * SUBSCRIPTION_DAY_MS);
+
+    const cancelled = computeAdminDirectSubscriptionPayload({
+      planTier: 'free',
+      billingCycle: 'free',
+      nowMs,
+    });
+    assert.equal(cancelled.isPro, false);
+    assert.equal(cancelled.proActive, false);
+    assert.equal(cancelled.planTier, 'free');
+    assert.equal(cancelled.proPlan, 'free');
+    assert.equal(cancelled.expiresAt, null);
   });
 
   it('hides personal upgrade prompts for Personal PRO while allowing Business PRO upgrade', () => {

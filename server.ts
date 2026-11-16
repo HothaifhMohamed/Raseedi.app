@@ -1143,6 +1143,154 @@ Return JSON matching the schema with:
     }
   );
 
+  app.get(
+    '/api/admin/users',
+    redeemIpLimiter,
+    requireFirebaseAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const authUser = req.authUser!;
+      if (
+        !isAuthorizedAdminUser({
+          email: authUser.email,
+          isLoggedIn: true,
+          emailVerified: authUser.email_verified,
+        })
+      ) {
+        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات المدير مطلوبة.' });
+        return;
+      }
+
+      if (!adminDbReady) {
+        respondCloudAdminUnavailable(res);
+        return;
+      }
+
+      try {
+        const snap = await adminDb.collection('users').limit(200).get();
+        const users = snap.docs.map((d) => {
+          const data = d.data() as Record<string, unknown>;
+          const ent = resolveUserEntitlement(data);
+          return {
+            uid: String(data.uid || d.id),
+            email: String(data.email || ''),
+            displayName: typeof data.displayName === 'string' ? data.displayName : undefined,
+            isPro: ent.isPro,
+            proActive: ent.isPro,
+            planTier: ent.planTier,
+            billingCycle: ent.billingCycle,
+            startedAt: typeof data.startedAt === 'number' ? data.startedAt : null,
+            expiresAt: ent.expiresAt,
+            proExpiresAt: ent.expiresAt,
+            lastSyncedAt: typeof data.lastSyncedAt === 'number' ? data.lastSyncedAt : undefined,
+          };
+        });
+        res.json({ ok: true, users });
+      } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(res);
+          return;
+        }
+        console.error('Admin list users error:', err);
+        res.status(500).json({ error: 'ADMIN_USERS_LIST_FAILED' });
+      }
+    }
+  );
+
+  app.post(
+    '/api/admin/users/:uid/subscription',
+    redeemIpLimiter,
+    requireFirebaseAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const authUser = req.authUser!;
+      if (
+        !isAuthorizedAdminUser({
+          email: authUser.email,
+          isLoggedIn: true,
+          emailVerified: authUser.email_verified,
+        })
+      ) {
+        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات المدير مطلوبة.' });
+        return;
+      }
+
+      const targetUid = typeof req.params?.uid === 'string' ? req.params.uid.trim() : '';
+      if (!targetUid || !VALID_ORG_ID_REGEX.test(targetUid)) {
+        res.status(400).json({ error: 'INVALID_UID' });
+        return;
+      }
+
+      if (!adminDbReady) {
+        respondCloudAdminUnavailable(res);
+        return;
+      }
+
+      const rawTier = String(req.body?.planTier || 'free').trim();
+      const rawCycle = String(req.body?.billingCycle || 'free').trim();
+      const customDays =
+        typeof req.body?.customDays === 'number' && Number.isFinite(req.body.customDays) && req.body.customDays > 0
+          ? Math.round(req.body.customDays)
+          : null;
+
+      const planTier: SupportedPlanTier =
+        rawTier === 'business_pro' ? 'business_pro' : rawTier === 'personal_pro' ? 'personal_pro' : 'free';
+      const now = Date.now();
+      let updatePayload: Record<string, unknown>;
+
+      if (planTier === 'free' || rawCycle === 'free') {
+        updatePayload = {
+          isPro: false,
+          proActive: false,
+          planTier: 'free',
+          proPlan: 'free',
+          billingCycle: 'free',
+          startedAt: null,
+          expiresAt: null,
+          proExpiresAt: null,
+          redeemedCouponCode: null,
+          updatedAt: FieldValue.serverTimestamp(),
+        };
+      } else {
+        const cycle = rawCycle === 'monthly' || rawCycle === 'yearly' ? rawCycle : 'lifetime';
+        const days = cycle === 'monthly' ? customDays ?? 30 : cycle === 'yearly' ? customDays ?? 365 : 0;
+        const expiresAt = cycle === 'lifetime' ? null : now + days * DAY_MS;
+        const proPlan =
+          planTier === 'business_pro'
+            ? cycle === 'monthly'
+              ? 'business_monthly'
+              : cycle === 'yearly'
+              ? 'business_yearly'
+              : 'code'
+            : cycle;
+        updatePayload = {
+          isPro: true,
+          proActive: true,
+          planTier,
+          proPlan,
+          billingCycle: cycle,
+          startedAt: now,
+          expiresAt,
+          proExpiresAt: expiresAt,
+          redeemedCouponCode: null,
+          updatedAt: FieldValue.serverTimestamp(),
+        };
+      }
+
+      try {
+        await adminDb.collection('users').doc(targetUid).update(updatePayload);
+        res.json({ ok: true, uid: targetUid, ...updatePayload });
+      } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(res);
+          return;
+        }
+        console.error('Admin update subscription error:', err);
+        res.status(500).json({ error: 'ADMIN_UPDATE_SUBSCRIPTION_FAILED' });
+      }
+    }
+  );
+
   app.post(
     '/api/redeem-code',
     redeemIpLimiter,
@@ -1279,6 +1427,11 @@ Return JSON matching the schema with:
             }
           }
 
+          const previewResolved = resolveActivationPlanDetails(codeData.plan, {
+            tier: codeData.tier,
+            cycle: codeData.cycle,
+          });
+          const existingEntitlement = resolveUserEntitlement(userSnap.data());
           const existingOrgExpiresAt =
             orgSnap?.exists &&
             orgSnap.data()?.planTier === 'business_pro' &&
@@ -1287,7 +1440,10 @@ Return JSON matching the schema with:
               ? (orgSnap.data()?.expiresAt as number)
               : undefined;
           const existingUserExpiresAt =
-            userSnap.data()?.billingCycle !== 'trial' && typeof userSnap.data()?.expiresAt === 'number'
+            existingEntitlement.isPro &&
+            existingEntitlement.planTier === previewResolved.planTier &&
+            userSnap.data()?.billingCycle !== 'trial' &&
+            typeof userSnap.data()?.expiresAt === 'number'
               ? (userSnap.data()?.expiresAt as number)
               : undefined;
 
@@ -1370,9 +1526,11 @@ Return JSON matching the schema with:
           const userUpdates: Record<string, unknown> = {
             uid,
             isPro: true,
+            proActive: true,
             proPlan: resolved.proPlan,
             planTier: resolved.planTier,
             billingCycle: resolved.billingCycle,
+            startedAt: Date.now(),
             expiresAt: resolved.expiresAt,
             proExpiresAt: resolved.expiresAt,
             activationCodeHash: codeHash,

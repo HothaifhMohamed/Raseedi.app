@@ -21,10 +21,17 @@ import {
   LogOut,
   LogIn,
   Lock,
+  ChevronDown,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { SUPPORT_CONFIG } from '../../constants/support';
 import { formatPricingMoney, PRICING_CONFIG, PricingCurrency } from '../../config/pricing';
+import { peekCouponInFirestore } from '../../services/firebase';
+import { verifySignedLicenseCode } from '../../services/licenseCodes';
+import {
+  calculateSubscriptionDatesUpdate,
+  shouldShowUpgradeActionButtons,
+} from '../../services/subscriptionHelpers';
 
 export const UpgradeModal: React.FC = () => {
   const {
@@ -82,16 +89,27 @@ export const UpgradeModal: React.FC = () => {
   const [isStartingTrial, setIsStartingTrial] = useState(false);
 
   const [activationCode, setActivationCode] = useState('');
+  const [isCouponBoxOpen, setIsCouponBoxOpen] = useState(false);
   const [codeError, setCodeError] = useState<string | null>(null);
   const [codeSuccess, setCodeSuccess] = useState<string | null>(null);
   const [isRedeeming, setIsRedeeming] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
   const [isSigningInGoogle, setIsSigningInGoogle] = useState(false);
+  const [pendingSwitchConfirmation, setPendingSwitchConfirmation] = useState<{
+    code: string;
+    targetTier: 'personal_pro' | 'business_pro';
+    targetCycle: 'monthly' | 'yearly' | 'lifetime';
+    replacedDaysRemaining: number | null;
+    replacedIsLifetime: boolean;
+  } | null>(null);
   const isDev = import.meta.env.DEV;
 
   React.useEffect(() => {
     if (!isUpgradeModalOpen) {
       setSubscriberActionMode('none');
+      setIsCouponBoxOpen(false);
+      setPendingSwitchConfirmation(null);
+      setCodeError(null);
       return;
     }
     if (isAdminUser) {
@@ -130,7 +148,10 @@ export const UpgradeModal: React.FC = () => {
     tierTab === 'business_pro' && selectedOrgId ? selectedOrgId : undefined;
   const isSubscribedUser = subscriptionSummary.isPro && !subscriptionSummary.isAdminOverride;
   const isPersonalSubscribedOnly = isSubscribedUser && !subscriptionSummary.isBusinessPro;
-  const showFullPricingCatalog = !isSubscribedUser || subscriberActionMode !== 'none';
+  const showSubscriberActionButtons = shouldShowUpgradeActionButtons(subscriptionSummary);
+  const isHighestTierPermanent = isSubscribedUser && !showSubscriberActionButtons;
+  const showFullPricingCatalog =
+    !isHighestTierPermanent && (!isSubscribedUser || subscriberActionMode !== 'none');
   const showPersonalCatalog = !isSubscribedUser || subscriberActionMode === 'switch';
 
   const formatSubDate = (ms: number | null) => {
@@ -217,26 +238,12 @@ export const UpgradeModal: React.FC = () => {
     }
   };
 
-  const handleRedeemCode = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const executeRedeemCode = async (trimmedCode: string) => {
+    setIsRedeeming(true);
     setCodeError(null);
     setCodeSuccess(null);
-
-    if (!user?.isLoggedIn) {
-      setCodeError(
-        isRTL
-          ? 'يلزم تسجيل الدخول بحساب جوجل أولاً قبل تفعيل أي كود اشتراك.'
-          : 'You must sign in with Google before redeeming an activation code.'
-      );
-      return;
-    }
-
-    const trimmed = activationCode.trim();
-    if (!trimmed) return;
-
-    setIsRedeeming(true);
     try {
-      const result = await redeemProCode(trimmed, targetBusinessOrgId);
+      const result = await redeemProCode(trimmedCode, targetBusinessOrgId);
       if (!result.ok) {
         setCodeError(
           result.error ||
@@ -247,7 +254,9 @@ export const UpgradeModal: React.FC = () => {
         return;
       }
 
+      setPendingSwitchConfirmation(null);
       setActivationCode('');
+      setSubscriberActionMode('none');
       const tierLabel =
         result.planTier === 'business_pro'
           ? isRTL
@@ -271,7 +280,11 @@ export const UpgradeModal: React.FC = () => {
             : 'Lifetime'
           : '';
       setCodeSuccess(
-        isRTL
+        result.isCumulativeRenewal
+          ? isRTL
+            ? `مبروك! 🎉 تم تجديد باقة ${tierLabel} وإضافة المدة الجديدة فوق رصيدك المتبقي بنجاح!`
+            : `Renewed! 🎉 ${tierLabel} duration added cumulatively onto your remaining balance!`
+          : isRTL
           ? `مبروك! 🎉 تم تفعيل باقة ${tierLabel}${cycleLabel ? ` (${cycleLabel})` : ''} بنجاح على حسابك!`
           : `Congratulations! 🎉 ${tierLabel}${cycleLabel ? ` (${cycleLabel})` : ''} activated successfully!`
       );
@@ -279,6 +292,65 @@ export const UpgradeModal: React.FC = () => {
     } finally {
       setIsRedeeming(false);
     }
+  };
+
+  const handleRedeemCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCodeError(null);
+    setCodeSuccess(null);
+
+    if (!user?.isLoggedIn) {
+      setCodeError(
+        isRTL
+          ? 'يجب تسجيل الدخول بحساب جوجل أولاً لربط الاشتراك وسحابياً.'
+          : 'Please sign in with Google first to link your subscription to the cloud.'
+      );
+      return;
+    }
+
+    const trimmed = activationCode.trim();
+    if (!trimmed) return;
+
+    // If user already has an active subscription, inspect target tier before redeeming so cross-tier switches warn first
+    if (isSubscribedUser) {
+      let targetTier: 'personal_pro' | 'business_pro' | null = null;
+      let targetCycle: 'monthly' | 'yearly' | 'lifetime' | null = null;
+
+      const signedCheck = verifySignedLicenseCode(trimmed);
+      if (signedCheck.valid) {
+        targetTier = signedCheck.planTier === 'business_pro' ? 'business_pro' : 'personal_pro';
+        targetCycle = signedCheck.cycle;
+      } else {
+        const peek = await peekCouponInFirestore(trimmed);
+        if (peek.exists && !peek.used && peek.planTier && peek.cycle) {
+          targetTier = peek.planTier === 'business_pro' ? 'business_pro' : 'personal_pro';
+          targetCycle = peek.cycle;
+        }
+      }
+
+      if (targetTier && targetCycle) {
+        const dateCheck = calculateSubscriptionDatesUpdate({
+          currentTier: subscriptionSummary.planTier,
+          currentExpiresAt: subscriptionSummary.expiresAt,
+          currentBillingCycle: subscriptionSummary.billingCycle,
+          currentIsPro: subscriptionSummary.isPro,
+          newTier: targetTier,
+          newCycle: targetCycle,
+        });
+        if (dateCheck.shouldWarnForfeiture) {
+          setPendingSwitchConfirmation({
+            code: trimmed,
+            targetTier,
+            targetCycle,
+            replacedDaysRemaining: dateCheck.replacedDaysRemaining,
+            replacedIsLifetime: dateCheck.replacedIsLifetime,
+          });
+          return;
+        }
+      }
+    }
+
+    await executeRedeemCode(trimmed);
   };
 
   const handleRestore = async () => {
@@ -599,35 +671,57 @@ export const UpgradeModal: React.FC = () => {
                 </div>
               )}
 
-              <div className="flex flex-wrap items-center gap-2 pt-1">
-                <button
-                  type="button"
-                  data-testid="subscriber-renew-toggle-btn"
-                  onClick={() => {
-                    const next = subscriberActionMode === 'renew' ? 'none' : 'renew';
-                    setSubscriberActionMode(next);
-                    if (next === 'renew') {
-                      setTierTab(subscriptionSummary.isBusinessPro ? 'business_pro' : 'personal_pro');
-                    }
-                  }}
-                  className="flex-1 min-w-[130px] py-2 px-3 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[40px]"
-                >
-                  {isRTL ? 'تجديد الاشتراك' : 'Renew Subscription'}
-                </button>
-                <button
-                  type="button"
-                  data-testid="subscriber-switch-toggle-btn"
-                  onClick={() => {
-                    const next = subscriberActionMode === 'switch' ? 'none' : 'switch';
-                    setSubscriberActionMode(next);
-                    if (next === 'switch') {
-                      setTierTab('business_pro');
-                    }
-                  }}
-                  className="flex-1 min-w-[130px] py-2 px-3 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-ink)] text-xs font-bold hover:border-[var(--color-accent)] min-h-[40px]"
-                >
-                  {isRTL ? 'تغيير الباقة' : 'Change Plan'}
-                </button>
+              {showSubscriberActionButtons && (
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    data-testid="subscriber-renew-toggle-btn"
+                    onClick={() => {
+                      const next = subscriberActionMode === 'renew' ? 'none' : 'renew';
+                      setSubscriberActionMode(next);
+                      if (next === 'renew') {
+                        setTierTab(subscriptionSummary.isBusinessPro ? 'business_pro' : 'personal_pro');
+                      }
+                    }}
+                    className="flex-1 min-w-[130px] py-2 px-3 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[40px]"
+                  >
+                    {isRTL ? 'تجديد الاشتراك' : 'Renew Subscription'}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="subscriber-switch-toggle-btn"
+                    onClick={() => {
+                      const next = subscriberActionMode === 'switch' ? 'none' : 'switch';
+                      setSubscriberActionMode(next);
+                      if (next === 'switch') {
+                        setTierTab(subscriptionSummary.isBusinessPro ? 'personal_pro' : 'business_pro');
+                      }
+                    }}
+                    className="flex-1 min-w-[130px] py-2 px-3 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-ink)] text-xs font-bold hover:border-[var(--color-accent)] min-h-[40px]"
+                  >
+                    {isRTL ? 'تغيير الباقة' : 'Change Plan'}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Plan Switch Informative Warning Banner when user selects "تغيير الباقة" */}
+          {isSubscribedUser && subscriberActionMode === 'switch' && showSubscriberActionButtons && (
+            <div
+              data-testid="subscriber-switch-info-banner"
+              className="p-3 rounded-xl bg-amber-500/12 border border-amber-500/35 text-xs text-amber-800 dark:text-amber-300 flex items-start gap-2"
+            >
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <div className="font-bold">
+                  {isRTL ? 'ملاحظة حول تغيير الباقة:' : 'Note about changing plans:'}
+                </div>
+                <div className="text-[11px] leading-relaxed">
+                  {isRTL
+                    ? 'التحويل إلى باقة مختلفة يستبدل المدة المتبقية من باقتك الحالية ويبدأ احتساب الباقة الجديدة من تاريخ التفعيل. أما تجديد نفس الباقة فيضيف المدة الجديدة تراكمياً.'
+                    : 'Switching to a different plan replaces your remaining days and starts fresh, whereas renewing the same plan stacks cumulatively.'}
+                </div>
               </div>
             </div>
           )}
@@ -963,128 +1057,193 @@ export const UpgradeModal: React.FC = () => {
             </div>
           )}
 
-          {/* Cloud Backup Note */}
-          <div className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] text-[11px] text-[var(--color-muted)] leading-relaxed flex items-start gap-2">
-            <Cloud className="w-4 h-4 text-[var(--color-accent)] shrink-0 mt-0.5" />
-            <span>
-              {isRTL ? (
-                <>
-                  عند ربط بريدك الإلكتروني في <bdi dir="ltr">Google</bdi>، يتم حفظ اشتراك <bdi dir="ltr">PRO</bdi> وبياناتك سحابياً لاستعادتها فوراً على أي هاتف جديد.
-                </>
-              ) : (
-                'Link your Google account to automatically preserve your PRO access and financial backups across devices.'
-              )}
-            </span>
-          </div>
-
-          {/* Feature List */}
-          <div className="space-y-2 pt-1 border-t border-[var(--color-line)]">
-            <h3 className="text-xs font-semibold text-[var(--color-muted)] uppercase tracking-wider">
-              {tierTab === 'business_pro'
-                ? isRTL
-                  ? 'مزايا باقة الأعمال والمؤسسات'
-                  : 'Enterprise Capabilities'
-                : isRTL
-                ? 'مزايا باقة الأفراد PRO'
-                : 'Personal PRO Benefits'}
-            </h3>
-            <ul className="space-y-2 text-xs text-[var(--color-ink)]">
-              {activeFeatures.map((feat, idx) => (
-                <li key={idx} className="flex items-start gap-2">
-                  <div className="w-4 h-4 rounded-full bg-[var(--color-accent)]/15 text-[var(--color-accent)] flex items-center justify-center shrink-0 mt-0.5">
-                    <Check className="w-2.5 h-2.5" />
-                  </div>
-                  <span>{feat}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          {/* Activation Code Redemption ("لديك كود تفعيل؟") */}
-          <form
-            onSubmit={handleRedeemCode}
-            data-testid="upgrade-coupon-form"
-            className={`p-3 rounded-xl border space-y-2.5 ${
-              !user?.isLoggedIn
-                ? 'bg-amber-500/5 border-amber-500/30'
-                : 'bg-[var(--color-bg)] border-[var(--color-line)]'
-            }`}
-          >
-            <div className="flex items-center justify-between gap-2">
-              <label
-                htmlFor="upgrade-coupon-code-input"
-                className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-ink)]"
-              >
-                <KeyRound className="w-3.5 h-3.5 text-[var(--color-accent)] shrink-0" />
-                <span>{isRTL ? 'لديك كود تفعيل؟' : 'Have an activation code?'}</span>
-              </label>
-              {!user?.isLoggedIn && (
-                <button
-                  type="button"
-                  data-testid="upgrade-code-google-required-btn"
-                  disabled={isSigningInGoogle}
-                  onClick={() => void handleGoogleSignInInline()}
-                  className="text-[11px] font-semibold text-[var(--color-accent)] hover:underline shrink-0"
-                >
-                  {isRTL ? 'تسجيل دخول جوجل' : 'Sign in with Google'}
-                </button>
-              )}
-            </div>
-
-            {!user?.isLoggedIn && (
-              <div
-                data-testid="upgrade-guest-code-lock"
-                className="p-2 rounded-lg bg-amber-500/12 border border-amber-500/30 text-[11px] text-amber-800 dark:text-amber-300 flex items-center gap-2 font-medium"
-              >
-                <Lock className="w-3.5 h-3.5 shrink-0" />
+          {/* Cloud Backup & Feature List (hidden cleanly on highest Business Lifetime permanent plan) */}
+          {!isHighestTierPermanent && (
+            <>
+              <div className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] text-[11px] text-[var(--color-muted)] leading-relaxed flex items-start gap-2">
+                <Cloud className="w-4 h-4 text-[var(--color-accent)] shrink-0 mt-0.5" />
                 <span>
-                  {isRTL
-                    ? 'يلزم تسجيل الدخول بحساب جوجل لتفعيل أكواد الاشتراك وربطها بحسابك.'
-                    : 'Google sign-in is required before activating a license code.'}
+                  {isRTL ? (
+                    <>
+                      عند ربط بريدك الإلكتروني في <bdi dir="ltr">Google</bdi>، يتم حفظ اشتراك <bdi dir="ltr">PRO</bdi> وبياناتك سحابياً لاستعادتها فوراً على أي هاتف جديد.
+                    </>
+                  ) : (
+                    'Link your Google account to automatically preserve your PRO access and financial backups across devices.'
+                  )}
                 </span>
               </div>
-            )}
 
-            <div className="flex items-center gap-2">
-              <input
-                id="upgrade-coupon-code-input"
-                type="text"
-                value={activationCode}
-                onChange={(e) => {
-                  setActivationCode(e.target.value);
-                  setCodeError(null);
-                }}
-                placeholder="RSD-BIZ-XXXX-XXXX / RSD-PRO-XXXX-XXXX"
-                dir="ltr"
-                disabled={isRedeeming}
-                data-testid="upgrade-license-code-input"
-                className="flex-1 px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs font-mono text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px] disabled:opacity-60"
-              />
-              <button
-                type="submit"
-                disabled={isRedeeming || !activationCode.trim()}
-                data-testid="upgrade-activate-code-btn"
-                className="px-3.5 py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-semibold hover:opacity-95 transition-opacity min-h-[44px] disabled:opacity-50 shrink-0 flex items-center gap-1.5"
-              >
-                {isRedeeming && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                <span>{isRTL ? 'تفعيل' : 'Activate'}</span>
-              </button>
-            </div>
-            {codeError && (
-              <p data-testid="upgrade-code-error" className="text-[11px] text-[var(--color-expense)] font-medium">
-                {codeError}
-              </p>
-            )}
-            {codeSuccess && (
-              <div
-                data-testid="upgrade-code-success"
-                className="p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 text-xs font-bold flex items-center gap-2 animate-in fade-in duration-150"
-              >
-                <Sparkles className="w-4 h-4 text-emerald-500 shrink-0" />
-                <span>{codeSuccess}</span>
+              <div className="space-y-2 pt-1 border-t border-[var(--color-line)]">
+                <h3 className="text-xs font-semibold text-[var(--color-muted)] uppercase tracking-wider">
+                  {tierTab === 'business_pro'
+                    ? isRTL
+                      ? 'مزايا باقة الأعمال والمؤسسات'
+                      : 'Enterprise Capabilities'
+                    : isRTL
+                    ? 'مزايا باقة الأفراد PRO'
+                    : 'Personal PRO Benefits'}
+                </h3>
+                <ul className="space-y-2 text-xs text-[var(--color-ink)]">
+                  {activeFeatures.map((feat, idx) => (
+                    <li key={idx} className="flex items-start gap-2">
+                      <div className="w-4 h-4 rounded-full bg-[var(--color-accent)]/15 text-[var(--color-accent)] flex items-center justify-center shrink-0 mt-0.5">
+                        <Check className="w-2.5 h-2.5" />
+                      </div>
+                      <span>{feat}</span>
+                    </li>
+                  ))}
+                </ul>
               </div>
-            )}
-          </form>
+
+              {/* Activation Code Toggle & Collapsible Form (Hidden by default) */}
+              <div className="space-y-2.5">
+                <button
+                  type="button"
+                  data-testid="toggle-coupon-box-btn"
+                  aria-expanded={isCouponBoxOpen}
+                  onClick={() => {
+                    setIsCouponBoxOpen((prev) => !prev);
+                    setCodeError(null);
+                  }}
+                  className="w-full py-2.5 px-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-xs font-semibold text-[var(--color-ink)] flex items-center justify-between gap-2 transition-colors min-h-[44px]"
+                >
+                  <span className="flex items-center gap-2">
+                    <KeyRound className="w-4 h-4 text-[var(--color-accent)] shrink-0" />
+                    <span>{isRTL ? 'هل لديك كود تفعيل؟' : 'Have an activation code?'}</span>
+                  </span>
+                  <ChevronDown
+                    className={`w-4 h-4 text-[var(--color-muted)] transition-transform ${
+                      isCouponBoxOpen ? 'rotate-180' : ''
+                    }`}
+                  />
+                </button>
+
+                {(isCouponBoxOpen || codeSuccess || codeError) && (
+                  <form
+                    onSubmit={handleRedeemCode}
+                    data-testid="upgrade-coupon-form"
+                    className={`p-3 rounded-xl border space-y-2.5 animate-in fade-in duration-150 ${
+                      !user?.isLoggedIn
+                        ? 'bg-amber-500/5 border-amber-500/30'
+                        : 'bg-[var(--color-bg)] border-[var(--color-line)]'
+                    }`}
+                  >
+                    {!user?.isLoggedIn && (
+                      <div
+                        data-testid="upgrade-guest-code-lock"
+                        className="p-2.5 rounded-lg bg-amber-500/12 border border-amber-500/30 text-[11px] text-amber-800 dark:text-amber-300 flex items-center justify-between gap-2 font-medium"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Lock className="w-3.5 h-3.5 shrink-0" />
+                          <span>
+                            {isRTL
+                              ? 'يجب تسجيل الدخول بحساب جوجل أولاً لربط الاشتراك وسحابياً.'
+                              : 'Please sign in with Google first to link your subscription to the cloud.'}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          data-testid="upgrade-code-google-required-btn"
+                          disabled={isSigningInGoogle}
+                          onClick={() => void handleGoogleSignInInline()}
+                          className="text-[11px] font-bold text-[var(--color-accent)] hover:underline shrink-0"
+                        >
+                          {isRTL ? 'دخول بجوجل' : 'Google Login'}
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-2">
+                      <input
+                        id="upgrade-coupon-code-input"
+                        type="text"
+                        value={activationCode}
+                        onChange={(e) => {
+                          setActivationCode(e.target.value);
+                          setCodeError(null);
+                        }}
+                        placeholder="RSD-BIZ-XXXX-XXXX / RSD-PRO-XXXX-XXXX"
+                        dir="ltr"
+                        disabled={isRedeeming}
+                        data-testid="upgrade-license-code-input"
+                        className="flex-1 px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs font-mono text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px] disabled:opacity-60"
+                      />
+                      <button
+                        type="submit"
+                        disabled={isRedeeming || !activationCode.trim()}
+                        data-testid="upgrade-activate-code-btn"
+                        className="px-3.5 py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-semibold hover:opacity-95 transition-opacity min-h-[44px] disabled:opacity-50 shrink-0 flex items-center gap-1.5"
+                      >
+                        {isRedeeming && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        <span>{isRTL ? 'تفعيل' : 'Activate'}</span>
+                      </button>
+                    </div>
+                    {codeError && (
+                      <p data-testid="upgrade-code-error" className="text-[11px] text-[var(--color-expense)] font-medium">
+                        {codeError}
+                      </p>
+                    )}
+                    {codeSuccess && (
+                      <div
+                        data-testid="upgrade-code-success"
+                        className="p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 text-xs font-bold flex items-center gap-2 animate-in fade-in duration-150"
+                      >
+                        <Sparkles className="w-4 h-4 text-emerald-500 shrink-0" />
+                        <span>{codeSuccess}</span>
+                      </div>
+                    )}
+                  </form>
+                )}
+
+                {/* Plan-Switch Forfeiture Confirmation Dialog */}
+                {pendingSwitchConfirmation && (
+                  <div
+                    data-testid="plan-switch-warning-modal"
+                    className="p-3.5 rounded-xl bg-amber-500/15 border border-amber-500/50 space-y-3 animate-in fade-in duration-150"
+                  >
+                    <div className="flex items-start gap-2.5">
+                      <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                      <div className="space-y-1 text-xs">
+                        <h4 className="font-bold text-amber-900 dark:text-amber-200">
+                          {isRTL ? 'تنبيه: ستفقد المدة المتبقية عند تغيير الباقة' : 'Warning: Remaining Plan Time Will Be Replaced'}
+                        </h4>
+                        <p className="text-[11px] text-amber-800 dark:text-amber-300 leading-relaxed">
+                          {pendingSwitchConfirmation.replacedIsLifetime
+                            ? isRTL
+                              ? 'أنت مشترك حالياً في باقة دائمة. عند التحويل لباقة أخرى سيتم استبدال باقتك السابقة بالباقة الجديدة.'
+                              : 'You currently have a lifetime plan. Switching tiers replaces your previous plan with the new one.'
+                            : isRTL
+                            ? `لا يزال متبقياً في باقتك الحالية (${pendingSwitchConfirmation.replacedDaysRemaining ?? 0} يوم). عند التحويل إلى باقة أخرى، ستفقد المدة المتبقية من الباقة القديمة ويبدأ احتساب الباقة الجديدة من اليوم.`
+                            : `You still have ${pendingSwitchConfirmation.replacedDaysRemaining ?? 0} day(s) remaining on your current plan. Switching to another tier forfeits those remaining days and starts the new plan today.`}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={isRedeeming}
+                        data-testid="confirm-plan-switch-btn"
+                        onClick={() => void executeRedeemCode(pendingSwitchConfirmation.code)}
+                        className="flex-1 py-2 px-3 rounded-lg bg-amber-600 text-white text-xs font-bold min-h-[38px] flex items-center justify-center gap-1.5 disabled:opacity-60"
+                      >
+                        {isRedeeming && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        <span>{isRTL ? 'تأكيد التحويل والتفعيل' : 'Confirm Switch & Activate'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isRedeeming}
+                        data-testid="cancel-plan-switch-btn"
+                        onClick={() => setPendingSwitchConfirmation(null)}
+                        className="py-2 px-3 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-ink)] text-xs font-semibold min-h-[38px]"
+                      >
+                        {isRTL ? 'إلغاء' : 'Cancel'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
 
           {/* Follow Us on Social Media */}
           <div className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-2" data-testid="upgrade-follow-us">
@@ -1141,44 +1300,46 @@ export const UpgradeModal: React.FC = () => {
 
         {/* Footer Actions */}
         <div className="p-4 sm:p-5 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-[var(--color-line)] bg-[var(--color-bg)] space-y-2.5 shrink-0">
-          {isDev ? (
-            <button
-              type="button"
-              onClick={handleDevActivate}
-              className="w-full py-2.5 px-4 bg-[var(--color-accent)] text-[var(--color-on-accent)] font-medium text-sm rounded-xl hover:opacity-95 transition-opacity flex items-center justify-center gap-2 shadow-sm min-h-[44px]"
-            >
-              <Sparkles className="w-4 h-4" />
-              <span>
-                {tierTab === 'business_pro'
-                  ? isRTL
-                    ? `معاينة Business PRO (${selectedPriceDisplay})`
-                    : `Preview Business PRO (${selectedPriceDisplay})`
-                  : isRTL
-                  ? `معاينة Personal PRO (${selectedPriceDisplay})`
-                  : `Preview Personal PRO (${selectedPriceDisplay})`}
-              </span>
-            </button>
-          ) : (
-            <div className="grid grid-cols-2 gap-2">
-              <a
-                href={SUPPORT_CONFIG.whatsappUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="py-2.5 px-3 bg-[var(--color-accent)] text-[var(--color-on-accent)] font-semibold text-xs rounded-xl hover:opacity-95 transition-opacity flex items-center justify-center gap-1.5 min-h-[44px]"
+          {!isHighestTierPermanent && (
+            isDev ? (
+              <button
+                type="button"
+                onClick={handleDevActivate}
+                className="w-full py-2.5 px-4 bg-[var(--color-accent)] text-[var(--color-on-accent)] font-medium text-sm rounded-xl hover:opacity-95 transition-opacity flex items-center justify-center gap-2 shadow-sm min-h-[44px]"
               >
-                <MessageCircle className="w-4 h-4 shrink-0" />
-                <span>{isRTL ? 'طلب كود عبر واتساب' : 'Get Code via WhatsApp'}</span>
-              </a>
-              <a
-                href={`mailto:${SUPPORT_CONFIG.email}?subject=${encodeURIComponent(
-                  tierTab === 'business_pro' ? 'طلب باقة رصيدي للأعمال' : 'طلب اشتراك رصيدي PRO'
-                )}`}
-                className="py-2.5 px-3 bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-ink)] font-semibold text-xs rounded-xl hover:border-[var(--color-accent)] transition-colors flex items-center justify-center gap-1.5 min-h-[44px]"
-              >
-                <Mail className="w-4 h-4 text-[var(--color-accent)] shrink-0" />
-                <span>{isRTL ? 'طلب عبر البريد' : 'Order via Email'}</span>
-              </a>
-            </div>
+                <Sparkles className="w-4 h-4" />
+                <span>
+                  {tierTab === 'business_pro'
+                    ? isRTL
+                      ? `معاينة Business PRO (${selectedPriceDisplay})`
+                      : `Preview Business PRO (${selectedPriceDisplay})`
+                    : isRTL
+                    ? `معاينة Personal PRO (${selectedPriceDisplay})`
+                    : `Preview Personal PRO (${selectedPriceDisplay})`}
+                </span>
+              </button>
+            ) : (
+              <div className="grid grid-cols-2 gap-2">
+                <a
+                  href={SUPPORT_CONFIG.whatsappUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="py-2.5 px-3 bg-[var(--color-accent)] text-[var(--color-on-accent)] font-semibold text-xs rounded-xl hover:opacity-95 transition-opacity flex items-center justify-center gap-1.5 min-h-[44px]"
+                >
+                  <MessageCircle className="w-4 h-4 shrink-0" />
+                  <span>{isRTL ? 'طلب كود عبر واتساب' : 'Get Code via WhatsApp'}</span>
+                </a>
+                <a
+                  href={`mailto:${SUPPORT_CONFIG.email}?subject=${encodeURIComponent(
+                    tierTab === 'business_pro' ? 'طلب باقة رصيدي للأعمال' : 'طلب اشتراك رصيدي PRO'
+                  )}`}
+                  className="py-2.5 px-3 bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-ink)] font-semibold text-xs rounded-xl hover:border-[var(--color-accent)] transition-colors flex items-center justify-center gap-1.5 min-h-[44px]"
+                >
+                  <Mail className="w-4 h-4 text-[var(--color-accent)] shrink-0" />
+                  <span>{isRTL ? 'طلب عبر البريد' : 'Order via Email'}</span>
+                </a>
+              </div>
+            )
           )}
 
           <div className="flex items-center justify-between text-xs text-[var(--color-muted)] px-1">

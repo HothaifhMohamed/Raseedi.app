@@ -128,7 +128,7 @@ export const MoreMenu: React.FC = () => {
   const ArrowIcon = isRTL ? ChevronLeft : ChevronRight;
 
   return (
-    <div className="flex flex-col flex-1 px-4 py-3 pb-24 space-y-4" dir={isRTL ? 'rtl' : 'ltr'}>
+    <div className="flex flex-col flex-1 min-w-0 w-full px-4 py-3 pb-24 space-y-4" dir={isRTL ? 'rtl' : 'ltr'}>
       {/* 1. HERO CARD: Admin Code Panel for Admin, Active Subscriber Summary, or Free Upgrade */}
       {isAdminUser ? (
         <div

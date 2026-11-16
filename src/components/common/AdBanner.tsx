@@ -99,7 +99,7 @@ export const AdBanner: React.FC<AdBannerProps> = ({
   if (variant === 'native-card') {
     return (
       <div
-        className={`bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-3 space-y-2 transition-colors ${className}`}
+        className={`bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-3 space-y-2 transition-colors max-w-full overflow-hidden ${className}`}
         dir={isRTL ? 'rtl' : 'ltr'}
         data-ad-variant="native-card"
       >
@@ -118,11 +118,11 @@ export const AdBanner: React.FC<AdBannerProps> = ({
         </div>
 
         {canTryAdSense ? (
-          <div className="overflow-hidden rounded-lg min-h-[64px]">
+          <div className="overflow-hidden max-w-full rounded-lg min-h-[64px]">
             <ins
               ref={adRef}
               className="adsbygoogle"
-              style={{ display: 'block' }}
+              style={{ display: 'block', maxWidth: '100%', overflow: 'hidden' }}
               data-ad-client={adSenseClient}
               data-ad-slot={resolvedSlot}
               data-ad-format="fluid"
@@ -152,12 +152,12 @@ export const AdBanner: React.FC<AdBannerProps> = ({
 
   return (
     <div
-      className={`bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl px-3 py-2.5 transition-colors ${className}`}
+      className={`bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl px-3 py-2.5 transition-colors max-w-full overflow-hidden ${className}`}
       dir={isRTL ? 'rtl' : 'ltr'}
       data-ad-variant="banner"
     >
       {canTryAdSense ? (
-        <div className="space-y-1.5">
+        <div className="space-y-1.5 max-w-full overflow-hidden">
           <div className="flex items-center justify-between gap-2">
             <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[var(--color-bg)] border border-[var(--color-line)] text-[var(--color-muted)]">
               {isRTL ? 'إعلان' : 'Ad'}
@@ -171,15 +171,17 @@ export const AdBanner: React.FC<AdBannerProps> = ({
               <span>{isRTL ? 'إزالة الإعلانات' : 'Remove Ads'}</span>
             </button>
           </div>
-          <ins
-            ref={adRef}
-            className="adsbygoogle"
-            style={{ display: 'block' }}
-            data-ad-client={adSenseClient}
-            data-ad-slot={resolvedSlot}
-            data-ad-format="horizontal"
-            data-full-width-responsive="true"
-          />
+          <div className="overflow-hidden max-w-full">
+            <ins
+              ref={adRef}
+              className="adsbygoogle"
+              style={{ display: 'block', maxWidth: '100%', overflow: 'hidden' }}
+              data-ad-client={adSenseClient}
+              data-ad-slot={resolvedSlot}
+              data-ad-format="horizontal"
+              data-full-width-responsive="true"
+            />
+          </div>
         </div>
       ) : (
         <div className="flex items-center justify-between gap-2.5">

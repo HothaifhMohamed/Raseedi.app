@@ -50,6 +50,10 @@
           "enum": ["free", "monthly", "yearly", "lifetime", "trial", "code"],
           "description": "Server-managed billing cycle"
         },
+        "startedAt": {
+          "type": "number",
+          "description": "Subscription start or renewal epoch milliseconds (null for free)"
+        },
         "expiresAt": {
           "type": "number",
           "description": "Server-managed subscription expiration epoch milliseconds (null for lifetime/free)"

@@ -100,6 +100,7 @@ import {
   signOutGoogle,
   ensureUserProfile,
   fetchUserProfile,
+  subscribeUserProfile,
   fetchCloudBackupMeta,
   saveCloudBackup,
   fetchCloudBackup,
@@ -130,6 +131,7 @@ import type { BackupHistorySummary } from '../services/backupHistory';
 import { isAuthorizedAdminUser, verifySignedLicenseCode } from '../services/licenseCodes';
 import {
   UserSubscriptionSummary,
+  calculateSubscriptionDatesUpdate,
   computeUserSubscriptionSummary,
   resolvePostGoogleSignInAction,
 } from '../services/subscriptionHelpers';
@@ -417,6 +419,7 @@ interface AppContextType {
     planTier?: PlanTier;
     billingCycle?: VerifiedProEntitlement['billingCycle'];
     expiresAt?: number | null;
+    isCumulativeRenewal?: boolean;
   }>;
   startBusinessTrial: (orgId?: string) => Promise<{ ok: boolean; error?: string }>;
   devActivateProPreview: (tier?: 'personal_pro' | 'business_pro') => void;
@@ -613,6 +616,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // Verified server PRO entitlement
   const [verifiedPro, setVerifiedPro] = useState<VerifiedProEntitlement | null>(null);
+  const latestVerifiedProRef = React.useRef<VerifiedProEntitlement | null>(null);
+  latestVerifiedProRef.current = verifiedPro;
   const [devProTierPreview, setDevProTierPreview] = useState<null | 'personal_pro' | 'business_pro'>(null);
   const [scanQuota, setScanQuota] = useState<ScanQuotaInfo | null>(null);
 
@@ -1151,9 +1156,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     []
   );
 
-  const latestVerifiedProRef = React.useRef<VerifiedProEntitlement | null>(null);
-  latestVerifiedProRef.current = verifiedPro;
-
   const applyVerifiedProState = useCallback(async (entitlement: VerifiedProEntitlement | null) => {
     latestVerifiedProRef.current = entitlement;
     setVerifiedPro(entitlement);
@@ -1370,6 +1372,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       planTier?: PlanTier;
       billingCycle?: VerifiedProEntitlement['billingCycle'];
       expiresAt?: number | null;
+      isCumulativeRenewal?: boolean;
     }> => {
       const isEn = latestPersonalRef.current.settings.language === 'en';
 
@@ -1378,8 +1381,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return {
           ok: false,
           error: isEn
-            ? 'Guest accounts cannot activate license codes. Please sign in with Google first to bind your subscription to your account.'
-            : 'لا يمكن لحساب الزائر تفعيل أكواد الاشتراك. يرجى تسجيل الدخول بحساب جوجل أولاً لربط الاشتراك بحسابك.',
+            ? 'Please sign in with Google first to link your subscription to the cloud.'
+            : 'يجب تسجيل الدخول بحساب جوجل أولاً لربط الاشتراك وسحابياً.',
         };
       }
 
@@ -1389,6 +1392,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         proPlan: ProPlanCode;
         planTier: PlanTier;
         billingCycle: BillingCycle;
+        startedAt?: number | null;
         expiresAt: number | null;
       }) => {
         const now = Date.now();
@@ -1399,7 +1403,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           proPlan: params.proPlan,
           planTier: params.planTier,
           billingCycle: params.billingCycle,
-          startedAt: now,
+          startedAt: params.startedAt ?? now,
           expiresAt: params.expiresAt,
           proExpiresAt: params.expiresAt,
           verifiedAt: now,
@@ -1512,6 +1516,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               proPlan: couponRes.proPlan,
               planTier: couponRes.planTier,
               billingCycle: couponRes.billingCycle,
+              startedAt: couponRes.startedAt ?? Date.now(),
               expiresAt: couponRes.expiresAt ?? null,
             });
             return {
@@ -1519,6 +1524,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               planTier: couponRes.planTier,
               billingCycle: couponRes.billingCycle,
               expiresAt: couponRes.expiresAt ?? null,
+              isCumulativeRenewal: couponRes.isCumulativeRenewal,
             };
           }
         } catch (err) {
@@ -1576,6 +1582,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }
         }
 
+        const currentEnt = latestVerifiedProRef.current;
+        const currentSummary = computeUserSubscriptionSummary({
+          verifiedPro: currentEnt,
+          isAdminUser: isAdminUserRef.current,
+        });
+        const targetTier = signedResult.planTier === 'business_pro' ? 'business_pro' : 'personal_pro';
+        const dateCalc = calculateSubscriptionDatesUpdate({
+          currentTier: currentSummary.planTier,
+          currentExpiresAt: currentSummary.expiresAt,
+          currentBillingCycle: currentSummary.billingCycle,
+          currentIsPro: currentSummary.isPro,
+          newTier: targetTier,
+          newCycle: signedResult.cycle,
+          nowMs: Date.now(),
+        });
+
         const uid = auth.currentUser?.uid || latestPersonalRef.current.user?.id || 'local';
         await applyRedeemedEntitlement({
           uid,
@@ -1583,13 +1605,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           proPlan: signedResult.proPlan,
           planTier: signedResult.planTier,
           billingCycle: signedResult.billingCycle,
-          expiresAt: signedResult.expiresAt,
+          startedAt: dateCalc.startedAt,
+          expiresAt: dateCalc.expiresAt,
         });
         return {
           ok: true,
           planTier: signedResult.planTier,
           billingCycle: signedResult.billingCycle,
-          expiresAt: signedResult.expiresAt,
+          expiresAt: dateCalc.expiresAt,
+          isCumulativeRenewal: dateCalc.isCumulativeRenewal,
         };
       }
 
@@ -1679,9 +1703,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   );
 
   const restorePurchases = useCallback(async (): Promise<boolean> => {
-    if (isEntitlementActive(verifiedPro)) {
-      return true;
-    }
     if (auth.currentUser) {
       try {
         const profile = await fetchUserProfile(auth.currentUser.uid);
@@ -1689,9 +1710,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           await applyVerifiedProState({
             uid: auth.currentUser.uid,
             isPro: true,
+            proActive: true,
             proPlan: profile.proPlan || 'code',
             planTier: profile.planTier,
             billingCycle: profile.billingCycle,
+            startedAt: profile.startedAt ?? null,
             expiresAt: profile.proExpiresAt ?? profile.expiresAt,
             proExpiresAt: profile.proExpiresAt ?? profile.expiresAt,
             verifiedAt: Date.now(),
@@ -1699,11 +1722,27 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           await refreshScanQuota();
           return true;
         }
+        if (profile && !isEntitlementActive(profile)) {
+          await applyVerifiedProState({
+            uid: auth.currentUser.uid,
+            isPro: false,
+            proActive: false,
+            proPlan: 'free',
+            planTier: 'free',
+            billingCycle: 'free',
+            startedAt: null,
+            expiresAt: null,
+            proExpiresAt: null,
+            verifiedAt: Date.now(),
+          });
+          await refreshScanQuota();
+          return false;
+        }
       } catch (err) {
         console.warn('Cloud PRO restore error:', err);
       }
     }
-    return false;
+    return isEntitlementActive(verifiedPro);
   }, [verifiedPro, applyVerifiedProState, refreshScanQuota]);
 
   // Filters
@@ -2179,6 +2218,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               proPlan: active ? profile.proPlan || 'code' : 'free',
               planTier: resolvePlanTierFromProfile(profile),
               billingCycle: active ? profile.billingCycle || 'lifetime' : 'free',
+              startedAt: profile.startedAt ?? null,
               expiresAt: profile.proExpiresAt ?? profile.expiresAt ?? null,
               proExpiresAt: profile.proExpiresAt ?? profile.expiresAt ?? null,
               verifiedAt: Date.now(),
@@ -2224,6 +2264,44 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     return () => unsubscribe();
   }, [applyCloudBackupLocally, applyVerifiedProState, refreshScanQuota]);
+
+  // Real-time subscription sync from Firestore /users/{uid} (reflects Admin edits/cancellations immediately)
+  useEffect(() => {
+    if (!user?.isLoggedIn || !user.id || auth.currentUser?.uid !== user.id) return;
+    const unsub = subscribeUserProfile(user.id, (profile, fromCache) => {
+      if (!profile || fromCache) return;
+      const active = isEntitlementActive(profile);
+      const nextTier = resolvePlanTierFromProfile(profile);
+      const nextExpiry = profile.proExpiresAt ?? profile.expiresAt ?? null;
+      const nextCycle = active ? profile.billingCycle || 'lifetime' : 'free';
+      const cur = latestVerifiedProRef.current;
+      const curActive = Boolean(cur?.isPro || cur?.proActive);
+
+      const changed =
+        curActive !== active ||
+        (cur?.planTier || 'free') !== nextTier ||
+        (cur?.billingCycle || 'free') !== nextCycle ||
+        (cur?.proExpiresAt ?? cur?.expiresAt ?? null) !== nextExpiry ||
+        (cur?.startedAt ?? null) !== (profile.startedAt ?? null);
+
+      if (changed) {
+        void applyVerifiedProState({
+          uid: user.id,
+          isPro: active,
+          proActive: active,
+          proPlan: active ? profile.proPlan || 'code' : 'free',
+          planTier: nextTier,
+          billingCycle: nextCycle,
+          startedAt: profile.startedAt ?? null,
+          expiresAt: nextExpiry,
+          proExpiresAt: nextExpiry,
+          verifiedAt: Date.now(),
+        });
+        void refreshScanQuota();
+      }
+    });
+    return () => unsub();
+  }, [user?.isLoggedIn, user?.id, applyVerifiedProState, refreshScanQuota]);
 
   // Subscribe to user's organization memberships (/users/{uid}/orgRefs)
   useEffect(() => {

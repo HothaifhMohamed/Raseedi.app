@@ -232,6 +232,190 @@ export function shouldShowAds(
   return !summary.isAdminOverride && !summary.isPro;
 }
 
+export function shouldShowUpgradeActionButtons(
+  summary: Pick<UserSubscriptionSummary, 'isPro' | 'isBusinessPro' | 'isLifetime' | 'isAdminOverride'>
+): boolean {
+  if (summary.isAdminOverride || !summary.isPro) return false;
+  return !(summary.isBusinessPro && summary.isLifetime);
+}
+
+export interface SubscriptionDateUpdateResult {
+  actionMode: 'new' | 'cumulative_renewal' | 'plan_switch';
+  baseMs: number;
+  startedAt: number;
+  expiresAt: number | null;
+  isCumulativeRenewal: boolean;
+  isPlanSwitch: boolean;
+  shouldWarnForfeiture: boolean;
+  replacedDaysRemaining: number | null;
+  replacedIsLifetime: boolean;
+}
+
+export function calculateSubscriptionDatesUpdate(params: {
+  currentTier: PlanTier;
+  currentExpiresAt: number | null | undefined;
+  currentBillingCycle?: BillingCycle | null;
+  currentIsPro: boolean;
+  newTier: Exclude<PlanTier, 'free'>;
+  newCycle: 'monthly' | 'yearly' | 'lifetime';
+  nowMs?: number;
+}): SubscriptionDateUpdateResult {
+  const {
+    currentTier,
+    currentExpiresAt,
+    currentBillingCycle = null,
+    currentIsPro,
+    newTier,
+    newCycle,
+    nowMs = Date.now(),
+  } = params;
+
+  const isCurrentLifetime =
+    currentIsPro &&
+    currentTier !== 'free' &&
+    (currentBillingCycle === 'lifetime' || currentExpiresAt === null || currentExpiresAt === undefined);
+  const hasFutureExpiry =
+    currentIsPro &&
+    currentTier !== 'free' &&
+    typeof currentExpiresAt === 'number' &&
+    Number.isFinite(currentExpiresAt) &&
+    currentExpiresAt > nowMs;
+
+  const isCurrentActive = isCurrentLifetime || hasFutureExpiry;
+  const isSameTier = isCurrentActive && currentTier === newTier;
+  const isPlanSwitch = isCurrentActive && currentTier !== newTier;
+
+  const replacedDaysRemaining = !isPlanSwitch
+    ? 0
+    : isCurrentLifetime
+    ? null
+    : Math.max(1, Math.ceil(((currentExpiresAt as number) - nowMs) / SUBSCRIPTION_DAY_MS));
+
+  if (newCycle === 'lifetime') {
+    return {
+      actionMode: isPlanSwitch ? 'plan_switch' : isSameTier ? 'cumulative_renewal' : 'new',
+      baseMs: nowMs,
+      startedAt: nowMs,
+      expiresAt: null,
+      isCumulativeRenewal: false,
+      isPlanSwitch,
+      shouldWarnForfeiture: isPlanSwitch,
+      replacedDaysRemaining,
+      replacedIsLifetime: isPlanSwitch && isCurrentLifetime,
+    };
+  }
+
+  const durationDays = newCycle === 'monthly' ? 30 : 365;
+  const durationMs = durationDays * SUBSCRIPTION_DAY_MS;
+
+  if (isSameTier && isCurrentLifetime) {
+    return {
+      actionMode: 'cumulative_renewal',
+      baseMs: nowMs,
+      startedAt: nowMs,
+      expiresAt: null,
+      isCumulativeRenewal: false,
+      isPlanSwitch: false,
+      shouldWarnForfeiture: false,
+      replacedDaysRemaining: 0,
+      replacedIsLifetime: false,
+    };
+  }
+
+  if (isSameTier && hasFutureExpiry && typeof currentExpiresAt === 'number') {
+    return {
+      actionMode: 'cumulative_renewal',
+      baseMs: currentExpiresAt,
+      startedAt: nowMs,
+      expiresAt: currentExpiresAt + durationMs,
+      isCumulativeRenewal: true,
+      isPlanSwitch: false,
+      shouldWarnForfeiture: false,
+      replacedDaysRemaining: 0,
+      replacedIsLifetime: false,
+    };
+  }
+
+  return {
+    actionMode: isPlanSwitch ? 'plan_switch' : 'new',
+    baseMs: nowMs,
+    startedAt: nowMs,
+    expiresAt: nowMs + durationMs,
+    isCumulativeRenewal: false,
+    isPlanSwitch,
+    shouldWarnForfeiture: isPlanSwitch,
+    replacedDaysRemaining,
+    replacedIsLifetime: isPlanSwitch && isCurrentLifetime,
+  };
+}
+
+export function computeAdminDirectSubscriptionPayload(params: {
+  planTier: PlanTier;
+  billingCycle: 'free' | 'monthly' | 'yearly' | 'lifetime';
+  customDays?: number | null;
+  nowMs?: number;
+}): {
+  isPro: boolean;
+  proActive: boolean;
+  planTier: PlanTier;
+  proPlan: VerifiedProEntitlement['proPlan'];
+  billingCycle: BillingCycle;
+  startedAt: number | null;
+  expiresAt: number | null;
+  proExpiresAt: number | null;
+} {
+  const nowMs = params.nowMs ?? Date.now();
+  if (params.planTier === 'free' || params.billingCycle === 'free') {
+    return {
+      isPro: false,
+      proActive: false,
+      planTier: 'free',
+      proPlan: 'free',
+      billingCycle: 'free',
+      startedAt: null,
+      expiresAt: null,
+      proExpiresAt: null,
+    };
+  }
+
+  const isBusiness = params.planTier === 'business_pro';
+  if (params.billingCycle === 'lifetime') {
+    return {
+      isPro: true,
+      proActive: true,
+      planTier: params.planTier,
+      proPlan: isBusiness ? 'code' : 'lifetime',
+      billingCycle: 'lifetime',
+      startedAt: nowMs,
+      expiresAt: null,
+      proExpiresAt: null,
+    };
+  }
+
+  const defaultDays = params.billingCycle === 'monthly' ? 30 : 365;
+  const days =
+    typeof params.customDays === 'number' && Number.isFinite(params.customDays) && params.customDays > 0
+      ? Math.round(params.customDays)
+      : defaultDays;
+  const expiresAt = nowMs + days * SUBSCRIPTION_DAY_MS;
+  const proPlan: VerifiedProEntitlement['proPlan'] = isBusiness
+    ? params.billingCycle === 'monthly'
+      ? 'business_monthly'
+      : 'business_yearly'
+    : params.billingCycle;
+
+  return {
+    isPro: true,
+    proActive: true,
+    planTier: params.planTier,
+    proPlan,
+    billingCycle: params.billingCycle,
+    startedAt: nowMs,
+    expiresAt,
+    proExpiresAt: expiresAt,
+  };
+}
+
 export type AppEntryStage = 'loading' | 'locked' | 'auth_gate' | 'onboarding' | 'app';
 
 export function resolveAppEntryStage(params: {

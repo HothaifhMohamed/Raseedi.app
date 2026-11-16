@@ -169,11 +169,11 @@ const MainLayout: React.FC = () => {
 
   return (
     <div
-      className="min-h-screen bg-[var(--color-bg)] text-[var(--color-ink)] flex flex-col font-sans transition-colors duration-150"
+      className="min-h-screen bg-[var(--color-bg)] text-[var(--color-ink)] flex flex-col font-sans transition-colors duration-150 overflow-x-clip"
       dir={isRTL ? 'rtl' : 'ltr'}
     >
       {/* Mobile-centric container centered on desktop with clean borders */}
-      <div className="w-full max-w-lg mx-auto min-h-screen flex flex-col bg-[var(--color-bg)] sm:border-x sm:border-[var(--color-line)] shadow-sm relative">
+      <div className="w-full max-w-lg mx-auto min-h-screen flex flex-col bg-[var(--color-bg)] sm:border-x sm:border-[var(--color-line)] shadow-sm relative min-w-0 overflow-x-clip">
         {/* Offline indicator banner */}
         <OfflineIndicator />
 
@@ -184,7 +184,7 @@ const MainLayout: React.FC = () => {
         <PWAInstallPrompt />
 
         {/* Dynamic View Router */}
-        <main className="flex-1 flex flex-col">
+        <main className="flex-1 flex flex-col min-w-0">
           {/* HOME VIEW */}
           {activeNav === 'home' && (
             <div className="flex flex-col flex-1">

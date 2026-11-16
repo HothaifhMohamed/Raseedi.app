@@ -19,6 +19,7 @@ import {
   getDoc,
   getDocFromServer,
   getDocs,
+  onSnapshot,
   limit,
   orderBy,
   query,
@@ -62,6 +63,10 @@ import {
   computeLicenseCodeHash,
   isAuthorizedAdminUser,
 } from './licenseCodes';
+import {
+  calculateSubscriptionDatesUpdate,
+  computeAdminDirectSubscriptionPayload,
+} from './subscriptionHelpers';
 import {
   BackupHistoryRecord,
   BackupHistorySummary,
@@ -185,6 +190,7 @@ export interface CloudUserProfile {
   proPlan?: ProPlanCode;
   planTier?: PlanTier;
   billingCycle?: BillingCycle;
+  startedAt?: number | null;
   expiresAt?: number | null;
   proExpiresAt?: number | null;
   hasUsedBusinessTrial?: boolean;
@@ -333,6 +339,7 @@ export async function ensureUserProfile(firebaseUser: User): Promise<CloudUserPr
         proPlan: 'free',
         planTier: 'free',
         billingCycle: 'free',
+        startedAt: null,
         expiresAt: null,
         proExpiresAt: null,
         hasUsedBusinessTrial: false,
@@ -356,6 +363,7 @@ export async function ensureUserProfile(firebaseUser: User): Promise<CloudUserPr
         proPlan: 'free',
         planTier: 'free',
         billingCycle: 'free',
+        startedAt: null,
         expiresAt: null,
         proExpiresAt: null,
         hasUsedBusinessTrial: false,
@@ -384,6 +392,7 @@ export async function ensureUserProfile(firebaseUser: User): Promise<CloudUserPr
       proPlan: existingData.proPlan || (active ? 'code' : 'free'),
       planTier: resolvePlanTierFromProfile({ ...existingData, isPro: active }),
       billingCycle: existingData.billingCycle || (active ? 'lifetime' : 'free'),
+      startedAt: existingData.startedAt ?? null,
       expiresAt: resolvedExpiry,
       proExpiresAt: resolvedExpiry,
       email: firebaseUser.email || existingData.email || '',
@@ -395,27 +404,140 @@ export async function ensureUserProfile(firebaseUser: User): Promise<CloudUserPr
   }
 }
 
+function mapCloudUserProfile(docId: string, data: Record<string, unknown>): CloudUserProfile {
+  const raw = data as unknown as CloudUserProfile;
+  const active = isEntitlementActive(raw);
+  const resolvedExpiry = raw.proExpiresAt ?? raw.expiresAt ?? null;
+  return {
+    ...raw,
+    uid: raw.uid || docId,
+    email: raw.email || '',
+    isPro: active,
+    proActive: active,
+    proPlan: raw.proPlan || (active ? 'code' : 'free'),
+    planTier: resolvePlanTierFromProfile({ ...raw, isPro: active }),
+    billingCycle: raw.billingCycle || (active ? 'lifetime' : 'free'),
+    startedAt: typeof raw.startedAt === 'number' ? raw.startedAt : null,
+    expiresAt: resolvedExpiry,
+    proExpiresAt: resolvedExpiry,
+  };
+}
+
 export async function fetchUserProfile(uid: string): Promise<CloudUserProfile | null> {
   const path = `users/${uid}`;
   try {
     const snap = await getDoc(doc(db, 'users', uid));
     if (!snap.exists()) return null;
-    const data = snap.data() as CloudUserProfile;
-    const active = isEntitlementActive(data);
-    const resolvedExpiry = data.proExpiresAt ?? data.expiresAt ?? null;
-    return {
-      ...data,
-      isPro: active,
-      proActive: active,
-      proPlan: data.proPlan || (active ? 'code' : 'free'),
-      planTier: resolvePlanTierFromProfile({ ...data, isPro: active }),
-      billingCycle: data.billingCycle || (active ? 'lifetime' : 'free'),
-      expiresAt: resolvedExpiry,
-      proExpiresAt: resolvedExpiry,
-    };
+    return mapCloudUserProfile(snap.id, snap.data() as Record<string, unknown>);
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, path);
   }
+}
+
+export function subscribeUserProfile(
+  uid: string,
+  onProfile: (profile: CloudUserProfile | null, fromCache: boolean) => void
+): () => void {
+  if (!uid) return () => {};
+  return onSnapshot(
+    doc(db, 'users', uid),
+    (snap) => {
+      if (!snap.exists()) {
+        onProfile(null, snap.metadata.fromCache);
+        return;
+      }
+      onProfile(
+        mapCloudUserProfile(snap.id, snap.data() as Record<string, unknown>),
+        snap.metadata.fromCache
+      );
+    },
+    (error) => {
+      console.warn('User profile snapshot warning:', error);
+    }
+  );
+}
+
+export async function fetchAllUsersForAdmin(maxUsers = 200): Promise<CloudUserProfile[]> {
+  const currentUser = auth.currentUser;
+  if (
+    !currentUser ||
+    !isAuthorizedAdminUser({
+      email: currentUser.email,
+      isLoggedIn: true,
+      emailVerified: currentUser.emailVerified,
+    })
+  ) {
+    throw new Error('FORBIDDEN_ADMIN_ONLY');
+  }
+
+  try {
+    const snap = await getDocs(query(collection(db, 'users'), limit(maxUsers)));
+    const rows = snap.docs.map((d) => mapCloudUserProfile(d.id, d.data() as Record<string, unknown>));
+    rows.sort((a, b) => {
+      if (a.isPro !== b.isPro) return a.isPro ? -1 : 1;
+      const aTime = a.lastSyncedAt || a.startedAt || 0;
+      const bTime = b.lastSyncedAt || b.startedAt || 0;
+      if (aTime !== bTime) return bTime - aTime;
+      return (a.email || '').localeCompare(b.email || '');
+    });
+    return rows;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'users');
+  }
+}
+
+export async function adminUpdateUserSubscription(params: {
+  targetUid: string;
+  planTier: PlanTier;
+  billingCycle: 'free' | 'monthly' | 'yearly' | 'lifetime';
+  customDays?: number | null;
+}): Promise<CloudUserProfile> {
+  const currentUser = auth.currentUser;
+  if (
+    !currentUser ||
+    !isAuthorizedAdminUser({
+      email: currentUser.email,
+      isLoggedIn: true,
+      emailVerified: currentUser.emailVerified,
+    })
+  ) {
+    throw new Error('FORBIDDEN_ADMIN_ONLY');
+  }
+
+  const targetPath = `users/${params.targetUid}`;
+  const payload = computeAdminDirectSubscriptionPayload({
+    planTier: params.planTier,
+    billingCycle: params.billingCycle,
+    customDays: params.customDays,
+  });
+
+  try {
+    const targetRef = doc(db, 'users', params.targetUid);
+    await updateDoc(targetRef, {
+      ...payload,
+      redeemedCouponCode: null,
+      updatedAt: serverTimestamp(),
+    });
+    const refreshed = await getDoc(targetRef);
+    if (refreshed.exists()) {
+      return mapCloudUserProfile(refreshed.id, refreshed.data() as Record<string, unknown>);
+    }
+    return {
+      uid: params.targetUid,
+      email: '',
+      ...payload,
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, targetPath);
+  }
+}
+
+export async function adminCancelUserSubscription(targetUid: string): Promise<CloudUserProfile> {
+  return adminUpdateUserSubscription({
+    targetUid,
+    planTier: 'free',
+    billingCycle: 'free',
+  });
 }
 
 export async function signInWithGoogle(): Promise<{
@@ -1267,7 +1389,47 @@ export interface CouponRedemptionResult {
   planTier?: PlanTier;
   proPlan?: ProPlanCode;
   billingCycle?: BillingCycle;
+  startedAt?: number | null;
   expiresAt?: number | null;
+  isCumulativeRenewal?: boolean;
+}
+
+export async function peekCouponInFirestore(rawCode: string): Promise<{
+  exists: boolean;
+  used: boolean;
+  code?: string;
+  tier?: AdminCouponTier;
+  planTier?: PlanTier;
+  cycle?: AdminCouponCycle;
+}> {
+  if (!auth.currentUser) {
+    return { exists: false, used: false };
+  }
+  const normalizedCode = String(rawCode || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .slice(0, 128);
+  if (!normalizedCode || !VALID_COUPON_ID_RE.test(normalizedCode)) {
+    return { exists: false, used: false };
+  }
+  try {
+    const snap = await getDoc(doc(db, 'coupons', normalizedCode));
+    if (!snap.exists()) {
+      return { exists: false, used: false };
+    }
+    const data = snap.data() as Record<string, unknown>;
+    const used = Boolean(data.used === true || data.status === 'used');
+    const tier: AdminCouponTier = data.tier === 'business' ? 'business' : 'pro';
+    const cycle: AdminCouponCycle =
+      data.cycle === 'monthly' || data.cycle === 'yearly' || data.cycle === 'lifetime'
+        ? data.cycle
+        : 'lifetime';
+    const planTier: PlanTier = tier === 'business' ? 'business_pro' : 'personal_pro';
+    return { exists: true, used, code: normalizedCode, tier, planTier, cycle };
+  } catch {
+    return { exists: false, used: false };
+  }
 }
 
 export async function redeemCouponInFirestore(rawCode: string): Promise<CouponRedemptionResult> {
@@ -1309,7 +1471,7 @@ export async function redeemCouponInFirestore(rawCode: string): Promise<CouponRe
     data.cycle === 'monthly' || data.cycle === 'yearly' || data.cycle === 'lifetime'
       ? data.cycle
       : 'lifetime';
-  const planTier: PlanTier = tier === 'business' ? 'business_pro' : 'personal_pro';
+  const planTier: Exclude<PlanTier, 'free'> = tier === 'business' ? 'business_pro' : 'personal_pro';
   const proPlan: ProPlanCode =
     tier === 'business'
       ? cycle === 'monthly'
@@ -1318,12 +1480,17 @@ export async function redeemCouponInFirestore(rawCode: string): Promise<CouponRe
         ? 'business_yearly'
         : 'code'
       : cycle;
-  const nowMs = Date.now();
-  const DAY_MS = 24 * 60 * 60 * 1000;
-  const expiresAt: number | null =
-    cycle === 'monthly' ? nowMs + 30 * DAY_MS : cycle === 'yearly' ? nowMs + 365 * DAY_MS : null;
 
-  await ensureUserProfile(currentUser);
+  const existingProfile = await ensureUserProfile(currentUser);
+  const dateCalc = calculateSubscriptionDatesUpdate({
+    currentTier: existingProfile.planTier || 'free',
+    currentExpiresAt: existingProfile.proExpiresAt ?? existingProfile.expiresAt ?? null,
+    currentBillingCycle: existingProfile.billingCycle ?? null,
+    currentIsPro: Boolean(existingProfile.isPro || existingProfile.proActive),
+    newTier: planTier,
+    newCycle: cycle,
+    nowMs: Date.now(),
+  });
 
   const userRef = doc(db, 'users', currentUser.uid);
   const batch = writeBatch(db);
@@ -1339,8 +1506,9 @@ export async function redeemCouponInFirestore(rawCode: string): Promise<CouponRe
     planTier,
     proPlan,
     billingCycle: cycle,
-    expiresAt,
-    proExpiresAt: expiresAt,
+    startedAt: dateCalc.startedAt,
+    expiresAt: dateCalc.expiresAt,
+    proExpiresAt: dateCalc.expiresAt,
     redeemedCouponCode: normalizedCode,
     updatedAt: serverTimestamp(),
   });
@@ -1358,7 +1526,9 @@ export async function redeemCouponInFirestore(rawCode: string): Promise<CouponRe
     planTier,
     proPlan,
     billingCycle: cycle,
-    expiresAt,
+    startedAt: dateCalc.startedAt,
+    expiresAt: dateCalc.expiresAt,
+    isCumulativeRenewal: dateCalc.isCumulativeRenewal,
   };
 }
 
