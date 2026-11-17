@@ -42,6 +42,7 @@ import { MoneyCirclesModal } from './MoneyCirclesModal';
 import { SUPPORT_CONFIG } from '../../constants/support';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
 import { BrandLogo } from '../common/BrandLogo';
+import { DirectPWAInstallButton } from '../common/PWAInstallPrompt';
 import {
   doesTransactionAffectAccounting,
   getEffectiveTransactionAmount,
@@ -655,6 +656,8 @@ export const MoreMenu: React.FC = () => {
             </div>
             <ArrowIcon className="w-4 h-4 text-[var(--color-muted)]" />
           </button>
+
+          <DirectPWAInstallButton variant="menu" />
 
           {/* Support & Contact */}
           <button

@@ -58,6 +58,13 @@ import {
 } from '../services/db';
 import { translations } from '../services/i18n';
 import {
+  initPWAInstallCapture,
+  getPWAInstallSnapshot,
+  subscribePWAInstall,
+  triggerPWAInstall,
+  PWAInstallSnapshot,
+} from '../services/pwaInstallStore';
+import {
   applyWalletUpdates,
   calculateNextDueDate,
   doesTransactionAffectAccounting,
@@ -539,6 +546,12 @@ interface AppContextType {
   loadDemoData: () => void;
   resetAllData: () => void;
 
+  // PWA Direct Install
+  canInstallPWA: boolean;
+  isPWAInstalled: boolean;
+  isIOSDevice: boolean;
+  promptPWAInstall: () => Promise<boolean>;
+
   // Helpers
   t: (key: keyof typeof translations.ar) => string;
   isRTL: boolean;
@@ -567,6 +580,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [hasUnsyncedLocalChanges, setHasUnsyncedLocalChanges] = useState<boolean>(() =>
     loadUnsyncedDirtyFlag()
   );
+
+  // Global PWA Install State
+  const [pwaInstallState, setPwaInstallState] = useState<PWAInstallSnapshot>(() =>
+    getPWAInstallSnapshot()
+  );
+  useEffect(() => {
+    initPWAInstallCapture();
+    setPwaInstallState(getPWAInstallSnapshot());
+    return subscribePWAInstall(() => {
+      setPwaInstallState(getPWAInstallSnapshot());
+    });
+  }, []);
+  const promptPWAInstall = useCallback(async () => {
+    const outcome = await triggerPWAInstall();
+    return outcome === 'accepted';
+  }, []);
 
   // Dual Workspace / Cloud Enterprise State
   const [activeWorkspace, setActiveWorkspace] = useState<string>('personal');
@@ -6994,6 +7023,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         completeOnboarding,
         loadDemoData,
         resetAllData,
+
+        canInstallPWA: pwaInstallState.isInstallable,
+        isPWAInstalled: pwaInstallState.isInstalled,
+        isIOSDevice: pwaInstallState.isIOS,
+        promptPWAInstall,
 
         t,
         isRTL,

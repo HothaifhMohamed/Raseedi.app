@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { BrandLogo } from '../common/BrandLogo';
+import { DirectPWAInstallButton } from '../common/PWAInstallPrompt';
 
 export const AuthGateScreen: React.FC = () => {
   const {
@@ -210,6 +211,8 @@ export const AuthGateScreen: React.FC = () => {
               {isRTL ? 'الدخول كزائر (تجربة بدون تسجيل)' : 'Continue as Guest (Try without signing in)'}
             </span>
           </button>
+
+          <DirectPWAInstallButton variant="auth" />
         </div>
 
         <p className="text-[11px] text-center text-[var(--color-muted)] leading-relaxed">

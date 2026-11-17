@@ -253,7 +253,7 @@ export const translations = {
     walletBankName: 'حساب بنكي جاري',
 
     // PWA & Connectivity
-    installApp: 'تثبيت التطبيق على جهازك',
+    installApp: 'تثبيت التطبيق على الجهاز',
     appOfflineMode: 'أنت في وضع عدم الاتصال — التطبيق يعمل بكامل طاقته محلياً على جهازك.',
 
     // Notifications & Enterprise Workspaces
@@ -593,7 +593,7 @@ export const translations = {
     walletBankName: 'Checking Account',
 
     // PWA & Connectivity
-    installApp: 'Install App on Device',
+    installApp: 'Install App',
     appOfflineMode: 'Offline Mode — The app works completely locally on your device.',
 
     // Notifications & Enterprise Workspaces
