@@ -8,6 +8,8 @@ import {
   Sun,
   Moon,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Sparkles,
   Bell,
   Building2,
@@ -82,6 +84,8 @@ export const Navbar: React.FC = () => {
     openOrgHub,
     setIsAddModalOpen,
     setIsLogoutModalOpen,
+    isWorkspaceModalOpen,
+    setIsWorkspaceModalOpen,
     t,
     isRTL,
   } = useApp();
@@ -95,8 +99,6 @@ export const Navbar: React.FC = () => {
   };
 
   const [isOverflowOpen, setIsOverflowOpen] = useState(false);
-  const [isWorkspaceExpanded, setIsWorkspaceExpanded] = useState(false);
-  const [isWorkspaceQuickOpen, setIsWorkspaceQuickOpen] = useState(false);
   const [isNotifOpen, setIsNotifOpen] = useState(false);
   const [dropdownTop, setDropdownTop] = useState(60);
 
@@ -119,6 +121,7 @@ export const Navbar: React.FC = () => {
     isWebNotificationSupported() ? Notification.permission : 'unsupported'
   );
 
+  useModalBackHandler(isWorkspaceModalOpen, () => setIsWorkspaceModalOpen(false), 'navbar-workspace-selector');
   useModalBackHandler(showCreateOrg, () => setShowCreateOrg(false), 'navbar-create-org');
   useModalBackHandler(
     showJoinOrg,
@@ -161,20 +164,25 @@ export const Navbar: React.FC = () => {
     }
   };
 
+  const openWorkspaceSelectorModal = () => {
+    setIsNotifOpen(false);
+    setIsOverflowOpen(false);
+    setIsWorkspaceModalOpen(true);
+  };
+
   useEffect(() => {
-    if (!isNotifOpen && !isOverflowOpen && !isWorkspaceQuickOpen) return;
+    if (!isNotifOpen && !isOverflowOpen && !isWorkspaceModalOpen) return;
     updateDropdownAnchor();
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setIsNotifOpen(false);
         setIsOverflowOpen(false);
-        setIsWorkspaceQuickOpen(false);
-        setIsWorkspaceExpanded(false);
+        setIsWorkspaceModalOpen(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isNotifOpen, isOverflowOpen, isWorkspaceQuickOpen]);
+  }, [isNotifOpen, isOverflowOpen, isWorkspaceModalOpen, setIsWorkspaceModalOpen]);
 
   const toggleLanguage = () => {
     updateSettings({ language: settings.language === 'ar' ? 'en' : 'ar' });
@@ -247,7 +255,7 @@ export const Navbar: React.FC = () => {
       setNewOrgTaxNumber('');
       setNewOrgIndustry('general');
       setShowCreateOrg(false);
-      setIsWorkspaceExpanded(false);
+      setIsWorkspaceModalOpen(false);
       setIsOverflowOpen(false);
     } catch (err: any) {
       setCreateOrgError(
@@ -278,7 +286,7 @@ export const Navbar: React.FC = () => {
       clearPendingJoinCode();
       setInviteCodeInput('');
       setShowJoinOrg(false);
-      setIsWorkspaceExpanded(false);
+      setIsWorkspaceModalOpen(false);
       setIsOverflowOpen(false);
     } catch (err: any) {
       setJoinError(
@@ -309,21 +317,15 @@ export const Navbar: React.FC = () => {
           <button
             type="button"
             data-testid="navbar-workspace-badge"
-            onClick={() => {
-              updateDropdownAnchor();
-              setIsNotifOpen(false);
-              setIsOverflowOpen(false);
-              setIsWorkspaceExpanded(false);
-              setIsWorkspaceQuickOpen((prev) => !prev);
-            }}
-            aria-expanded={isWorkspaceQuickOpen}
+            onClick={openWorkspaceSelectorModal}
+            aria-expanded={isWorkspaceModalOpen}
             title={
               isOrgWorkspace && activeOrganization
                 ? activeOrganization.name
                 : t('personalWorkspace')
             }
             className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-xs font-semibold transition-all duration-300 min-h-[36px] max-w-[138px] sm:max-w-[175px] min-w-0 ${
-              isWorkspaceQuickOpen
+              isWorkspaceModalOpen
                 ? 'bg-[var(--color-accent)]/15 border-[var(--color-accent)] text-[var(--color-accent)] shadow-sm'
                 : 'bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/15 border-[var(--color-accent)]/25 text-[var(--color-ink)]'
             }`}
@@ -351,7 +353,7 @@ export const Navbar: React.FC = () => {
             )}
             <ChevronDown
               className={`w-3.5 h-3.5 text-[var(--color-muted)] shrink-0 transition-transform duration-300 ${
-                isWorkspaceQuickOpen ? 'rotate-180 text-[var(--color-accent)]' : ''
+                isWorkspaceModalOpen ? 'rotate-180 text-[var(--color-accent)]' : ''
               }`}
             />
           </button>
@@ -366,8 +368,7 @@ export const Navbar: React.FC = () => {
             onClick={() => {
               updateDropdownAnchor();
               setIsOverflowOpen(false);
-              setIsWorkspaceQuickOpen(false);
-              setIsWorkspaceExpanded(false);
+              setIsWorkspaceModalOpen(false);
               setIsNotifOpen((prev) => !prev);
             }}
             aria-label={t('notificationsCenter')}
@@ -415,11 +416,8 @@ export const Navbar: React.FC = () => {
             onClick={() => {
               updateDropdownAnchor();
               setIsNotifOpen(false);
-              setIsWorkspaceQuickOpen(false);
-              setIsOverflowOpen((prev) => {
-                if (prev) setIsWorkspaceExpanded(false);
-                return !prev;
-              });
+              setIsWorkspaceModalOpen(false);
+              setIsOverflowOpen((prev) => !prev);
             }}
             aria-expanded={isOverflowOpen}
             className={`w-9 h-9 rounded-lg border flex items-center justify-center transition-colors duration-300 min-h-[38px] min-w-[38px] relative ${
@@ -445,21 +443,19 @@ export const Navbar: React.FC = () => {
         </div>
       </header>
 
-      {/* Isolated Backdrop + Floating Header Dropdowns (rendered outside sticky header stacking context) */}
-      {(isNotifOpen || isOverflowOpen || isWorkspaceQuickOpen) && (
+      {/* Isolated Backdrop + Floating Header Popovers (Notifications & Overflow) */}
+      {(isNotifOpen || isOverflowOpen) && (
         <>
           <div
             data-testid="navbar-dropdown-backdrop"
             aria-hidden="true"
-            className="fixed inset-0 z-40 bg-black/15 backdrop-blur-[1px] transition-opacity duration-300 animate-in fade-in"
+            className="fixed inset-0 z-40 bg-black/25 backdrop-blur-[1px] transition-opacity duration-200 animate-in fade-in"
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();
               setIsNotifOpen(false);
               setIsOverflowOpen(false);
-              setIsWorkspaceQuickOpen(false);
-              setIsWorkspaceExpanded(false);
             }}
           />
 
@@ -468,130 +464,15 @@ export const Navbar: React.FC = () => {
             style={{ top: `${dropdownTop}px` }}
             dir={isRTL ? 'rtl' : 'ltr'}
           >
-            <div
-              className={`w-full max-w-lg md:max-w-2xl lg:max-w-4xl flex ${
-                isWorkspaceQuickOpen ? 'justify-start' : 'justify-end'
-              }`}
-            >
-              {/* Quick Workspace Switcher Popover (from Header Smart Badge) */}
-              {isWorkspaceQuickOpen && (
-                <div
-                  data-testid="navbar-workspace-dropdown"
-                  onClick={(e) => e.stopPropagation()}
-                  className="pointer-events-auto w-64 sm:w-72 max-h-[calc(100vh-84px)] overflow-y-auto bg-[var(--color-surface)] border border-[var(--color-line)] rounded-2xl shadow-xl divide-y divide-[var(--color-line)] transition-all duration-300 animate-in fade-in zoom-in-95"
-                >
-                  <div className="px-3 py-2.5 bg-[var(--color-bg)] flex items-center justify-between gap-2">
-                    <span className="text-xs font-bold text-[var(--color-ink)]">
-                      {t('switchWorkspace')}
-                    </span>
-                    {isOrgWorkspace && activeOrgRole && (
-                      <span
-                        data-testid="quick-org-role-badge"
-                        className="px-1.5 py-0.5 rounded bg-[var(--color-accent)]/15 text-[var(--color-accent)] font-bold text-[10px]"
-                      >
-                        {roleLabels[activeOrgRole][isRTL ? 'ar' : 'en']}
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="max-h-60 overflow-y-auto py-1">
-                    {/* Personal Workspace */}
-                    <button
-                      type="button"
-                      data-testid="quick-workspace-personal-btn"
-                      onClick={() => {
-                        switchWorkspace('personal');
-                        setIsWorkspaceQuickOpen(false);
-                      }}
-                      className={`w-full px-3 py-2.5 text-xs flex items-center justify-between text-start min-h-[44px] transition-colors ${
-                        activeWorkspace === 'personal'
-                          ? 'bg-[var(--color-accent)]/10 text-[var(--color-accent)] font-semibold'
-                          : 'text-[var(--color-ink)] hover:bg-[var(--color-bg)]'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <User className="w-4 h-4 shrink-0" />
-                        <div className="truncate">
-                          <div className="truncate">{t('personalWorkspace')}</div>
-                          <div className="text-[10px] text-[var(--color-muted)] font-normal">
-                            {isRTL ? 'حساب شخصي مشفر' : 'Personal ledger'}
-                          </div>
-                        </div>
-                      </div>
-                      {activeWorkspace === 'personal' && <Check className="w-4 h-4 shrink-0" />}
-                    </button>
-
-                    {/* Cloud / Enterprise Organizations */}
-                    {organizationsList.map((org) => {
-                      const active = activeWorkspace === org.id;
-                      return (
-                        <button
-                          key={org.id}
-                          type="button"
-                          data-testid={`quick-workspace-org-${org.id}`}
-                          onClick={() => {
-                            switchWorkspace(org.id);
-                            setIsWorkspaceQuickOpen(false);
-                          }}
-                          className={`w-full px-3 py-2.5 text-xs flex items-center justify-between text-start min-h-[44px] transition-colors ${
-                            active
-                              ? 'bg-[var(--color-accent)]/10 text-[var(--color-accent)] font-semibold'
-                              : 'text-[var(--color-ink)] hover:bg-[var(--color-bg)]'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <Building2 className="w-4 h-4 shrink-0" />
-                            <div className="truncate">
-                              <div className="truncate">{org.name}</div>
-                              <div className="text-[10px] text-[var(--color-muted)] font-normal">
-                                {org.currency} • {isRTL ? 'مؤسسة' : 'Enterprise'}
-                              </div>
-                            </div>
-                          </div>
-                          {active && <Check className="w-4 h-4 shrink-0" />}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  <div className="py-1 bg-[var(--color-surface)]">
-                    <button
-                      type="button"
-                      data-testid="quick-create-org-btn"
-                      onClick={() => {
-                        setShowCreateOrg(true);
-                        setIsWorkspaceQuickOpen(false);
-                      }}
-                      className="w-full px-3 py-2 text-xs flex items-center gap-2 text-[var(--color-accent)] font-semibold hover:bg-[var(--color-bg)] transition-colors text-start min-h-[40px]"
-                    >
-                      <Plus className="w-4 h-4 shrink-0" />
-                      <span>{t('createOrganization')}</span>
-                    </button>
-                    <button
-                      type="button"
-                      data-testid="quick-join-org-btn"
-                      onClick={() => {
-                        setJoinError(null);
-                        setShowJoinOrg(true);
-                        setIsWorkspaceQuickOpen(false);
-                      }}
-                      className="w-full px-3 py-2 text-xs flex items-center gap-2 text-[var(--color-ink)] hover:bg-[var(--color-bg)] transition-colors text-start min-h-[40px]"
-                    >
-                      <KeyRound className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
-                      <span>{t('joinOrganization')}</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
+            <div className="w-full max-w-lg md:max-w-2xl lg:max-w-4xl flex justify-end">
               {/* Notifications Center Popover */}
               {isNotifOpen && (
                 <div
                   data-testid="navbar-notifications-dropdown"
                   onClick={(e) => e.stopPropagation()}
-                  className="pointer-events-auto w-full max-w-sm sm:w-80 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-2xl shadow-xl overflow-hidden transition-all duration-300 animate-in fade-in zoom-in-95"
+                  className="pointer-events-auto w-full max-w-sm sm:w-80 bg-white dark:bg-[#17231E] border border-[var(--color-line)] rounded-2xl shadow-xl overflow-hidden transition-all duration-200 animate-in fade-in zoom-in-95"
                 >
-                  <div className="px-3 py-2.5 border-b border-[var(--color-line)] flex items-center justify-between bg-[var(--color-bg)]">
+                  <div className="px-3 py-2.5 border-b border-[var(--color-line)] flex items-center justify-between bg-[var(--color-surface-subtle)]">
                     <span className="text-xs font-bold text-[var(--color-ink)]">
                       {t('notificationsCenter')}
                     </span>
@@ -673,21 +554,20 @@ export const Navbar: React.FC = () => {
                 </div>
               )}
 
-              {/* Overflow 3-Dot Dropdown Menu */}
+              {/* Overflow 3-Dot Dropdown Menu (Solid Background, Zero Nested Lists) */}
               {isOverflowOpen && (
                 <div
                   data-testid="navbar-overflow-dropdown"
                   onClick={(e) => e.stopPropagation()}
-                  className="pointer-events-auto w-64 sm:w-72 max-h-[calc(100vh-84px)] overflow-y-auto bg-[var(--color-surface)] border border-[var(--color-line)] rounded-2xl shadow-xl py-1.5 divide-y divide-[var(--color-line)] transition-all duration-300 animate-in fade-in zoom-in-95"
+                  className="pointer-events-auto w-64 sm:w-72 max-h-[calc(100vh-84px)] overflow-y-auto bg-white dark:bg-[#17231E] border border-[var(--color-line)] rounded-2xl shadow-xl py-1.5 divide-y divide-[var(--color-line)] transition-all duration-200 animate-in fade-in zoom-in-95"
                 >
-                  {/* Section 1: Workspace Switcher */}
+                  {/* Section 1: Workspace Switcher Button (Closes Menu -> Opens Standalone Modal) */}
                   <div className="py-1">
                     <button
                       type="button"
                       data-testid="overflow-workspace-switcher-btn"
-                      onClick={() => setIsWorkspaceExpanded((prev) => !prev)}
-                      aria-expanded={isWorkspaceExpanded}
-                      className="w-full px-3 py-2 text-xs flex items-center justify-between gap-2 text-[var(--color-ink)] hover:bg-[var(--color-bg)] transition-colors duration-300 text-start min-h-[44px]"
+                      onClick={openWorkspaceSelectorModal}
+                      className="w-full px-3 py-2 text-xs flex items-center justify-between gap-2 text-[var(--color-ink)] hover:bg-[var(--color-bg)] transition-colors duration-200 text-start min-h-[44px]"
                     >
                       <div className="flex items-center gap-2 min-w-0">
                         {isOrgWorkspace ? (
@@ -728,110 +608,12 @@ export const Navbar: React.FC = () => {
                           </div>
                         </div>
                       </div>
-                      <ChevronDown
-                        className={`w-4 h-4 text-[var(--color-muted)] shrink-0 transition-transform duration-300 ${
-                          isWorkspaceExpanded ? 'rotate-180' : ''
-                        }`}
-                      />
+                      {isRTL ? (
+                        <ChevronLeft className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
+                      ) : (
+                        <ChevronRight className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
+                      )}
                     </button>
-
-                    {isWorkspaceExpanded && (
-                      <div
-                        data-testid="overflow-workspace-list"
-                        className="mt-1 mx-2 mb-1.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] overflow-hidden divide-y divide-[var(--color-line)] transition-all duration-300 animate-in fade-in"
-                      >
-                        <div className="max-h-48 overflow-y-auto py-1">
-                          {/* Personal Workspace */}
-                          <button
-                            type="button"
-                            data-testid="overflow-workspace-personal-btn"
-                            onClick={() => {
-                              switchWorkspace('personal');
-                              setIsWorkspaceExpanded(false);
-                              setIsOverflowOpen(false);
-                            }}
-                            className={`w-full px-3 py-2 text-xs flex items-center justify-between text-start min-h-[40px] transition-colors ${
-                              activeWorkspace === 'personal'
-                                ? 'bg-[var(--color-accent)]/10 text-[var(--color-accent)] font-semibold'
-                                : 'text-[var(--color-ink)] hover:bg-[var(--color-surface)]'
-                            }`}
-                          >
-                            <div className="flex items-center gap-2 min-w-0">
-                              <User className="w-3.5 h-3.5 shrink-0" />
-                              <div className="truncate">
-                                <div className="truncate">{t('personalWorkspace')}</div>
-                                <div className="text-[10px] text-[var(--color-muted)] font-normal">
-                                  {isRTL ? 'حساب شخصي مشفر' : 'Personal ledger'}
-                                </div>
-                              </div>
-                            </div>
-                            {activeWorkspace === 'personal' && <Check className="w-3.5 h-3.5 shrink-0" />}
-                          </button>
-
-                          {/* Organizations List */}
-                          {organizationsList.map((org) => {
-                            const active = activeWorkspace === org.id;
-                            return (
-                              <button
-                                key={org.id}
-                                type="button"
-                                onClick={() => {
-                                  switchWorkspace(org.id);
-                                  setIsWorkspaceExpanded(false);
-                                  setIsOverflowOpen(false);
-                                }}
-                                className={`w-full px-3 py-2 text-xs flex items-center justify-between text-start min-h-[40px] transition-colors ${
-                                  active
-                                    ? 'bg-[var(--color-accent)]/10 text-[var(--color-accent)] font-semibold'
-                                    : 'text-[var(--color-ink)] hover:bg-[var(--color-surface)]'
-                                }`}
-                              >
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <Building2 className="w-3.5 h-3.5 shrink-0" />
-                                  <div className="truncate">
-                                    <div className="truncate">{org.name}</div>
-                                    <div className="text-[10px] text-[var(--color-muted)] font-normal">
-                                      {org.currency} • {isRTL ? 'مؤسسة' : 'Enterprise'}
-                                    </div>
-                                  </div>
-                                </div>
-                                {active && <Check className="w-3.5 h-3.5 shrink-0" />}
-                              </button>
-                            );
-                          })}
-                        </div>
-
-                        <div className="py-1 bg-[var(--color-surface)]/50">
-                          <button
-                            type="button"
-                            data-testid="overflow-create-org-btn"
-                            onClick={() => {
-                              setShowCreateOrg(true);
-                              setIsWorkspaceExpanded(false);
-                              setIsOverflowOpen(false);
-                            }}
-                            className="w-full px-3 py-2 text-xs flex items-center gap-2 text-[var(--color-accent)] font-semibold hover:bg-[var(--color-surface)] transition-colors text-start min-h-[38px]"
-                          >
-                            <Plus className="w-3.5 h-3.5 shrink-0" />
-                            <span>{t('createOrganization')}</span>
-                          </button>
-                          <button
-                            type="button"
-                            data-testid="overflow-join-org-btn"
-                            onClick={() => {
-                              setJoinError(null);
-                              setShowJoinOrg(true);
-                              setIsWorkspaceExpanded(false);
-                              setIsOverflowOpen(false);
-                            }}
-                            className="w-full px-3 py-2 text-xs flex items-center gap-2 text-[var(--color-ink)] hover:bg-[var(--color-surface)] transition-colors text-start min-h-[38px]"
-                          >
-                            <KeyRound className="w-3.5 h-3.5 text-[var(--color-muted)] shrink-0" />
-                            <span>{t('joinOrganization')}</span>
-                          </button>
-                        </div>
-                      </div>
-                    )}
                   </div>
 
                   {/* Section 2: Filter & Quick Backup */}
@@ -990,7 +772,7 @@ export const Navbar: React.FC = () => {
                       data-testid="navbar-signout-btn"
                       onClick={() => {
                         setIsOverflowOpen(false);
-                        setIsWorkspaceExpanded(false);
+                        setIsWorkspaceModalOpen(false);
                         setIsLogoutModalOpen(true);
                       }}
                       className="w-full px-3 py-2 text-xs flex items-center gap-2 text-[var(--color-expense)] font-semibold hover:bg-[var(--color-expense)]/10 transition-colors text-start min-h-[42px]"
@@ -1129,13 +911,198 @@ export const Navbar: React.FC = () => {
         </div>
       )}
 
+      {/* Standalone Workspace Selector Modal / Bottom Sheet */}
+      {isWorkspaceModalOpen && (
+        <div
+          data-testid="workspace-selector-backdrop"
+          onClick={() => setIsWorkspaceModalOpen(false)}
+          dir={isRTL ? 'rtl' : 'ltr'}
+          className="fixed inset-0 bg-black/50 backdrop-blur-[2px] z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 animate-in fade-in duration-200"
+        >
+          <div
+            data-testid="workspace-selector-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="workspace-selector-title"
+            onClick={(e) => e.stopPropagation()}
+            className="w-full sm:max-w-md bg-white dark:bg-[#17231E] border border-[var(--color-line)] rounded-t-3xl sm:rounded-2xl shadow-2xl overflow-hidden animate-in slide-in-from-bottom-4 sm:zoom-in-95 duration-200"
+          >
+            {/* Mobile Bottom Sheet Handle */}
+            <div className="sm:hidden flex justify-center pt-2.5 pb-1">
+              <div className="w-10 h-1 rounded-full bg-[var(--color-line)]" />
+            </div>
+
+            {/* Modal Header */}
+            <div className="px-5 py-3.5 border-b border-[var(--color-line)] bg-[var(--color-surface-subtle)] flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-8 h-8 rounded-xl bg-[var(--color-accent)]/15 text-[var(--color-accent)] flex items-center justify-center shrink-0">
+                  <Building2 className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <h2
+                    id="workspace-selector-title"
+                    className="font-title text-base font-bold text-[var(--color-ink)] truncate"
+                  >
+                    {isRTL ? 'اختر مساحة العمل' : 'Select Workspace'}
+                  </h2>
+                  <p className="text-[11px] text-[var(--color-muted)] truncate">
+                    {isRTL
+                      ? 'بدّل بين حسابك الشخصي ومؤسساتك بضغطة واحدة'
+                      : 'Switch seamlessly between personal ledger and organizations'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                data-testid="workspace-modal-close-btn"
+                onClick={() => setIsWorkspaceModalOpen(false)}
+                aria-label={t('close')}
+                className="w-8 h-8 rounded-lg border border-[var(--color-line)] bg-white dark:bg-[#1E2E27] flex items-center justify-center text-[var(--color-muted)] hover:text-[var(--color-ink)] shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Workspace Choices */}
+            <div className="max-h-[55vh] overflow-y-auto p-3 space-y-2">
+              {/* Personal Workspace Option */}
+              <button
+                type="button"
+                data-testid="workspace-modal-personal-btn"
+                onClick={() => {
+                  switchWorkspace('personal');
+                  setIsWorkspaceModalOpen(false);
+                }}
+                className={`w-full p-3 rounded-xl border text-start flex items-center justify-between gap-3 transition-all duration-200 min-h-[56px] ${
+                  activeWorkspace === 'personal'
+                    ? 'bg-[var(--color-accent)]/10 border-[var(--color-accent)] text-[var(--color-accent)] shadow-xs'
+                    : 'bg-white dark:bg-[#1E2E27] border-[var(--color-line)] text-[var(--color-ink)] hover:border-[var(--color-accent)]/50'
+                }`}
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <div
+                    className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                      activeWorkspace === 'personal'
+                        ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)]'
+                        : 'bg-[var(--color-surface-subtle)] text-[var(--color-muted)]'
+                    }`}
+                  >
+                    <User className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-[var(--color-ink)] truncate">
+                      {t('personalWorkspace')}
+                    </div>
+                    <div className="text-[11px] text-[var(--color-muted)] truncate mt-0.5">
+                      {isRTL ? 'حساب شخصي مشفر ومعزول' : 'Personal encrypted ledger'}
+                    </div>
+                  </div>
+                </div>
+                {activeWorkspace === 'personal' && (
+                  <div className="w-6 h-6 rounded-full bg-[var(--color-accent)] text-[var(--color-on-accent)] flex items-center justify-center shrink-0">
+                    <Check className="w-3.5 h-3.5 stroke-[3]" />
+                  </div>
+                )}
+              </button>
+
+              {/* Organizations List */}
+              {organizationsList.map((org) => {
+                const active = activeWorkspace === org.id;
+                return (
+                  <button
+                    key={org.id}
+                    type="button"
+                    data-testid={`workspace-modal-org-${org.id}`}
+                    onClick={() => {
+                      switchWorkspace(org.id);
+                      setIsWorkspaceModalOpen(false);
+                    }}
+                    className={`w-full p-3 rounded-xl border text-start flex items-center justify-between gap-3 transition-all duration-200 min-h-[56px] ${
+                      active
+                        ? 'bg-[var(--color-accent)]/10 border-[var(--color-accent)] text-[var(--color-accent)] shadow-xs'
+                        : 'bg-white dark:bg-[#1E2E27] border-[var(--color-line)] text-[var(--color-ink)] hover:border-[var(--color-accent)]/50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div
+                        className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                          active
+                            ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)]'
+                            : 'bg-[var(--color-surface-subtle)] text-[var(--color-muted)]'
+                        }`}
+                      >
+                        <Building2 className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-xs font-bold text-[var(--color-ink)] truncate">
+                            {org.name}
+                          </span>
+                          {active && activeOrgRole && (
+                            <span
+                              data-testid="workspace-modal-role-badge"
+                              className="px-1.5 py-0.5 rounded bg-[var(--color-accent)]/15 text-[var(--color-accent)] font-bold text-[9px] shrink-0"
+                            >
+                              {roleLabels[activeOrgRole][isRTL ? 'ar' : 'en']}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-[var(--color-muted)] truncate mt-0.5 flex items-center gap-1.5">
+                          <span className="font-mono font-semibold">{org.currency}</span>
+                          <span>•</span>
+                          <span>{isRTL ? 'مساحة مؤسسة' : 'Enterprise'}</span>
+                        </div>
+                      </div>
+                    </div>
+                    {active && (
+                      <div className="w-6 h-6 rounded-full bg-[var(--color-accent)] text-[var(--color-on-accent)] flex items-center justify-center shrink-0">
+                        <Check className="w-3.5 h-3.5 stroke-[3]" />
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Footer Quick Actions */}
+            <div className="p-3 border-t border-[var(--color-line)] bg-[var(--color-surface-subtle)] flex flex-col sm:grid sm:grid-cols-2 gap-2">
+              <button
+                type="button"
+                data-testid="workspace-modal-create-org-btn"
+                onClick={() => {
+                  setIsWorkspaceModalOpen(false);
+                  setShowCreateOrg(true);
+                }}
+                className="px-3 py-2.5 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center justify-center gap-1.5 min-h-[42px] hover:opacity-95"
+              >
+                <Plus className="w-4 h-4 shrink-0" />
+                <span className="truncate">{t('createOrganization')}</span>
+              </button>
+              <button
+                type="button"
+                data-testid="workspace-modal-join-org-btn"
+                onClick={() => {
+                  setJoinError(null);
+                  setIsWorkspaceModalOpen(false);
+                  setShowJoinOrg(true);
+                }}
+                className="px-3 py-2.5 rounded-xl bg-white dark:bg-[#1E2E27] border border-[var(--color-line)] text-[var(--color-ink)] text-xs font-semibold flex items-center justify-center gap-1.5 min-h-[42px] hover:border-[var(--color-accent)]"
+              >
+                <KeyRound className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
+                <span className="truncate">{t('joinOrganization')}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Create Organization Modal */}
       {showCreateOrg && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4">
           <form
             onSubmit={handleCreateOrgSubmit}
             dir={isRTL ? 'rtl' : 'ltr'}
-            className="w-full max-w-sm bg-[var(--color-surface)] border border-[var(--color-line)] rounded-2xl p-5 space-y-4 shadow-2xl"
+            className="w-full max-w-sm bg-white dark:bg-[#17231E] border border-[var(--color-line)] rounded-2xl p-5 space-y-4 shadow-2xl"
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -1337,7 +1304,7 @@ export const Navbar: React.FC = () => {
           <form
             onSubmit={handleJoinOrgSubmit}
             dir={isRTL ? 'rtl' : 'ltr'}
-            className="w-full max-w-sm bg-[var(--color-surface)] border border-[var(--color-line)] rounded-2xl p-5 space-y-4 shadow-2xl"
+            className="w-full max-w-sm bg-white dark:bg-[#17231E] border border-[var(--color-line)] rounded-2xl p-5 space-y-4 shadow-2xl"
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">

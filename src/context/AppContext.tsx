@@ -356,6 +356,8 @@ interface AppContextType {
   orgHubTab: OrgHubTab;
   setOrgHubTab: (tab: OrgHubTab) => void;
   openOrgHub: (tab?: OrgHubTab) => void;
+  isWorkspaceModalOpen: boolean;
+  setIsWorkspaceModalOpen: (open: boolean) => void;
 
   // Active View / Modals
   activeNav: AppNavView;
@@ -808,6 +810,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
   const [isOrgHubOpen, setIsOrgHubOpen] = useState(false);
   const [orgHubTab, setOrgHubTab] = useState<OrgHubTab>('approvals');
+  const [isWorkspaceModalOpen, setIsWorkspaceModalOpen] = useState(false);
 
   const openOrgHub = useCallback((tab: OrgHubTab = 'approvals') => {
     setOrgHubTab(tab);
@@ -6751,6 +6754,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       orgHubTab,
       setOrgHubTab,
       openOrgHub,
+      isWorkspaceModalOpen,
+      setIsWorkspaceModalOpen,
     }),
     [
       activeWorkspace,
@@ -6813,6 +6818,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       isOrgHubOpen,
       orgHubTab,
       openOrgHub,
+      isWorkspaceModalOpen,
     ]
   );
 
@@ -6903,6 +6909,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         orgHubTab,
         setOrgHubTab,
         openOrgHub,
+        isWorkspaceModalOpen,
+        setIsWorkspaceModalOpen,
 
         activeNav,
         setActiveNav,

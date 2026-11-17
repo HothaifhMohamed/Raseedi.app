@@ -111,6 +111,8 @@ export interface OrgContextValue {
   orgHubTab: OrgHubTab;
   setOrgHubTab: (tab: OrgHubTab) => void;
   openOrgHub: (tab?: OrgHubTab) => void;
+  isWorkspaceModalOpen: boolean;
+  setIsWorkspaceModalOpen: (open: boolean) => void;
 }
 
 const OrgContext = createContext<OrgContextValue | undefined>(undefined);

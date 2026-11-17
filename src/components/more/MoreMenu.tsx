@@ -12,8 +12,6 @@ import {
   Target,
   ChevronLeft,
   ChevronRight,
-  ChevronDown,
-  Check,
   Sparkles,
   Crown,
   X,
@@ -52,9 +50,8 @@ import {
 export const MoreMenu: React.FC = () => {
   const {
     isOrgWorkspace,
-    activeWorkspace,
-    organizationsList,
-    switchWorkspace,
+    isWorkspaceModalOpen,
+    setIsWorkspaceModalOpen,
     activeOrganization,
     orgCostCenters,
     orgParties,
@@ -91,16 +88,6 @@ export const MoreMenu: React.FC = () => {
   const [moneyCirclesOpen, setMoneyCirclesOpen] = useState(false);
   const [supportLegalTab, setSupportLegalTab] = useState<'support' | 'legal' | null>(null);
   const [activeSubModal, setActiveSubModal] = useState<string | null>(null);
-  const [isWorkspaceMenuOpen, setIsWorkspaceMenuOpen] = useState(false);
-
-  React.useEffect(() => {
-    if (!isWorkspaceMenuOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setIsWorkspaceMenuOpen(false);
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isWorkspaceMenuOpen]);
 
   useModalBackHandler(reportsOpen, () => setReportsOpen(false), 'more-reports');
   useModalBackHandler(categoriesOpen, () => setCategoriesOpen(false), 'more-categories');
@@ -152,32 +139,14 @@ export const MoreMenu: React.FC = () => {
 
   return (
     <div className="flex flex-col flex-1 min-w-0 w-full px-4 py-3 pb-24 space-y-4" dir={isRTL ? 'rtl' : 'ltr'}>
-      {/* 0. WORKSPACE SWITCHER DROPDOWN CARD */}
+      {/* 0. WORKSPACE SWITCHER TRIGGER CARD (Opens Standalone Workspace Modal) */}
       <div className="relative" data-testid="more-workspace-switcher">
-        {isWorkspaceMenuOpen && (
-          <div
-            data-testid="more-workspace-backdrop"
-            aria-hidden="true"
-            className="fixed inset-0 z-40 bg-black/15 backdrop-blur-[1px] transition-opacity duration-300 animate-in fade-in"
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              setIsWorkspaceMenuOpen(false);
-            }}
-          />
-        )}
-
         <button
           type="button"
           data-testid="more-workspace-switcher-btn"
-          aria-expanded={isWorkspaceMenuOpen}
-          onClick={() => setIsWorkspaceMenuOpen((prev) => !prev)}
-          className={`relative z-50 w-full p-3.5 rounded-xl bg-[var(--color-surface)] border transition-all duration-300 flex items-center justify-between gap-3 text-start min-h-[54px] ${
-            isWorkspaceMenuOpen
-              ? 'border-[var(--color-accent)] shadow-md'
-              : 'border-[var(--color-line)] hover:border-[var(--color-accent)]/60 shadow-xs'
-          }`}
+          aria-expanded={isWorkspaceModalOpen}
+          onClick={() => setIsWorkspaceModalOpen(true)}
+          className="w-full p-3.5 rounded-xl bg-white dark:bg-[#17231E] border border-[var(--color-line)] hover:border-[var(--color-accent)]/60 shadow-xs transition-all duration-200 flex items-center justify-between gap-3 text-start min-h-[54px]"
         >
           <div className="flex items-center gap-3 min-w-0">
             <div className="w-9 h-9 rounded-xl bg-[var(--color-accent)]/12 text-[var(--color-accent)] flex items-center justify-center shrink-0">
@@ -195,74 +164,8 @@ export const MoreMenu: React.FC = () => {
             </div>
           </div>
 
-          <ChevronDown
-            className={`w-4 h-4 text-[var(--color-muted)] shrink-0 transition-transform duration-300 ${
-              isWorkspaceMenuOpen ? 'rotate-180 text-[var(--color-accent)]' : ''
-            }`}
-          />
+          <ArrowIcon className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
         </button>
-
-        {isWorkspaceMenuOpen && (
-          <div
-            data-testid="more-workspace-dropdown"
-            onClick={(e) => e.stopPropagation()}
-            className="absolute inset-x-0 top-full mt-1.5 z-50 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl shadow-xl py-1.5 divide-y divide-[var(--color-line)] transition-all duration-300 animate-in fade-in zoom-in-95 max-h-64 overflow-y-auto"
-          >
-            <button
-              type="button"
-              onClick={() => {
-                switchWorkspace('personal');
-                setIsWorkspaceMenuOpen(false);
-              }}
-              className={`w-full px-3.5 py-2.5 text-xs flex items-center justify-between text-start min-h-[44px] transition-colors ${
-                activeWorkspace === 'personal'
-                  ? 'bg-[var(--color-accent)]/10 text-[var(--color-accent)] font-semibold'
-                  : 'text-[var(--color-ink)] hover:bg-[var(--color-bg)]'
-              }`}
-            >
-              <div className="flex items-center gap-2.5 min-w-0">
-                <User className="w-4 h-4 shrink-0" />
-                <div className="truncate">
-                  <div className="truncate">{t('personalWorkspace')}</div>
-                  <div className="text-[10px] text-[var(--color-muted)] font-normal">
-                    {isRTL ? 'بيانات شخصية محلية ومشفرة' : 'Personal encrypted ledger'}
-                  </div>
-                </div>
-              </div>
-              {activeWorkspace === 'personal' && <Check className="w-4 h-4 shrink-0" />}
-            </button>
-
-            {organizationsList.map((org) => {
-              const active = activeWorkspace === org.id;
-              return (
-                <button
-                  key={org.id}
-                  type="button"
-                  onClick={() => {
-                    switchWorkspace(org.id);
-                    setIsWorkspaceMenuOpen(false);
-                  }}
-                  className={`w-full px-3.5 py-2.5 text-xs flex items-center justify-between text-start min-h-[44px] transition-colors ${
-                    active
-                      ? 'bg-[var(--color-accent)]/10 text-[var(--color-accent)] font-semibold'
-                      : 'text-[var(--color-ink)] hover:bg-[var(--color-bg)]'
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <Building2 className="w-4 h-4 shrink-0" />
-                    <div className="truncate">
-                      <div className="truncate">{org.name}</div>
-                      <div className="text-[10px] text-[var(--color-muted)] font-normal">
-                        {org.currency} • {isRTL ? 'مساحة مؤسسة' : 'Enterprise workspace'}
-                      </div>
-                    </div>
-                  </div>
-                  {active && <Check className="w-4 h-4 shrink-0" />}
-                </button>
-              );
-            })}
-          </div>
-        )}
       </div>
 
       {/* 1. HERO CARD: Admin Code Panel for Admin, Active Subscriber Summary, or Free Upgrade */}

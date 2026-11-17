@@ -81,6 +81,11 @@ import {
   UserCurrencyRatesSyncInput,
 } from './currencySync';
 
+const isPlaceholderConfig =
+  !firebaseConfig?.projectId ||
+  firebaseConfig.projectId === 'remixed-project-id' ||
+  !firebaseConfig?.apiKey;
+
 const app = initializeApp(firebaseConfig);
 
 function createFirestoreInstance(): Firestore {
@@ -92,7 +97,8 @@ function createFirestoreInstance(): Firestore {
         localCache: persistentLocalCache({
           tabManager: persistentMultipleTabManager(),
         }),
-        experimentalForceLongPolling: true,
+        experimentalAutoDetectLongPolling: true,
+        ignoreUndefinedProperties: true,
       },
       databaseId
     );
@@ -102,7 +108,8 @@ function createFirestoreInstance(): Firestore {
         app,
         {
           localCache: memoryLocalCache(),
-          experimentalForceLongPolling: true,
+          experimentalAutoDetectLongPolling: true,
+          ignoreUndefinedProperties: true,
         },
         databaseId
       );
@@ -118,8 +125,55 @@ export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
+async function isFirestoreRestReachable(): Promise<boolean> {
+  if (isPlaceholderConfig || typeof fetch !== 'function') return false;
+  const databaseId = firebaseConfig.firestoreDatabaseId || '(default)';
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+    firebaseConfig.projectId
+  )}/databases/${encodeURIComponent(databaseId)}/documents/test/connection?key=${encodeURIComponent(
+    firebaseConfig.apiKey
+  )}`;
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 5000) : null;
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      signal: controller?.signal,
+    });
+    // 200 or 401/403 proves the Firestore project + database exist and rules evaluated the request
+    return res.status === 200 || res.status === 401 || res.status === 403;
+  } catch {
+    return false;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+async function waitForVisibleAndOnline(): Promise<void> {
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+    await new Promise<void>((resolve) => {
+      const onVisible = () => {
+        if (document.visibilityState === 'visible') {
+          document.removeEventListener('visibilitychange', onVisible);
+          resolve();
+        }
+      };
+      document.addEventListener('visibilitychange', onVisible);
+      setTimeout(() => {
+        document.removeEventListener('visibilitychange', onVisible);
+        resolve();
+      }, 4000);
+    });
+  }
+}
+
 async function testConnection(): Promise<void> {
   if (typeof window === 'undefined') return;
+  if (isPlaceholderConfig) {
+    console.error('Please check your Firebase configuration.');
+    return;
+  }
+  await waitForVisibleAndOnline();
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
@@ -134,7 +188,14 @@ async function testConnection(): Promise<void> {
           retryError instanceof Error &&
           retryError.message.includes('the client is offline')
         ) {
-          console.error('Please check your Firebase configuration.');
+          const restReachable = await isFirestoreRestReachable();
+          if (restReachable) {
+            console.warn(
+              'Firestore real-time channel delayed; operating with local cache until sync resumes.'
+            );
+          } else {
+            console.error('Please check your Firebase configuration.');
+          }
         }
       }
     }
