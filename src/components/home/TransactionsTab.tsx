@@ -241,7 +241,7 @@ export const TransactionsTab: React.FC = () => {
                 selectAllTransactions(allFilteredIds);
               }
             }}
-            className={`p-2.5 rounded-xl border transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center ${
+            className={`p-2.5 rounded-xl border transition-all duration-300 min-h-[44px] min-w-[44px] flex items-center justify-center ${
               isMultiSelectActive
                 ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)]'
                 : 'bg-[var(--color-surface)] border-[var(--color-line)] text-[var(--color-muted)] hover:text-[var(--color-ink)]'
@@ -249,6 +249,78 @@ export const TransactionsTab: React.FC = () => {
             title={isRTL ? 'تحديد متعدد' : 'Multi-select'}
           >
             {isMultiSelectActive ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+          </button>
+        )}
+      </div>
+
+      {/* Quick Filter Chips Bar */}
+      <div className="px-4 pb-2 flex items-center gap-2 overflow-x-auto no-scrollbar">
+        <button
+          onClick={() => setIsFilterOpen(true)}
+          className="p-2 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-muted)] hover:text-[var(--color-ink)] shrink-0 min-h-[40px] min-w-[40px] flex items-center justify-center transition-all duration-300"
+          title={t('filter')}
+        >
+          <Search className="w-3.5 h-3.5 text-[var(--color-accent)]" />
+        </button>
+
+        <button
+          onClick={() => setFilters((p) => ({ ...p, type: 'all' }))}
+          className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold shrink-0 transition-all duration-300 min-h-[40px] border ${
+            filters.type === 'all'
+              ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)] shadow-xs'
+              : 'bg-[var(--color-surface)] border-[var(--color-line)] text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+          }`}
+        >
+          {t('filterAll')}
+        </button>
+
+        <button
+          onClick={() => setFilters((p) => ({ ...p, type: 'income' }))}
+          className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold shrink-0 transition-all duration-300 min-h-[40px] border ${
+            filters.type === 'income'
+              ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)] shadow-xs'
+              : 'bg-[var(--color-surface)] border-[var(--color-line)] text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+          }`}
+        >
+          {t('filterIncome')}
+        </button>
+
+        <button
+          onClick={() => setFilters((p) => ({ ...p, type: 'expense' }))}
+          className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold shrink-0 transition-all duration-300 min-h-[40px] border ${
+            filters.type === 'expense'
+              ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)] shadow-xs'
+              : 'bg-[var(--color-surface)] border-[var(--color-line)] text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+          }`}
+        >
+          {t('filterExpense')}
+        </button>
+
+        {wallets.map((w) => (
+          <button
+            key={w.id}
+            onClick={() =>
+              setFilters((p) => ({
+                ...p,
+                walletId: p.walletId === w.id ? undefined : w.id,
+              }))
+            }
+            className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold shrink-0 transition-all duration-300 min-h-[40px] border ${
+              filters.walletId === w.id
+                ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)] shadow-xs'
+                : 'bg-[var(--color-surface)] border-[var(--color-line)] text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+            }`}
+          >
+            {w.name}
+          </button>
+        ))}
+
+        {(filters.type !== 'all' || filters.walletId || filters.searchQuery) && (
+          <button
+            onClick={resetFilters}
+            className="px-3 py-1.5 rounded-xl text-xs text-[var(--color-expense)] bg-[var(--color-expense)]/10 hover:bg-[var(--color-expense)]/20 shrink-0 font-semibold min-h-[40px] transition-all duration-300"
+          >
+            {isRTL ? 'مسح التصفية' : 'Reset'}
           </button>
         )}
       </div>
@@ -645,83 +717,6 @@ export const TransactionsTab: React.FC = () => {
           )}
         </div>
       )}
-
-      {/* Bottom Filter Chips (Always accessible) */}
-      <div className="fixed bottom-14 inset-x-0 z-20 bg-[var(--color-bg)] border-t border-[var(--color-line)] px-4 py-2 flex items-center gap-2 overflow-x-auto max-w-lg mx-auto no-scrollbar">
-        <button
-          onClick={() => setIsFilterOpen(true)}
-          className="p-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-muted)] hover:text-[var(--color-ink)] shrink-0 min-h-[36px] min-w-[36px] flex items-center justify-center"
-          title={t('filter')}
-        >
-          <Search className="w-3.5 h-3.5 text-[var(--color-accent)]" />
-        </button>
-
-        {/* All Chip */}
-        <button
-          onClick={() => setFilters((p) => ({ ...p, type: 'all' }))}
-          className={`px-3 py-1.5 rounded-lg text-xs font-semibold shrink-0 transition-colors min-h-[36px] border ${
-            filters.type === 'all'
-              ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)] shadow-xs'
-              : 'bg-[var(--color-surface)] border-[var(--color-line)] text-[var(--color-muted)] hover:text-[var(--color-ink)]'
-          }`}
-        >
-          {t('filterAll')}
-        </button>
-
-        {/* Income Chip */}
-        <button
-          onClick={() => setFilters((p) => ({ ...p, type: 'income' }))}
-          className={`px-3 py-1.5 rounded-lg text-xs font-semibold shrink-0 transition-colors min-h-[36px] border ${
-            filters.type === 'income'
-              ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)] shadow-xs'
-              : 'bg-[var(--color-surface)] border-[var(--color-line)] text-[var(--color-muted)] hover:text-[var(--color-ink)]'
-          }`}
-        >
-          {t('filterIncome')}
-        </button>
-
-        {/* Expense Chip */}
-        <button
-          onClick={() => setFilters((p) => ({ ...p, type: 'expense' }))}
-          className={`px-3 py-1.5 rounded-lg text-xs font-semibold shrink-0 transition-colors min-h-[36px] border ${
-            filters.type === 'expense'
-              ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)] shadow-xs'
-              : 'bg-[var(--color-surface)] border-[var(--color-line)] text-[var(--color-muted)] hover:text-[var(--color-ink)]'
-          }`}
-        >
-          {t('filterExpense')}
-        </button>
-
-        {/* Wallet Filter Pills */}
-        {wallets.map((w) => (
-          <button
-            key={w.id}
-            onClick={() =>
-              setFilters((p) => ({
-                ...p,
-                walletId: p.walletId === w.id ? undefined : w.id,
-              }))
-            }
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold shrink-0 transition-colors min-h-[36px] border ${
-              filters.walletId === w.id
-                ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)] shadow-xs'
-                : 'bg-[var(--color-surface)] border-[var(--color-line)] text-[var(--color-muted)] hover:text-[var(--color-ink)]'
-            }`}
-          >
-            {w.name}
-          </button>
-        ))}
-
-        {/* Reset filter button if any active */}
-        {(filters.type !== 'all' || filters.walletId || filters.searchQuery) && (
-          <button
-            onClick={resetFilters}
-            className="px-2.5 py-1.5 rounded-lg text-xs text-[var(--color-expense)] bg-[var(--color-expense)]/10 hover:bg-[var(--color-expense)]/20 shrink-0 font-medium min-h-[36px]"
-          >
-            {isRTL ? 'مسح التصفية' : 'Reset'}
-          </button>
-        )}
-      </div>
 
       {/* Confirmation Modal for Multi-Delete */}
       <ConfirmationModal

@@ -4,13 +4,14 @@
  */
 
 import React from 'react';
+import { ArrowLeft, ArrowRight } from 'lucide-react';
 import { AppProvider, useApp } from './context/AppContext';
 import { useModalBackHandler } from './hooks/useModalBackHandler';
 import { Navbar } from './components/Navbar';
 import { BottomNav } from './components/BottomNav';
 import { SplashScreen } from './components/SplashScreen';
 import { OnboardingModal } from './components/OnboardingModal';
-import { SummaryCards } from './components/home/SummaryCards';
+import { HomeDashboard } from './components/home/HomeDashboard';
 import { TransactionsTab } from './components/home/TransactionsTab';
 import { StatisticsTab } from './components/home/StatisticsTab';
 import { TemplatesTab } from './components/home/TemplatesTab';
@@ -83,6 +84,13 @@ const MainLayout: React.FC = () => {
   } = useApp();
 
   const [hasConsentForAds, setHasConsentForAds] = React.useState<boolean>(() => hasAdSenseConsent());
+  const [showFullLedger, setShowFullLedger] = React.useState(false);
+
+  React.useEffect(() => {
+    if (activeNav !== 'home' || homeTab !== 'transactions') {
+      setShowFullLedger(false);
+    }
+  }, [activeNav, homeTab]);
 
   React.useEffect(() => {
     return subscribeAdConsentChanges(() => {
@@ -169,13 +177,15 @@ const MainLayout: React.FC = () => {
     return <OnboardingModal />;
   }
 
+  const BackArrow = isRTL ? ArrowRight : ArrowLeft;
+
   return (
     <div
-      className="min-h-screen bg-[var(--color-bg)] text-[var(--color-ink)] flex flex-col font-sans transition-colors duration-150 overflow-x-clip"
+      className="min-h-screen bg-[var(--color-bg)] text-[var(--color-ink)] flex flex-col font-sans transition-colors duration-300 overflow-x-clip"
       dir={isRTL ? 'rtl' : 'ltr'}
     >
-      {/* Mobile-centric container centered on desktop with clean borders */}
-      <div className="w-full max-w-lg mx-auto min-h-screen flex flex-col bg-[var(--color-bg)] sm:border-x sm:border-[var(--color-line)] shadow-sm relative min-w-0 overflow-x-clip">
+      {/* Responsive container: mobile-first 375-430px, scales smoothly on tablet & desktop */}
+      <div className="w-full max-w-lg md:max-w-2xl lg:max-w-4xl mx-auto min-h-screen flex flex-col bg-[var(--color-bg)] md:border-x md:border-[var(--color-line)]/70 shadow-xs relative min-w-0 overflow-x-clip">
         {/* Offline indicator banner */}
         <OfflineIndicator />
 
@@ -187,52 +197,47 @@ const MainLayout: React.FC = () => {
 
         {/* Dynamic View Router */}
         <main className="flex-1 flex flex-col min-w-0">
-          {/* HOME VIEW */}
+          {/* HOME VIEW: Smart Dashboard by default, or clean sub-views without legacy tabs */}
           {activeNav === 'home' && (
             <div className="flex flex-col flex-1">
-              {/* Financial Summary Metrics Card */}
-              <SummaryCards />
+              {homeTab === 'transactions' && !showFullLedger ? (
+                <HomeDashboard
+                  onOpenFullLedger={() => setShowFullLedger(true)}
+                  onOpenStatistics={() => setHomeTab('statistics')}
+                  onOpenTemplates={() => setHomeTab('templates')}
+                />
+              ) : (
+                <>
+                  <div className="px-4 pt-3 pb-1 flex items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      data-testid="home-subview-back-btn"
+                      onClick={() => {
+                        setShowFullLedger(false);
+                        setHomeTab('transactions');
+                      }}
+                      className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-xs font-bold text-[var(--color-ink)] transition-all duration-300 min-h-[42px]"
+                    >
+                      <BackArrow className="w-4 h-4 text-[var(--color-accent)]" />
+                      <span>{isRTL ? 'العودة للوحة الرئيسية' : 'Back to Dashboard'}</span>
+                    </button>
 
-              {/* 3 Home Tabs: Transactions, Statistics, Templates */}
-              <div className="px-4 py-2 border-b border-[var(--color-line)] bg-[var(--color-bg)] sticky top-[53px] z-20">
-                <div className="flex items-center p-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl">
-                  <button
-                    onClick={() => setHomeTab('transactions')}
-                    className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-colors min-h-[36px] ${
-                      homeTab === 'transactions'
-                        ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
-                        : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
-                    }`}
-                  >
-                    {t('tabTransactions')}
-                  </button>
-                  <button
-                    onClick={() => setHomeTab('statistics')}
-                    className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-colors min-h-[36px] ${
-                      homeTab === 'statistics'
-                        ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
-                        : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
-                    }`}
-                  >
-                    {t('tabStatistics')}
-                  </button>
-                  <button
-                    onClick={() => setHomeTab('templates')}
-                    className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-colors min-h-[36px] ${
-                      homeTab === 'templates'
-                        ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
-                        : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
-                    }`}
-                  >
-                    {t('tabTemplates')}
-                  </button>
-                </div>
-              </div>
+                    <span className="text-xs font-bold text-[var(--color-muted)]">
+                      {homeTab === 'statistics'
+                        ? t('tabStatistics')
+                        : homeTab === 'templates'
+                        ? t('tabTemplates')
+                        : isRTL
+                        ? 'سجل المعاملات الكامل'
+                        : 'Full Ledger'}
+                    </span>
+                  </div>
 
-              {/* Active Tab View */}
-              {homeTab === 'transactions' && <TransactionsTab />}
-              {homeTab === 'statistics' && <StatisticsTab />}
-              {homeTab === 'templates' && <TemplatesTab />}
+                  {homeTab === 'transactions' && <TransactionsTab />}
+                  {homeTab === 'statistics' && <StatisticsTab />}
+                  {homeTab === 'templates' && <TemplatesTab />}
+                </>
+              )}
             </div>
           )}
 
@@ -252,8 +257,8 @@ const MainLayout: React.FC = () => {
           {activeNav === 'more' && <MoreMenu />}
         </main>
 
-        {/* Global Bottom Navigation */}
-        <BottomNav />
+        {/* Global Floating Glassmorphic Bottom Navigation */}
+        <BottomNav onHomeReset={() => setShowFullLedger(false)} />
 
         {/* Add/Edit Transaction Modal */}
         <TransactionModal

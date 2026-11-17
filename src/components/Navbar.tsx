@@ -282,7 +282,7 @@ export const Navbar: React.FC = () => {
   return (
     <>
       <header
-        className="sticky top-0 z-30 w-full bg-[var(--color-bg)] border-b border-[var(--color-line)] px-3 sm:px-4 py-2 flex items-center justify-between gap-2"
+        className="sticky top-0 z-30 w-full bg-[var(--color-bg)]/85 backdrop-blur-lg border-b border-[var(--color-line)]/80 px-3 sm:px-4 py-2 flex items-center justify-between gap-2 transition-all duration-300"
         dir={isRTL ? 'rtl' : 'ltr'}
       >
         {/* Left / Start: Brand Logo + Workspace Switcher */}

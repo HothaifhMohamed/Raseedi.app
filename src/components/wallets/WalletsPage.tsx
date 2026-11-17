@@ -1,22 +1,17 @@
 import React, { useState, useMemo } from 'react';
 import {
   Plus,
-  Eye,
   EyeOff,
   Lock,
-  Unlock,
-  Edit2,
   Trash2,
   Check,
   Crown,
   Sparkles,
-  Archive,
   AlertTriangle,
   ArrowUp,
   ArrowDown,
   ArrowUpDown,
-  MoreHorizontal,
-  PauseCircle,
+  Archive,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { Wallet, WalletType } from '../../types';
@@ -38,12 +33,12 @@ import { shouldShowPersonalUpgradeUi } from '../../services/subscriptionHelpers'
 import { WalletQuickActionsSheet } from './WalletQuickActionsSheet';
 
 const SOLID_MUTED_PALETTE = [
-  { id: 'teal', label: 'تركواز ترابي', hex: '#3A605B' },
-  { id: 'slate', label: 'رمادي حجري', hex: '#3E4E63' },
-  { id: 'warm-brown', label: 'بني دافئ', hex: '#6A5243' },
-  { id: 'olive', label: 'زيتوني هادئ', hex: '#4A5B52' },
-  { id: 'plum', label: 'برقوقي خافت', hex: '#634A54' },
-  { id: 'charcoal', label: 'فحمي ناعم', hex: '#4E555C' },
+  { id: 'emerald', label: 'أخضر زمردي', hex: '#0E5A43' },
+  { id: 'teal', label: 'أخضر غابات', hex: '#1B4D3E' },
+  { id: 'navy', label: 'كحلي ليلي', hex: '#1E3A4C' },
+  { id: 'bronze', label: 'ذهبي برونزي', hex: '#7A5B2B' },
+  { id: 'plum', label: 'خمري هادئ', hex: '#5D3746' },
+  { id: 'charcoal', label: 'رمادي فحمي', hex: '#2F3B36' },
 ];
 
 const WALLET_ICONS = ['Wallet', 'CreditCard', 'Landmark', 'Banknote', 'Coins', 'Vault'];
@@ -245,10 +240,13 @@ export const WalletsPage: React.FC = () => {
     }
   };
 
-  const handleToggleLock = (w: Wallet, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleToggleLock = (w: Wallet) => {
     if (w.isLocked) {
       updateWallet(w.id, { isLocked: false, pin: undefined, pinSalt: undefined });
+      showToast(
+        isRTL ? `تم إلغاء قفل محفظة "${w.name}"` : `Lock removed from "${w.name}"`,
+        'success'
+      );
     } else {
       if (!isPro) {
         setIsUpgradeModalOpen(true);
@@ -261,13 +259,13 @@ export const WalletsPage: React.FC = () => {
 
   return (
     <div className="flex flex-col flex-1 px-4 py-3 pb-24 space-y-4" dir={isRTL ? 'rtl' : 'ltr'}>
-      {/* Total Balance at Top */}
-      <div className="p-4 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] flex items-center justify-between">
+      {/* Total Balance Header Card */}
+      <div className="p-4 sm:p-5 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-line)] shadow-xs flex items-center justify-between gap-3 transition-all duration-300">
         <div>
           <span className="text-xs text-[var(--color-muted)] block mb-1">
             {t('totalWalletsBalance')}
           </span>
-          <div className="text-2xl font-bold text-[var(--color-ink)] num-tabular tracking-tight">
+          <div className="text-2xl sm:text-3xl font-bold text-[var(--color-ink)] num-tabular tracking-tight">
             {formatCurrencyAmount(totalBalance, settings.mainCurrency, {
               decimalPlaces: settings.decimalPlaces,
               digitFormat: settings.digitFormat,
@@ -275,7 +273,7 @@ export const WalletsPage: React.FC = () => {
             })}
           </div>
           {wallets.some((w) => !w.isArchived && w.excludeFromTotal) && (
-            <div className="mt-1 flex items-center gap-1 text-[10px] text-[var(--color-muted)]">
+            <div className="mt-1 flex items-center gap-1 text-[11px] text-[var(--color-muted)]">
               <EyeOff className="w-3 h-3 shrink-0" />
               <span>
                 {(() => {
@@ -291,23 +289,23 @@ export const WalletsPage: React.FC = () => {
 
         <button
           onClick={handleOpenAdd}
-          className="flex items-center gap-1.5 px-3.5 py-2 bg-[var(--color-accent)] text-[var(--color-on-accent)] font-medium rounded-xl text-xs hover:opacity-95 transition-opacity min-h-[44px]"
+          className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--color-accent)] text-[var(--color-on-accent)] font-semibold rounded-2xl text-xs hover:opacity-95 active:scale-95 transition-all duration-300 min-h-[44px] shrink-0 shadow-xs"
         >
           <Plus className="w-4 h-4" />
           <span>{t('addWallet')}</span>
           {shouldShowPersonalUpgradeUi(subscriptionSummary) && wallets.length >= 3 && (
-            <Crown className="w-3.5 h-3.5 ms-0.5" />
+            <Crown className="w-3.5 h-3.5 ms-0.5 text-[var(--color-gold)]" />
           )}
         </button>
       </div>
 
       {/* Free limit hint if at 3 wallets and eligible for Personal upgrade */}
       {shouldShowPersonalUpgradeUi(subscriptionSummary) && wallets.length >= 3 && (
-        <div className="p-2.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl flex items-center justify-between text-xs text-[var(--color-muted)]">
+        <div className="p-3 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-2xl flex items-center justify-between text-xs text-[var(--color-muted)]">
           <span>{isRTL ? 'وصلت للحد الأقصى المجاني (3 محافظ)' : 'Free limit reached (3 wallets)'}</span>
           <button
             onClick={() => setIsUpgradeModalOpen(true)}
-            className="text-[var(--color-accent)] font-semibold hover:underline flex items-center gap-1"
+            className="text-[var(--color-accent)] font-semibold hover:underline flex items-center gap-1 min-h-[36px]"
           >
             <Sparkles className="w-3 h-3" />
             <span>
@@ -339,7 +337,7 @@ export const WalletsPage: React.FC = () => {
             onClick={() => setIsReorderMode((prev) => !prev)}
             aria-pressed={isReorderMode}
             data-testid="toggle-reorder-wallets"
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors min-h-[38px] ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all duration-300 min-h-[40px] ${
               isReorderMode
                 ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)] shadow-xs'
                 : 'bg-[var(--color-surface)] text-[var(--color-ink)] border-[var(--color-line)] hover:border-[var(--color-accent)]/50'
@@ -360,9 +358,9 @@ export const WalletsPage: React.FC = () => {
         )}
       </div>
 
-      {/* Wallets Cards List */}
+      {/* Wallets Cards List (Clean Credit Card Style) */}
       {sortedWallets.length === 0 ? (
-        <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl">
+        <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-2xl">
           <HairlineEmptyState
             figure="vault"
             surface="surface"
@@ -375,7 +373,7 @@ export const WalletsPage: React.FC = () => {
             action={
               <button
                 onClick={handleOpenAdd}
-                className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-accent)] text-[var(--color-on-accent)] font-medium rounded-xl text-xs hover:opacity-95 min-h-[44px]"
+                className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--color-accent)] text-[var(--color-on-accent)] font-medium rounded-xl text-xs hover:opacity-95 min-h-[44px]"
               >
                 <Plus className="w-4 h-4" />
                 <span>{t('addWallet')}</span>
@@ -384,141 +382,130 @@ export const WalletsPage: React.FC = () => {
           />
         </div>
       ) : (
-      <div className="space-y-3" data-testid="wallets-card-list">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5" data-testid="wallets-card-list">
         {sortedWallets.map((w, index) => {
           const isHidden = hiddenBalances[w.id];
           const isLocked = w.isLocked && lockedWalletIds.includes(w.id);
-          const cardColor = w.color?.startsWith('#') ? w.color : '#3A605B';
+          const cardColor = w.color?.startsWith('#') ? w.color : '#0E5A43';
 
           return (
             <div
               key={w.id}
               data-wallet-id={w.id}
+              role={isReorderMode ? undefined : 'button'}
+              tabIndex={isReorderMode ? undefined : 0}
               onClick={() => {
                 if (!isReorderMode) handleCardClick(w);
               }}
-              className={`relative rounded-xl p-4.5 border border-black/10 transition-opacity text-white select-none min-h-[100px] ${
+              onKeyDown={(e) => {
+                if (!isReorderMode && (e.key === 'Enter' || e.key === ' ')) {
+                  e.preventDefault();
+                  handleCardClick(w);
+                }
+              }}
+              className={`relative overflow-hidden rounded-2xl p-5 min-h-[154px] flex flex-col justify-between text-white select-none border border-white/15 shadow-[0_12px_28px_-10px_rgba(9,50,37,0.35)] transition-all duration-300 ${
                 isReorderMode
-                  ? 'cursor-default ring-1 ring-[var(--color-accent)]/40'
-                  : 'cursor-pointer hover:opacity-95'
-              } ${w.isArchived ? 'opacity-80' : ''}`}
-              style={{ backgroundColor: cardColor }}
+                  ? 'cursor-default ring-2 ring-[var(--color-accent)]/50'
+                  : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-[0_16px_32px_-10px_rgba(9,50,37,0.45)] active:scale-[0.985]'
+              } ${w.isArchived ? 'opacity-75 grayscale-[25%]' : ''}`}
+              style={{
+                background: `linear-gradient(135deg, ${cardColor} 0%, color-mix(in srgb, ${cardColor} 74%, #061A14) 100%)`,
+              }}
             >
-              <div>
-                {/* Top Row: Lucide Icon + Name + Action Icons */}
-                <div className="flex items-center justify-between mb-3 gap-2">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-10 h-10 rounded-xl bg-black/20 flex items-center justify-center shrink-0">
-                      <IconRenderer name={w.icon || 'Wallet'} className="w-5 h-5 text-white" />
-                    </div>
-                    <div className="min-w-0">
-                      <h3 className="text-sm font-bold tracking-tight leading-tight flex items-center gap-1.5 flex-wrap">
-                        <span>{w.name}</span>
-                        {w.isArchived && (
-                          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md bg-black/25 text-white/95 font-medium">
-                            <PauseCircle className="w-3 h-3 shrink-0" />
-                            <span>{isRTL ? 'متوقفة مؤقتاً' : 'Paused'}</span>
-                          </span>
-                        )}
-                        {w.excludeFromTotal && (
-                          <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md bg-white/15 border border-white/20 text-white/95 font-medium backdrop-blur-[2px]">
-                            <EyeOff className="w-3 h-3 shrink-0" />
-                            <span>{isRTL ? 'مستثناة من الإجمالي' : 'Excluded from total'}</span>
-                          </span>
-                        )}
-                        {isOrgWorkspace && w.walletType === 'petty_cash' && (
-                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-black/25 text-white/95 font-semibold">
-                            {w.custodianMemberUid
+              {/* Subtle Gold Shimmer & Card Surface Accent */}
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute -top-12 -end-12 w-36 h-36 rounded-full bg-[#E2B954]/20 blur-2xl"
+              />
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 pattern-wallet-lines opacity-65"
+              />
+
+              {/* Top Row: Clean Wallet Icon + Name + Currency (or Reorder Controls when editing order) */}
+              <div className="relative flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-xl bg-white/14 border border-white/20 backdrop-blur-xs flex items-center justify-center shrink-0">
+                    <IconRenderer name={w.icon || 'Wallet'} className="w-5 h-5 text-white" />
+                  </div>
+                  <div className="min-w-0">
+                    <h3 className="text-base font-bold tracking-tight leading-snug text-white truncate">
+                      {w.name}
+                    </h3>
+                    {(w.isArchived || w.excludeFromTotal || (isOrgWorkspace && w.walletType === 'petty_cash')) && (
+                      <div className="text-[11px] text-white/80 truncate mt-0.5">
+                        {[
+                          w.isArchived ? (isRTL ? 'متوقفة مؤقتاً' : 'Paused') : null,
+                          w.excludeFromTotal ? (isRTL ? 'مستثناة من الإجمالي' : 'Excluded') : null,
+                          isOrgWorkspace && w.walletType === 'petty_cash'
+                            ? w.custodianMemberUid
                               ? `${isRTL ? 'عُهدة' : 'Custody'}: ${
                                   orgMembers.find((m) => m.uid === w.custodianMemberUid)?.displayName || ''
                                 }`
                               : isRTL
                               ? 'عُهدة نثرية'
-                              : 'Petty Cash'}
-                          </span>
-                        )}
-                      </h3>
-                      <span className="text-[11px] text-white/75 font-mono">{w.currency}</span>
-                    </div>
+                              : 'Petty Cash'
+                            : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </div>
+                    )}
                   </div>
-
-                  {isReorderMode ? (
-                    <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
-                      <span className="text-[11px] font-mono font-bold px-2 py-1 rounded-lg bg-black/25 text-white/95 num-tabular">
-                        #{index + 1}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => handleMoveWallet(index, 'up')}
-                        disabled={index === 0}
-                        aria-label={isRTL ? `نقل ${w.name} لأعلى` : `Move ${w.name} up`}
-                        className={`p-2 rounded-lg bg-black/30 min-h-[40px] min-w-[40px] flex items-center justify-center transition ${
-                          index === 0
-                            ? 'opacity-35 cursor-not-allowed'
-                            : 'hover:bg-black/45 active:scale-95 text-white'
-                        }`}
-                      >
-                        <ArrowUp className="w-4 h-4" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleMoveWallet(index, 'down')}
-                        disabled={index === sortedWallets.length - 1}
-                        aria-label={isRTL ? `نقل ${w.name} لأسفل` : `Move ${w.name} down`}
-                        className={`p-2 rounded-lg bg-black/30 min-h-[40px] min-w-[40px] flex items-center justify-center transition ${
-                          index === sortedWallets.length - 1
-                            ? 'opacity-35 cursor-not-allowed'
-                            : 'hover:bg-black/45 active:scale-95 text-white'
-                        }`}
-                      >
-                        <ArrowDown className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
-                      {/* Hide Balance Eye */}
-                      <button
-                        type="button"
-                        onClick={() => toggleHideWalletBalance(w.id)}
-                        className="p-1.5 text-white/80 hover:text-white rounded-lg bg-black/20 min-h-[36px] min-w-[36px] flex items-center justify-center"
-                        aria-label="Toggle wallet balance"
-                      >
-                        {isHidden ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-
-                      {/* Lock / Unlock Icon */}
-                      <button
-                        type="button"
-                        onClick={(e) => handleToggleLock(w, e)}
-                        className={`p-1.5 rounded-lg transition min-h-[36px] min-w-[36px] flex items-center justify-center ${
-                          w.isLocked ? 'bg-[var(--color-warning)] text-[#1C1A17]' : 'bg-black/20 text-white/80 hover:text-white'
-                        }`}
-                        title={w.isLocked ? (isRTL ? 'المحفظة محمية' : 'Wallet locked') : (isRTL ? 'قفل المحفظة برمز' : 'Set PIN lock')}
-                      >
-                        {w.isLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
-                      </button>
-
-                      {/* Edit Wallet */}
-                      <button
-                        type="button"
-                        onClick={(e) => handleOpenEdit(w, e)}
-                        className="p-1.5 text-white/80 hover:text-white rounded-lg bg-black/20 min-h-[36px] min-w-[36px] flex items-center justify-center"
-                        aria-label="Edit wallet"
-                      >
-                        <Edit2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  )}
                 </div>
 
-                {/* Bottom Row: Balance & Currency */}
-                <div className="flex items-end justify-between pt-2 border-t border-white/15">
-                  <div>
-                    <span className="text-[11px] text-white/75 block mb-0.5">
-                      {isRTL ? 'الرصيد المتاح' : 'Available Balance'}
+                {isReorderMode ? (
+                  <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                    <span className="text-[11px] font-mono font-bold px-2 py-1 rounded-lg bg-black/25 text-white/95 num-tabular">
+                      #{index + 1}
                     </span>
-                    <div className="text-xl font-bold tracking-tight">
-                      {isLocked ? (
+                    <button
+                      type="button"
+                      onClick={() => handleMoveWallet(index, 'up')}
+                      disabled={index === 0}
+                      aria-label={isRTL ? `نقل ${w.name} لأعلى` : `Move ${w.name} up`}
+                      className={`p-2 rounded-xl bg-black/30 min-h-[40px] min-w-[40px] flex items-center justify-center transition-all duration-300 ${
+                        index === 0
+                          ? 'opacity-35 cursor-not-allowed'
+                          : 'hover:bg-black/45 active:scale-95 text-white'
+                      }`}
+                    >
+                      <ArrowUp className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleMoveWallet(index, 'down')}
+                      disabled={index === sortedWallets.length - 1}
+                      aria-label={isRTL ? `نقل ${w.name} لأسفل` : `Move ${w.name} down`}
+                      className={`p-2 rounded-xl bg-black/30 min-h-[40px] min-w-[40px] flex items-center justify-center transition-all duration-300 ${
+                        index === sortedWallets.length - 1
+                          ? 'opacity-35 cursor-not-allowed'
+                          : 'hover:bg-black/45 active:scale-95 text-white'
+                      }`}
+                    >
+                      <ArrowDown className="w-4 h-4" />
+                    </button>
+                  </div>
+                ) : (
+                  <span
+                    className="font-mono text-xs font-bold tracking-wider text-[#F4E3B2] shrink-0 pt-0.5"
+                    dir="ltr"
+                  >
+                    {w.currency}
+                  </span>
+                )}
+              </div>
+
+              {/* Bottom Row: Prominent Balance & Minimal EMV Accent */}
+              <div className="relative flex items-end justify-between pt-4 mt-2 border-t border-white/15">
+                <div>
+                  <span className="text-[11px] text-white/75 block mb-0.5">
+                    {isRTL ? 'الرصيد المتاح' : 'Available Balance'}
+                  </span>
+                  <div className="text-2xl sm:text-3xl font-bold tracking-tight text-white">
+                    {isLocked ? (
+                      <span className="inline-flex items-center gap-1.5 text-lg font-bold text-[#F4E3B2]">
+                        <Lock className="w-4 h-4 shrink-0" />
                         <span>
                           {isRTL ? (
                             <>
@@ -528,23 +515,24 @@ export const WalletsPage: React.FC = () => {
                             'PIN Protected'
                           )}
                         </span>
-                      ) : isHidden ? (
-                        <span>••••••••</span>
-                      ) : (
-                        <MoneyText
-                          amount={w.balance}
-                          currency={w.currency}
-                          className="text-xl font-bold text-white tracking-tight"
-                        />
-                      )}
-                    </div>
+                      </span>
+                    ) : isHidden ? (
+                      <span className="num-tabular tracking-widest">••••••••</span>
+                    ) : (
+                      <MoneyText
+                        amount={w.balance}
+                        currency={w.currency}
+                        className="text-2xl sm:text-3xl font-bold text-white tracking-tight"
+                      />
+                    )}
                   </div>
-
-                  <span className="inline-flex items-center gap-1 text-[11px] text-white/90 font-medium px-2 py-0.5 rounded bg-black/20">
-                    <MoreHorizontal className="w-3.5 h-3.5" />
-                    <span>{isRTL ? 'إجراءات سريعة' : 'Quick actions'}</span>
-                  </span>
                 </div>
+
+                {/* Minimalist Metallic EMV Card Accent */}
+                <div
+                  aria-hidden="true"
+                  className="w-8 h-6 rounded-md border border-[#E2B954]/50 bg-gradient-to-br from-[#F3D88B]/30 to-[#B98924]/20 shrink-0"
+                />
               </div>
             </div>
           );
@@ -876,6 +864,13 @@ export const WalletsPage: React.FC = () => {
         onEdit={(w) => {
           setQuickActionWalletId(null);
           handleOpenEdit(w);
+        }}
+        onToggleHideBalance={(w) => {
+          toggleHideWalletBalance(w.id);
+        }}
+        onToggleLock={(w) => {
+          setQuickActionWalletId(null);
+          handleToggleLock(w);
         }}
         onToggleArchive={(w) => {
           const check = canToggleWalletArchive(w, wallets);

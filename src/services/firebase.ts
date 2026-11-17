@@ -12,6 +12,7 @@ import {
 import {
   getFirestore,
   initializeFirestore,
+  memoryLocalCache,
   persistentLocalCache,
   persistentMultipleTabManager,
   collection,
@@ -83,6 +84,7 @@ import {
 const app = initializeApp(firebaseConfig);
 
 function createFirestoreInstance(): Firestore {
+  const databaseId = firebaseConfig.firestoreDatabaseId || undefined;
   try {
     return initializeFirestore(
       app,
@@ -90,11 +92,23 @@ function createFirestoreInstance(): Firestore {
         localCache: persistentLocalCache({
           tabManager: persistentMultipleTabManager(),
         }),
+        experimentalForceLongPolling: true,
       },
-      firebaseConfig.firestoreDatabaseId
+      databaseId
     );
   } catch {
-    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    try {
+      return initializeFirestore(
+        app,
+        {
+          localCache: memoryLocalCache(),
+          experimentalForceLongPolling: true,
+        },
+        databaseId
+      );
+    } catch {
+      return databaseId ? getFirestore(app, databaseId) : getFirestore(app);
+    }
   }
 }
 
@@ -106,11 +120,23 @@ googleProvider.setCustomParameters({ prompt: 'select_account' });
 
 async function testConnection(): Promise<void> {
   if (typeof window === 'undefined') return;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      try {
+        await getDocFromServer(doc(db, 'test', 'connection'));
+      } catch (retryError) {
+        if (
+          retryError instanceof Error &&
+          retryError.message.includes('the client is offline')
+        ) {
+          console.error('Please check your Firebase configuration.');
+        }
+      }
     }
   }
 }

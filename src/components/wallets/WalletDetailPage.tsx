@@ -205,10 +205,16 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
       </div>
 
       <div className="p-4 space-y-4">
-        {/* Wallet Hero Balance Card (Clean Flat Solid Design) */}
+        {/* Wallet Hero Balance Card (Credit Card Style) */}
         <div
-          className="rounded-xl p-5 border border-black/10 text-white"
-          style={{ backgroundColor: wallet.color?.startsWith('#') ? wallet.color : '#3A605B' }}
+          className="rounded-2xl p-5 border border-white/15 text-white shadow-[0_12px_28px_-10px_rgba(9,50,37,0.35)] relative overflow-hidden"
+          style={{
+            background: `linear-gradient(135deg, ${
+              wallet.color?.startsWith('#') ? wallet.color : '#0E5A43'
+            } 0%, color-mix(in srgb, ${
+              wallet.color?.startsWith('#') ? wallet.color : '#0E5A43'
+            } 74%, #061A14) 100%)`,
+          }}
         >
           <div>
             <span className="text-xs opacity-80 block mb-1">
