@@ -13,6 +13,7 @@ import {
   Coins,
   RefreshCw,
   RotateCcw,
+  LogOut,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
@@ -55,6 +56,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     ratesLastUpdated,
     isRefreshingRates,
     refreshExchangeRates,
+    setIsLogoutModalOpen,
     t,
     isRTL,
   } = useApp();
@@ -166,13 +168,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       ok
         ? {
             text: isRTL
-              ? 'تم تحديث أسعار الصرف المباشرة وحفظها للعمل بدون إنترنت.'
-              : 'Live exchange rates updated and cached for offline use.',
+              ? 'تم تحديث أسعار الصرف المباشرة وحفظها في السحابة والجهاز.'
+              : 'Live exchange rates updated and synced to cloud & device.',
           }
         : {
             text: isRTL
-              ? 'تعذر الاتصال بخدمة الأسعار الآن — يتم استخدام آخر أسعار محفوظة أو الافتراضية.'
-              : 'Could not reach rate feed right now — using cached or fallback rates.',
+              ? 'تعذر جلب أحدث الأسعار، سيتم استخدام آخر أسعار محفوظة.'
+              : 'Could not fetch latest rates, using last saved rates.',
             isError: true,
           }
     );
@@ -887,11 +889,32 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          {/* 6. Danger Zone: Delete Data & Delete Account */}
+          {/* 6. Danger Zone: Sign Out, Delete Data & Delete Account */}
           <div className="p-4 bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/30 rounded-xl space-y-2.5">
             <h4 className="text-xs font-bold text-[var(--color-expense)]">
               {isRTL ? 'إدارة البيانات والحساب' : 'Data & Account Management'}
             </h4>
+
+            <button
+              type="button"
+              data-testid="settings-signout-btn"
+              onClick={() => {
+                onClose();
+                setIsLogoutModalOpen(true);
+              }}
+              className="w-full py-2.5 px-3 bg-[var(--color-surface)] border border-[var(--color-expense)]/40 text-[var(--color-expense)] hover:bg-[var(--color-expense)]/10 font-semibold rounded-lg text-xs flex items-center justify-center gap-2 transition-colors min-h-[44px]"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>
+                {user?.isLoggedIn
+                  ? isRTL
+                    ? 'تسجيل الخروج'
+                    : 'Sign Out'
+                  : isRTL
+                  ? 'خروج ومسح بيانات الزائر'
+                  : 'Exit Guest & Wipe Device'}
+              </span>
+            </button>
 
             <button
               type="button"

@@ -20,6 +20,7 @@ export const CurrencyPickerModal: React.FC<CurrencyPickerModalProps> = ({
   title,
 }) => {
   const [search, setSearch] = useState('');
+  const [rateFallbackMsg, setRateFallbackMsg] = useState<string | null>(null);
   const {
     isRTL,
     t,
@@ -28,6 +29,18 @@ export const CurrencyPickerModal: React.FC<CurrencyPickerModalProps> = ({
     isRefreshingRates,
     refreshExchangeRates,
   } = useApp();
+
+  const handleRefreshFromPicker = async () => {
+    setRateFallbackMsg(null);
+    const ok = await refreshExchangeRates(true);
+    if (!ok) {
+      setRateFallbackMsg(
+        isRTL
+          ? 'تعذر جلب أحدث الأسعار، سيتم استخدام آخر أسعار محفوظة.'
+          : 'Could not fetch latest rates, using last saved rates.'
+      );
+    }
+  };
 
   const filteredCurrencies = useMemo(() => {
     if (!search.trim()) return CURRENCIES;
@@ -99,7 +112,7 @@ export const CurrencyPickerModal: React.FC<CurrencyPickerModalProps> = ({
             {settings.useUpdatedExchangeRates && (
               <button
                 type="button"
-                onClick={() => void refreshExchangeRates()}
+                onClick={() => void handleRefreshFromPicker()}
                 disabled={isRefreshingRates}
                 className="inline-flex items-center gap-1 text-[var(--color-accent)] font-semibold hover:underline disabled:opacity-50 min-h-[28px]"
               >
@@ -108,6 +121,11 @@ export const CurrencyPickerModal: React.FC<CurrencyPickerModalProps> = ({
               </button>
             )}
           </div>
+          {rateFallbackMsg && (
+            <div className="px-2.5 py-1.5 rounded-lg bg-[var(--color-warning)]/12 border border-[var(--color-warning)]/30 text-[11px] font-medium text-[var(--color-warning-text)]">
+              {rateFallbackMsg}
+            </div>
+          )}
         </div>
 
         {/* Currency List */}

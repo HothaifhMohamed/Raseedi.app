@@ -81,10 +81,11 @@ import {
 } from '../services/transactionUpdate';
 import {
   convertCurrency,
-  fetchLiveExchangeRates,
+  fetchLiveExchangeRatesDetailed,
   getCachedExchangeRatesMeta,
   getLiveExchangeRatesRuntime,
   roundCurrency,
+  saveLiveExchangeRatesCache,
   setLiveExchangeRatesRuntime,
   toMinor,
 } from '../services/currency';
@@ -1266,8 +1267,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const refreshExchangeRates = useCallback(async (force = true): Promise<boolean> => {
     setIsRefreshingRates(true);
     try {
-      const result = await fetchLiveExchangeRates(force);
-      if (result) {
+      const fetchResult = await fetchLiveExchangeRatesDetailed(force);
+      const result = fetchResult.data;
+
+      if (fetchResult.ok && result) {
         const formatted = new Date(result.fetchedAtMs).toLocaleDateString(
           latestPersonalRef.current.settings.language === 'ar' ? 'ar-EG' : 'en-US',
           { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
@@ -1306,6 +1309,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }
         }
         return true;
+      }
+
+      if (result) {
+        const cachedFormatted = new Date(result.fetchedAtMs).toLocaleDateString(
+          latestPersonalRef.current.settings.language === 'ar' ? 'ar-EG' : 'en-US',
+          { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
+        );
+        setRatesLastUpdated(cachedFormatted);
       }
       return false;
     } finally {
@@ -2229,7 +2240,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setLiveExchangeRatesRuntime(null);
       return;
     }
-    void fetchLiveExchangeRates(false).then((res) => {
+    void fetchLiveExchangeRatesDetailed(false).then((fetchResult) => {
+      const res = fetchResult.data;
       if (res) {
         const formatted = new Date(res.fetchedAtMs).toLocaleDateString(
           settings.language === 'ar' ? 'ar-EG' : 'en-US',
@@ -2304,6 +2316,35 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               verifiedAt: Date.now(),
             };
         await applyVerifiedProState(entitlement);
+
+        // Hydrate newer cloud-synced currency exchange rates from Firestore users/{uid}
+        const cloudRates = profile.currencyRates;
+        if (
+          cloudRates &&
+          cloudRates.rates &&
+          typeof cloudRates.rates === 'object' &&
+          Object.keys(cloudRates.rates).length > 0
+        ) {
+          const localCachedRates = getCachedExchangeRatesMeta();
+          const cloudFetchedAtMs =
+            typeof cloudRates.fetchedAtMs === 'number' && cloudRates.fetchedAtMs > 0
+              ? cloudRates.fetchedAtMs
+              : 0;
+          if (!localCachedRates || cloudFetchedAtMs > localCachedRates.fetchedAtMs) {
+            saveLiveExchangeRatesCache({
+              rates: cloudRates.rates,
+              fetchedAtMs: cloudFetchedAtMs || Date.now(),
+              source: 'live',
+            });
+            const hydratedFormatted =
+              cloudRates.ratesLastUpdated ||
+              new Date(cloudFetchedAtMs || Date.now()).toLocaleDateString(
+                latestPersonalRef.current.settings.language === 'ar' ? 'ar-EG' : 'en-US',
+                { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
+              );
+            setRatesLastUpdated(hydratedFormatted);
+          }
+        }
 
         setLastCloudBackupExists(Boolean(cloudMeta));
         void fetchCloudBackupHistory(firebaseUser.uid)

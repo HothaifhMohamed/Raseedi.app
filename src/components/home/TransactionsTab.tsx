@@ -65,20 +65,15 @@ export const TransactionsTab: React.FC = () => {
   const [showCategoryModal, setShowCategoryModal] = useState(false);
   const [visibleTxLimit, setVisibleTxLimit] = useState(60);
   const [isLoadingMoreCloud, setIsLoadingMoreCloud] = useState(false);
-  const menuRef = useRef<HTMLDivElement | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
-  // Close dropdown menu on click outside
   useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
-        setActiveMenuTxId(null);
-      }
-    }
-    if (activeMenuTxId) {
-      document.addEventListener('mousedown', handleClickOutside);
-      return () => document.removeEventListener('mousedown', handleClickOutside);
-    }
+    if (!activeMenuTxId) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setActiveMenuTxId(null);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
   }, [activeMenuTxId]);
 
   // Reset window size when filters change
@@ -210,6 +205,19 @@ export const TransactionsTab: React.FC = () => {
 
   return (
     <div className="flex flex-col flex-1 pb-28" dir={isRTL ? 'rtl' : 'ltr'}>
+      {activeMenuTxId && (
+        <div
+          data-testid="tx-menu-backdrop"
+          aria-hidden="true"
+          className="fixed inset-0 z-40 bg-transparent"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setActiveMenuTxId(null);
+          }}
+        />
+      )}
       {/* Search Bar & Multi-Select Trigger */}
       <div className="px-4 py-2 flex items-center gap-2">
         <div className="relative flex-1">
@@ -626,8 +634,8 @@ export const TransactionsTab: React.FC = () => {
                             {/* Popover Dropdown Menu */}
                             {isMenuOpen && (
                               <div
-                                ref={menuRef}
-                                className={`absolute end-0 top-full mt-1 z-30 w-36 py-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl shadow-lg text-xs animate-in fade-in duration-100 ${
+                                onClick={(e) => e.stopPropagation()}
+                                className={`absolute end-0 top-full mt-1 z-50 w-36 py-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl shadow-lg text-xs animate-in fade-in zoom-in-95 duration-200 ${
                                   isRTL ? 'text-right' : 'text-left'
                                 }`}
                               >

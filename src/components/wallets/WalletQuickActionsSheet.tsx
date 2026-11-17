@@ -72,20 +72,30 @@ export const WalletQuickActionsSheet: React.FC<WalletQuickActionsSheetProps> = (
   const ChevronEnd = isRTL ? ChevronLeft : ChevronRight;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-[2px] p-0 sm:p-4 animate-in fade-in duration-300"
-      onClick={onClose}
-      dir={isRTL ? 'rtl' : 'ltr'}
-      data-testid="wallet-quick-actions-backdrop"
-    >
+    <>
       <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="wallet-quick-actions-title"
-        data-testid="wallet-quick-actions-sheet"
-        onClick={(e) => e.stopPropagation()}
-        className="w-full sm:max-w-md max-h-[88vh] overflow-y-auto rounded-t-3xl sm:rounded-3xl bg-[var(--color-surface)] border-t sm:border border-[var(--color-line)] shadow-2xl animate-in slide-in-from-bottom-4 sm:zoom-in-95 duration-300 pb-[env(safe-area-inset-bottom)] sm:pb-0 transition-all"
+        data-testid="wallet-quick-actions-backdrop"
+        aria-hidden="true"
+        className="fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px] animate-in fade-in duration-300"
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onClose();
+        }}
+      />
+      <div
+        className="fixed inset-0 z-50 pointer-events-none flex items-end sm:items-center justify-center p-0 sm:p-4"
+        dir={isRTL ? 'rtl' : 'ltr'}
       >
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="wallet-quick-actions-title"
+          data-testid="wallet-quick-actions-sheet"
+          onClick={(e) => e.stopPropagation()}
+          className="pointer-events-auto w-full sm:max-w-md max-h-[88vh] overflow-y-auto rounded-t-3xl sm:rounded-3xl bg-[var(--color-surface)] border-t sm:border border-[var(--color-line)] shadow-2xl animate-in slide-in-from-bottom-4 sm:zoom-in-95 duration-300 pb-[env(safe-area-inset-bottom)] sm:pb-0 transition-all"
+        >
         {/* Mobile grab handle */}
         <div className="sm:hidden pt-2.5 pb-1 flex justify-center">
           <div className="w-10 h-1 rounded-full bg-[var(--color-line)]" aria-hidden="true" />
@@ -349,6 +359,7 @@ export const WalletQuickActionsSheet: React.FC<WalletQuickActionsSheetProps> = (
           </div>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   );
 };

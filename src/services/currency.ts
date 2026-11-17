@@ -160,11 +160,22 @@ export const CURRENCY_MAP = new Map<string, Currency>(CURRENCIES.map(c => [c.cod
 export const LIVE_RATES_STORAGE_KEY = 'raseedi_live_rates_v1';
 const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
 
+export type CurrencyRateProvider = 'exchangerate-api' | 'currency-api' | 'frankfurter';
+
 export interface CachedLiveRates {
   rates: Record<string, number>;
   fetchedAtMs: number;
   apiLastUpdateUtc?: string;
+  provider?: CurrencyRateProvider;
   source: 'live';
+}
+
+export interface LiveRatesFetchResult {
+  ok: boolean;
+  status: 'updated' | 'cached_fresh' | 'fallback_cached' | 'fallback_static';
+  data: CachedLiveRates | null;
+  provider?: CurrencyRateProvider;
+  error?: string;
 }
 
 let activeLiveRates: Record<string, number> | null = null;
@@ -175,6 +186,17 @@ export function setLiveExchangeRatesRuntime(rates: Record<string, number> | null
 
 export function getLiveExchangeRatesRuntime(): Record<string, number> | null {
   return activeLiveRates;
+}
+
+export function saveLiveExchangeRatesCache(record: CachedLiveRates): void {
+  activeLiveRates = record.rates;
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(LIVE_RATES_STORAGE_KEY, JSON.stringify(record));
+    }
+  } catch {
+    // Ignore storage quota issues
+  }
 }
 
 export function getCachedExchangeRatesMeta(): CachedLiveRates | null {
@@ -190,6 +212,7 @@ export function getCachedExchangeRatesMeta(): CachedLiveRates | null {
       rates: parsed.rates,
       fetchedAtMs: parsed.fetchedAtMs,
       apiLastUpdateUtc: parsed.apiLastUpdateUtc,
+      provider: parsed.provider,
       source: 'live',
     };
   } catch {
@@ -197,75 +220,232 @@ export function getCachedExchangeRatesMeta(): CachedLiveRates | null {
   }
 }
 
-export async function fetchLiveExchangeRates(force = false): Promise<CachedLiveRates | null> {
-  const cached = getCachedExchangeRatesMeta();
-  const now = Date.now();
-
-  if (!force && cached && now - cached.fetchedAtMs < TWELVE_HOURS_MS) {
-    activeLiveRates = cached.rates;
-    return cached;
+function buildStaticBaseRatesMap(): Record<string, number> {
+  const base: Record<string, number> = {};
+  for (const c of CURRENCIES) {
+    base[c.code] = c.rateToUSD;
   }
+  base.USD = 1;
+  return base;
+}
 
-  if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    if (cached) {
-      activeLiveRates = cached.rates;
-      return cached;
+function sanitizeSupportedRates(rawMap: Record<string, unknown>): Record<string, number> {
+  const clean: Record<string, number> = {};
+  for (const [rawCode, rawVal] of Object.entries(rawMap)) {
+    const code = String(rawCode || '').trim().toUpperCase();
+    if (!CURRENCY_MAP.has(code) && code !== 'USD') continue;
+    const num = Number(rawVal);
+    if (typeof num === 'number' && Number.isFinite(num) && num > 0) {
+      clean[code] = num;
     }
-    return null;
   }
+  if (Object.keys(clean).length > 0 && !clean.USD) {
+    clean.USD = 1;
+  }
+  return clean;
+}
 
+export function parseExchangeRateApiPayload(
+  payload: unknown
+): { rates: Record<string, number>; apiLastUpdateUtc?: string } | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const obj = payload as {
+    result?: string;
+    rates?: Record<string, unknown>;
+    time_last_update_utc?: string;
+  };
+  if (obj.result && obj.result !== 'success') return null;
+  if (!obj.rates || typeof obj.rates !== 'object' || Array.isArray(obj.rates)) return null;
+  const rates = sanitizeSupportedRates(obj.rates);
+  if (Object.keys(rates).length < 10) return null;
+  return {
+    rates,
+    apiLastUpdateUtc: typeof obj.time_last_update_utc === 'string' ? obj.time_last_update_utc : undefined,
+  };
+}
+
+export function parseFawazCurrencyApiPayload(
+  payload: unknown
+): { rates: Record<string, number>; apiLastUpdateUtc?: string } | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const obj = payload as {
+    date?: string;
+    usd?: Record<string, unknown>;
+  };
+  if (!obj.usd || typeof obj.usd !== 'object' || Array.isArray(obj.usd)) return null;
+  const rates = sanitizeSupportedRates(obj.usd);
+  if (Object.keys(rates).length < 10) return null;
+  return {
+    rates,
+    apiLastUpdateUtc: typeof obj.date === 'string' ? obj.date : undefined,
+  };
+}
+
+export function parseFrankfurterApiPayload(
+  payload: unknown,
+  fallbackBase?: Record<string, number>
+): { rates: Record<string, number>; apiLastUpdateUtc?: string } | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const obj = payload as {
+    base?: string;
+    date?: string;
+    rates?: Record<string, unknown>;
+  };
+  if (!obj.rates || typeof obj.rates !== 'object' || Array.isArray(obj.rates)) return null;
+  const partial = sanitizeSupportedRates(obj.rates);
+  if (Object.keys(partial).length < 5) return null;
+  const merged: Record<string, number> = {
+    ...(fallbackBase || buildStaticBaseRatesMap()),
+    ...partial,
+    USD: 1,
+  };
+  return {
+    rates: merged,
+    apiLastUpdateUtc: typeof obj.date === 'string' ? obj.date : undefined,
+  };
+}
+
+async function fetchJsonWithTimeout(
+  url: string,
+  fetchFn: typeof fetch,
+  timeoutMs = 8000
+): Promise<unknown> {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer =
+    controller && typeof setTimeout !== 'undefined'
+      ? setTimeout(() => controller.abort(), timeoutMs)
+      : null;
   try {
-    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timer = controller ? window.setTimeout(() => controller.abort(), 8000) : null;
-    const response = await fetch('https://open.er-api.com/v6/latest/USD', {
-      signal: controller?.signal,
-    });
-    if (timer) window.clearTimeout(timer);
-
+    const response = await fetchFn(url, controller ? { signal: controller.signal } : undefined);
     if (!response.ok) {
       throw new Error(`HTTP_${response.status}`);
     }
+    return await response.json();
+  } finally {
+    if (timer !== null && typeof clearTimeout !== 'undefined') {
+      clearTimeout(timer);
+    }
+  }
+}
 
-    const payload = (await response.json()) as {
-      result?: string;
-      rates?: Record<string, number>;
-      time_last_update_utc?: string;
+export async function fetchLiveExchangeRatesDetailed(
+  force = false,
+  deps?: {
+    fetchFn?: typeof fetch;
+    isOnline?: boolean;
+    nowMs?: number;
+  }
+): Promise<LiveRatesFetchResult> {
+  const cached = getCachedExchangeRatesMeta();
+  const nowMs = deps?.nowMs ?? Date.now();
+  const isOnline =
+    deps?.isOnline !== undefined
+      ? deps.isOnline
+      : typeof navigator === 'undefined' || navigator.onLine !== false;
+  const fetchFn = deps?.fetchFn ?? (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
+
+  if (!force && cached && nowMs - cached.fetchedAtMs < TWELVE_HOURS_MS) {
+    activeLiveRates = cached.rates;
+    return {
+      ok: true,
+      status: 'cached_fresh',
+      data: cached,
+      provider: cached.provider,
     };
+  }
 
-    if (!payload?.rates || typeof payload.rates !== 'object') {
-      throw new Error('INVALID_RATES_PAYLOAD');
-    }
-
-    const sanitizedRates: Record<string, number> = {};
-    for (const [code, val] of Object.entries(payload.rates)) {
-      if (typeof val === 'number' && isFinite(val) && val > 0) {
-        sanitizedRates[code] = val;
-      }
-    }
-
-    const record: CachedLiveRates = {
-      rates: sanitizedRates,
-      fetchedAtMs: Date.now(),
-      apiLastUpdateUtc: payload.time_last_update_utc,
-      source: 'live',
-    };
-
-    activeLiveRates = sanitizedRates;
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        window.localStorage.setItem(LIVE_RATES_STORAGE_KEY, JSON.stringify(record));
-      }
-    } catch {
-      // Ignore storage quota issues
-    }
-    return record;
-  } catch {
+  if (!isOnline || !fetchFn) {
     if (cached) {
       activeLiveRates = cached.rates;
-      return cached;
+      return {
+        ok: false,
+        status: 'fallback_cached',
+        data: cached,
+        error: !isOnline ? 'OFFLINE' : 'FETCH_UNAVAILABLE',
+      };
     }
-    return null;
+    return {
+      ok: false,
+      status: 'fallback_static',
+      data: null,
+      error: !isOnline ? 'OFFLINE' : 'FETCH_UNAVAILABLE',
+    };
   }
+
+  const providers: Array<{
+    name: CurrencyRateProvider;
+    url: string;
+    parse: (payload: unknown) => { rates: Record<string, number>; apiLastUpdateUtc?: string } | null;
+  }> = [
+    {
+      name: 'exchangerate-api',
+      url: 'https://open.er-api.com/v6/latest/USD',
+      parse: parseExchangeRateApiPayload,
+    },
+    {
+      name: 'currency-api',
+      url: 'https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json',
+      parse: parseFawazCurrencyApiPayload,
+    },
+    {
+      name: 'frankfurter',
+      url: 'https://api.frankfurter.dev/v1/latest?base=USD',
+      parse: (payload) => parseFrankfurterApiPayload(payload, cached?.rates),
+    },
+  ];
+
+  let lastError = 'API_UNREACHABLE';
+
+  for (const provider of providers) {
+    try {
+      const payload = await fetchJsonWithTimeout(provider.url, fetchFn, 8000);
+      const parsed = provider.parse(payload);
+      if (!parsed) {
+        lastError = `INVALID_PAYLOAD_${provider.name.toUpperCase()}`;
+        continue;
+      }
+
+      const record: CachedLiveRates = {
+        rates: parsed.rates,
+        fetchedAtMs: Date.now(),
+        apiLastUpdateUtc: parsed.apiLastUpdateUtc,
+        provider: provider.name,
+        source: 'live',
+      };
+      saveLiveExchangeRatesCache(record);
+
+      return {
+        ok: true,
+        status: 'updated',
+        data: record,
+        provider: provider.name,
+      };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : 'NETWORK_ERROR';
+    }
+  }
+
+  if (cached) {
+    activeLiveRates = cached.rates;
+    return {
+      ok: false,
+      status: 'fallback_cached',
+      data: cached,
+      error: lastError,
+    };
+  }
+
+  return {
+    ok: false,
+    status: 'fallback_static',
+    data: null,
+    error: lastError,
+  };
+}
+
+export async function fetchLiveExchangeRates(force = false): Promise<CachedLiveRates | null> {
+  const result = await fetchLiveExchangeRatesDetailed(force);
+  return result.data;
 }
 
 export function getCurrency(code: string): Currency {

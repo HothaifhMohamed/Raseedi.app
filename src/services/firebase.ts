@@ -227,6 +227,18 @@ export interface CloudUserProfile {
   hasUsedBusinessTrial?: boolean;
   redeemedCouponCode?: string | null;
   lastSyncedAt?: number;
+  currencyRates?: {
+    base?: string;
+    fetchedAtMs?: number;
+    ratesLastUpdated?: string;
+    rates?: Record<string, number>;
+  };
+  settings?: {
+    useUpdatedExchangeRates?: boolean;
+    ratesLastUpdated?: string;
+    ratesUpdatedAtMs?: number;
+    customExchangeRates?: Record<string, number>;
+  };
 }
 
 export function isEntitlementActive(

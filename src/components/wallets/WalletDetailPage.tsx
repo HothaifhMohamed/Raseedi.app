@@ -59,22 +59,17 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
   const [showStats, setShowStats] = useState(false);
   const [activeMenuTxId, setActiveMenuTxId] = useState<string | null>(null);
   const [visibleLimit, setVisibleLimit] = useState(60);
-  const menuRef = useRef<HTMLDivElement | null>(null);
 
   useModalBackHandler(showMoveModal, () => setShowMoveModal(false), 'wallet-detail-move');
   useModalBackHandler(showCategoryModal, () => setShowCategoryModal(false), 'wallet-detail-category');
 
-  // Close dropdown menu on click outside
   useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
-        setActiveMenuTxId(null);
-      }
-    }
-    if (activeMenuTxId) {
-      document.addEventListener('mousedown', handleClickOutside);
-      return () => document.removeEventListener('mousedown', handleClickOutside);
-    }
+    if (!activeMenuTxId) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setActiveMenuTxId(null);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
   }, [activeMenuTxId]);
 
   useEffect(() => {
@@ -162,6 +157,19 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
 
   return (
     <div className="flex-1 flex flex-col pb-24 overflow-y-auto" dir={isRTL ? 'rtl' : 'ltr'}>
+      {activeMenuTxId && (
+        <div
+          data-testid="wallet-tx-menu-backdrop"
+          aria-hidden="true"
+          className="fixed inset-0 z-40 bg-transparent"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setActiveMenuTxId(null);
+          }}
+        />
+      )}
       {/* Top Header */}
       <div className="sticky top-0 z-20 bg-[var(--color-bg)] border-b border-[var(--color-line)] px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -530,8 +538,8 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
 
                       {isMenuOpen && (
                         <div
-                          ref={menuRef}
-                          className={`absolute end-0 top-full mt-1 z-30 w-36 py-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl shadow-lg text-xs animate-in fade-in duration-100 ${
+                          onClick={(e) => e.stopPropagation()}
+                          className={`absolute end-0 top-full mt-1 z-50 w-36 py-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl shadow-lg text-xs animate-in fade-in zoom-in-95 duration-200 ${
                             isRTL ? 'text-right' : 'text-left'
                           }`}
                         >
