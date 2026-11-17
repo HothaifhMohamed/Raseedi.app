@@ -8,8 +8,6 @@ import {
   Sun,
   Moon,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   Sparkles,
   Bell,
   Building2,
@@ -428,13 +426,11 @@ export const Navbar: React.FC = () => {
             aria-label={isRTL ? 'خيارات إضافية' : 'More options'}
           >
             <MoreVertical className="w-4 h-4" />
-            {(hasActiveFilters || hasSyncAlert || isOrgWorkspace) && (
+            {(hasActiveFilters || hasSyncAlert) && (
               <span
                 className={`absolute top-1 end-1 w-2 h-2 rounded-full ${
                   hasSyncAlert
                     ? 'bg-[var(--color-expense)]'
-                    : isOrgWorkspace
-                    ? 'bg-[var(--color-income)]'
                     : 'bg-[var(--color-accent)]'
                 }`}
               />
@@ -554,69 +550,14 @@ export const Navbar: React.FC = () => {
                 </div>
               )}
 
-              {/* Overflow 3-Dot Dropdown Menu (Solid Background, Zero Nested Lists) */}
+              {/* Overflow 3-Dot Dropdown Menu (Quick Actions Only) */}
               {isOverflowOpen && (
                 <div
                   data-testid="navbar-overflow-dropdown"
                   onClick={(e) => e.stopPropagation()}
                   className="pointer-events-auto w-64 sm:w-72 max-h-[calc(100vh-84px)] overflow-y-auto bg-white dark:bg-[#17231E] border border-[var(--color-line)] rounded-2xl shadow-xl py-1.5 divide-y divide-[var(--color-line)] transition-all duration-200 animate-in fade-in zoom-in-95"
                 >
-                  {/* Section 1: Workspace Switcher Button (Closes Menu -> Opens Standalone Modal) */}
-                  <div className="py-1">
-                    <button
-                      type="button"
-                      data-testid="overflow-workspace-switcher-btn"
-                      onClick={openWorkspaceSelectorModal}
-                      className="w-full px-3 py-2 text-xs flex items-center justify-between gap-2 text-[var(--color-ink)] hover:bg-[var(--color-bg)] transition-colors duration-200 text-start min-h-[44px]"
-                    >
-                      <div className="flex items-center gap-2 min-w-0">
-                        {isOrgWorkspace ? (
-                          <Building2 className="w-4 h-4 text-[var(--color-accent)] shrink-0" />
-                        ) : (
-                          <User className="w-4 h-4 text-[var(--color-accent)] shrink-0" />
-                        )}
-                        <div className="min-w-0">
-                          <div className="text-[10px] font-semibold text-[var(--color-muted)] leading-tight">
-                            {t('switchWorkspace')}
-                          </div>
-                          <div className="font-bold text-[var(--color-ink)] truncate flex items-center gap-1.5 mt-0.5">
-                            {isOrgWorkspace && (
-                              <span
-                                title={orgSyncPendingWrites ? t('cloudOrgSyncPending') : t('cloudOrgSyncOnline')}
-                                className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                                  isOrgLoading
-                                    ? 'bg-[var(--color-accent)] animate-pulse'
-                                    : orgSyncPendingWrites
-                                    ? 'bg-amber-500'
-                                    : 'bg-[var(--color-income)]'
-                                }`}
-                              />
-                            )}
-                            <span className="truncate">
-                              {isOrgWorkspace && activeOrganization
-                                ? activeOrganization.name
-                                : t('personalWorkspace')}
-                            </span>
-                            {isOrgWorkspace && activeOrgRole && (
-                              <span
-                                data-testid="navbar-org-role-badge"
-                                className="px-1.5 py-0.2 rounded bg-[var(--color-accent)]/15 text-[var(--color-accent)] font-bold text-[9px] shrink-0"
-                              >
-                                {roleLabels[activeOrgRole][isRTL ? 'ar' : 'en']}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                      {isRTL ? (
-                        <ChevronLeft className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
-                      ) : (
-                        <ChevronRight className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
-                      )}
-                    </button>
-                  </div>
-
-                  {/* Section 2: Filter & Quick Backup */}
+                  {/* Section 1: Filter & Quick Backup */}
                   <div className="py-1">
                     <button
                       type="button"
