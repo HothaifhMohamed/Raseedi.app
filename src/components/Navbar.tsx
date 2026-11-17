@@ -84,6 +84,7 @@ export const Navbar: React.FC = () => {
     setIsLogoutModalOpen,
     isWorkspaceModalOpen,
     setIsWorkspaceModalOpen,
+    showToast,
     t,
     isRTL,
   } = useApp();
@@ -140,9 +141,7 @@ export const Navbar: React.FC = () => {
 
   const headerRef = useRef<HTMLElement>(null);
 
-  const currentCurrency = getCurrency(
-    isOrgWorkspace && activeOrganization ? activeOrganization.currency : settings.mainCurrency
-  );
+  const currentCurrency = getCurrency(settings.mainCurrency || 'EGP');
 
   const hasSyncAlert = cloudSyncStatus === 'error';
 
@@ -390,21 +389,31 @@ export const Navbar: React.FC = () => {
             type="button"
             data-testid="navbar-currency-btn"
             onClick={() => {
-              if (isOrgWorkspace) return;
+              setIsNotifOpen(false);
+              setIsOverflowOpen(false);
+              setIsWorkspaceModalOpen(false);
               openCurrencyPicker(
-                (code) => updateSettings({ mainCurrency: code }),
+                (code) => {
+                  updateSettings({ mainCurrency: code });
+                  showToast(
+                    isRTL
+                      ? `تم تغيير عملة العرض الرئيسية إلى ${code}`
+                      : `Display currency changed to ${code}`,
+                    'success'
+                  );
+                },
                 settings.mainCurrency
               );
             }}
-            disabled={isOrgWorkspace}
-            className="flex items-center gap-1 px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs font-medium text-[var(--color-ink)] hover:border-[var(--color-muted)] transition-colors duration-300 min-h-[38px] disabled:opacity-80"
+            className="flex items-center gap-1 px-2.5 py-1.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs font-medium text-[var(--color-ink)] hover:border-[var(--color-accent)] transition-colors duration-300 min-h-[38px] cursor-pointer"
             title={t('mainCurrency')}
+            aria-label={t('mainCurrency')}
           >
             <span className="text-sm leading-none">{currentCurrency.flag}</span>
             <span className="font-mono text-[var(--color-accent)] font-bold">
               {currentCurrency.code}
             </span>
-            {!isOrgWorkspace && <ChevronDown className="w-3.5 h-3.5 text-[var(--color-muted)]" />}
+            <ChevronDown className="w-3.5 h-3.5 text-[var(--color-muted)]" />
           </button>
 
           {/* Single Overflow Menu Trigger */}

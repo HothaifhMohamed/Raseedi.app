@@ -4,6 +4,7 @@ import {
   isNewerBuildAvailable,
   parseVersionManifest,
   shouldAttemptAutoReload,
+  shouldAttemptChunkRecoveryReload,
   VersionManifest,
 } from './appUpdateLogic';
 
@@ -95,6 +96,7 @@ function recordSessionReload(targetKey: string, nowMs: number): void {
 
 async function clearHtmlNavigationCaches(): Promise<void> {
   if (typeof window === 'undefined' || !('caches' in window)) return;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
   try {
     const cacheNames = await window.caches.keys();
     await Promise.all(
@@ -102,8 +104,7 @@ async function clearHtmlNavigationCaches(): Promise<void> {
         .filter(
           (name) =>
             name.includes('html-navigation') ||
-            name.includes('manifest') ||
-            name.includes('workbox-precache')
+            name.includes('manifest')
         )
         .map((name) => window.caches.delete(name))
     );
@@ -166,6 +167,45 @@ async function performGuardedReload(targetKey: string): Promise<void> {
   }
 
   window.location.reload();
+}
+
+const CHUNK_RELOAD_TS_STORAGE = 'raseedi_chunk_reload_ts';
+
+export function attemptChunkRecoveryReload(): boolean {
+  if (typeof window === 'undefined') return false;
+  const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+  const nowMs = Date.now();
+  let lastAttemptMs: number | null = null;
+  try {
+    const raw = window.sessionStorage.getItem(CHUNK_RELOAD_TS_STORAGE);
+    const parsed = raw ? Number(raw) : null;
+    if (parsed !== null && Number.isFinite(parsed)) {
+      lastAttemptMs = parsed;
+    }
+  } catch {
+    // Ignore sessionStorage errors
+  }
+
+  if (
+    !shouldAttemptChunkRecoveryReload({
+      nowMs,
+      lastAttemptMs,
+      isOnline,
+    })
+  ) {
+    return false;
+  }
+
+  try {
+    window.sessionStorage.setItem(CHUNK_RELOAD_TS_STORAGE, String(nowMs));
+  } catch {
+    // Ignore
+  }
+
+  void clearHtmlNavigationCaches().finally(() => {
+    window.location.reload();
+  });
+  return true;
 }
 
 export async function applyPendingAppUpdate(): Promise<void> {

@@ -129,29 +129,14 @@ export default defineConfig(() => {
           skipWaiting: true,
           clientsClaim: true,
           cleanupOutdatedCaches: true,
-          globPatterns: ['**/*.{js,css,ico,png,svg,woff,woff2}'],
-          globIgnores: ['**/index.html', '**/version.json'],
-          navigateFallback: null,
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          globIgnores: ['**/version.json'],
+          navigateFallback: '/index.html',
           navigateFallbackDenylist: [/^\/ads\.txt$/, /^\/api\//, /^\/version\.json$/],
           runtimeCaching: [
             {
               urlPattern: /\/version\.json(\?.*)?$/i,
               handler: 'NetworkOnly',
-            },
-            {
-              urlPattern: ({ request }) => request.mode === 'navigate',
-              handler: 'NetworkFirst',
-              options: {
-                cacheName: 'raseedi-html-navigation',
-                networkTimeoutSeconds: 3,
-                expiration: {
-                  maxEntries: 5,
-                  maxAgeSeconds: 60 * 60 * 24,
-                },
-                cacheableResponse: {
-                  statuses: [0, 200],
-                },
-              },
             },
             {
               urlPattern: /\/manifest\.json$/i,

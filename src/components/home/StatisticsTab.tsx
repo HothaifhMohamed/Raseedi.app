@@ -76,7 +76,7 @@ export const StatisticsTab: React.FC = () => {
       if (tx.type === 'expense') exp += inMain;
     }
     return { totalIncome: inc, totalExpense: exp };
-  }, [filteredTx, settings.mainCurrency, settings.customExchangeRates]);
+  }, [filteredTx, settings.mainCurrency, settings.customExchangeRates, settings.ratesUpdatedAtMs]);
 
   // Category Breakdown
   const categoryStats = useMemo(() => {
@@ -107,7 +107,7 @@ export const StatisticsTab: React.FC = () => {
 
     items.sort((a, b) => b.amount - a.amount);
     return items;
-  }, [filteredTx, categories, totalExpense, settings.mainCurrency, settings.customExchangeRates]);
+  }, [filteredTx, categories, totalExpense, settings.mainCurrency, settings.customExchangeRates, settings.ratesUpdatedAtMs]);
 
   // Priority Breakdown
   const priorityStats = useMemo(() => {
@@ -135,7 +135,7 @@ export const StatisticsTab: React.FC = () => {
       leisure: { amount: leisure, pct: total > 0 ? Math.round((leisure / total) * 100) : 0 },
       total,
     };
-  }, [filteredTx, settings.mainCurrency, settings.customExchangeRates]);
+  }, [filteredTx, settings.mainCurrency, settings.customExchangeRates, settings.ratesUpdatedAtMs]);
 
   // Wallet Comparison
   const walletStats = useMemo(() => {
@@ -161,7 +161,7 @@ export const StatisticsTab: React.FC = () => {
         ...stats,
       };
     });
-  }, [filteredTx, wallets, settings.mainCurrency, settings.customExchangeRates]);
+  }, [filteredTx, wallets, settings.mainCurrency, settings.customExchangeRates, settings.ratesUpdatedAtMs]);
 
   // SVG Doughnut Chart Calculation
   const doughnutSegments = useMemo(() => {
@@ -189,7 +189,7 @@ export const StatisticsTab: React.FC = () => {
       new Date(),
       settings.firstDayOfMonth || 1
     );
-  }, [transactions, settings.mainCurrency, settings.customExchangeRates, settings.firstDayOfMonth]);
+  }, [transactions, settings.mainCurrency, settings.customExchangeRates, settings.ratesUpdatedAtMs, settings.firstDayOfMonth]);
 
   return (
     <div className="flex flex-col flex-1 px-4 py-3 pb-24 space-y-4">

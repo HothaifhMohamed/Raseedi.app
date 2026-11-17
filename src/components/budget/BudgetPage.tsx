@@ -140,7 +140,16 @@ export const BudgetPage: React.FC = () => {
         ...progress,
       };
     });
-  }, [budgets, transactions, categories, wallets, settings.mainCurrency, settings.customExchangeRates, settings.firstDayOfMonth]);
+  }, [
+    budgets,
+    transactions,
+    categories,
+    wallets,
+    settings.mainCurrency,
+    settings.customExchangeRates,
+    settings.ratesUpdatedAtMs,
+    settings.firstDayOfMonth,
+  ]);
 
   return (
     <div className="flex flex-col flex-1 px-4 py-3 pb-24 space-y-4" dir={isRTL ? 'rtl' : 'ltr'}>

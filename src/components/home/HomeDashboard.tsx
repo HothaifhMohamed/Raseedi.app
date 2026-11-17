@@ -90,6 +90,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
     wallets,
     settings.mainCurrency,
     settings.customExchangeRates,
+    settings.ratesUpdatedAtMs,
     settings.excludeDebtsFromBalance,
     debts,
   ]);
@@ -116,6 +117,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
     settings.firstDayOfMonth,
     settings.mainCurrency,
     settings.customExchangeRates,
+    settings.ratesUpdatedAtMs,
     settings.useRateAtTransactionTime,
   ]);
 
@@ -134,6 +136,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
     transactions,
     settings.mainCurrency,
     settings.customExchangeRates,
+    settings.ratesUpdatedAtMs,
     settings.firstDayOfMonth,
   ]);
 
@@ -155,6 +158,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
     transactions,
     settings.mainCurrency,
     settings.customExchangeRates,
+    settings.ratesUpdatedAtMs,
     settings.firstDayOfMonth,
   ]);
 

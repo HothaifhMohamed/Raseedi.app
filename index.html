@@ -40,6 +40,23 @@
   </head>
   <body class="bg-[#F4F7F4] text-[#11221B] antialiased selection:bg-[#0E5A43] selection:text-white min-h-screen">
     <div id="root"></div>
+    <script>
+      window.addEventListener('vite:preloadError', function (event) {
+        event.preventDefault();
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+        try {
+          var key = 'raseedi_chunk_reload_ts';
+          var now = Date.now();
+          var last = Number(window.sessionStorage.getItem(key) || '0');
+          if (!last || now - last >= 20000) {
+            window.sessionStorage.setItem(key, String(now));
+            window.location.reload();
+          }
+        } catch (e) {
+          window.location.reload();
+        }
+      });
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

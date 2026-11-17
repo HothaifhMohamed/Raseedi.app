@@ -17,6 +17,7 @@ import { useApp } from '../../context/AppContext';
 import { Wallet, WalletType } from '../../types';
 import { IconRenderer } from '../common/IconRenderer';
 import { formatCurrencyAmount, calculateTotalBalance } from '../../services/calculations';
+import { convertCurrency } from '../../services/currency';
 import { reorderWalletsBySwap, sortWalletsByOrder } from '../../services/walletOrder';
 import {
   buildWalletActionPreset,
@@ -124,7 +125,14 @@ export const WalletsPage: React.FC = () => {
       excludeDebts: settings.excludeDebtsFromBalance,
       debts,
     });
-  }, [sortedWallets, settings.mainCurrency, settings.customExchangeRates, settings.excludeDebtsFromBalance, debts]);
+  }, [
+    sortedWallets,
+    settings.mainCurrency,
+    settings.customExchangeRates,
+    settings.ratesUpdatedAtMs,
+    settings.excludeDebtsFromBalance,
+    debts,
+  ]);
 
   const toggleHideWalletBalance = (wId: string) => {
     setHiddenBalances((prev) => ({ ...prev, [wId]: !prev[wId] }));
@@ -265,7 +273,10 @@ export const WalletsPage: React.FC = () => {
           <span className="text-xs text-[var(--color-muted)] block mb-1">
             {t('totalWalletsBalance')}
           </span>
-          <div className="text-2xl sm:text-3xl font-bold text-[var(--color-ink)] num-tabular tracking-tight">
+          <div
+            data-testid="wallets-total-balance"
+            className="text-2xl sm:text-3xl font-bold text-[var(--color-ink)] num-tabular tracking-tight"
+          >
             {formatCurrencyAmount(totalBalance, settings.mainCurrency, {
               decimalPlaces: settings.decimalPlaces,
               digitFormat: settings.digitFormat,
@@ -496,9 +507,9 @@ export const WalletsPage: React.FC = () => {
                 )}
               </div>
 
-              {/* Bottom Row: Prominent Balance & Minimal EMV Accent */}
-              <div className="relative flex items-end justify-between pt-4 mt-2 border-t border-white/15">
-                <div>
+              {/* Bottom Row: Prominent Balance & Subtle Contactless Smart Chip */}
+              <div className="relative flex items-end justify-between gap-3 pt-4 mt-2 border-t border-white/15">
+                <div className="min-w-0 flex-1">
                   <span className="text-[11px] text-white/75 block mb-0.5">
                     {isRTL ? 'الرصيد المتاح' : 'Available Balance'}
                   </span>
@@ -519,20 +530,85 @@ export const WalletsPage: React.FC = () => {
                     ) : isHidden ? (
                       <span className="num-tabular tracking-widest">••••••••</span>
                     ) : (
-                      <MoneyText
-                        amount={w.balance}
-                        currency={w.currency}
-                        className="text-2xl sm:text-3xl font-bold text-white tracking-tight"
-                      />
+                      <>
+                        <MoneyText
+                          amount={w.balance}
+                          currency={w.currency}
+                          className="text-2xl sm:text-3xl font-bold text-white tracking-tight"
+                        />
+                        {w.currency !== settings.mainCurrency && (
+                          <div className="text-[11px] text-[#F4E3B2]/90 mt-0.5 num-tabular font-medium">
+                            ≈{' '}
+                            <MoneyText
+                              amount={convertCurrency(
+                                w.balance,
+                                w.currency,
+                                settings.mainCurrency,
+                                settings.customExchangeRates
+                              )}
+                              currency={settings.mainCurrency}
+                              className="text-[11px] font-semibold text-[#F4E3B2]"
+                            />
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
 
-                {/* Minimalist Metallic EMV Card Accent */}
-                <div
+                {/* Subtle Contactless NFC & Smart Chip Emblem */}
+                <span
                   aria-hidden="true"
-                  className="w-8 h-6 rounded-md border border-[#E2B954]/50 bg-gradient-to-br from-[#F3D88B]/30 to-[#B98924]/20 shrink-0"
-                />
+                  className="inline-flex items-center gap-1.5 text-white/40 shrink-0 pb-0.5 pointer-events-none select-none"
+                >
+                  <svg
+                    viewBox="0 0 28 20"
+                    fill="none"
+                    className="w-7 h-5"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <rect
+                      x="1"
+                      y="1"
+                      width="26"
+                      height="18"
+                      rx="3.5"
+                      stroke="currentColor"
+                      strokeWidth="1.4"
+                    />
+                    <path
+                      d="M9 1V19M19 1V19M1 7H9M1 13H9M19 7H27M19 13H27M9 10H19"
+                      stroke="currentColor"
+                      strokeWidth="1.2"
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                  <svg
+                    viewBox="0 0 18 20"
+                    fill="none"
+                    className="w-4 h-4"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path
+                      d="M4.5 7.5C5.8 8.9 5.8 11.1 4.5 12.5"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                    />
+                    <path
+                      d="M8.5 5C10.9 7.7 10.9 12.3 8.5 15"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                    />
+                    <path
+                      d="M12.5 2.5C16.1 6.6 16.1 13.4 12.5 17.5"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                </span>
               </div>
             </div>
           );

@@ -57,8 +57,15 @@ export const CurrencyPickerModal: React.FC<CurrencyPickerModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-md max-h-[85vh] flex flex-col bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl shadow-xl overflow-hidden text-[var(--color-ink)]">
+    <div
+      data-testid="currency-picker-modal"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md max-h-[85vh] flex flex-col bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl shadow-xl overflow-hidden text-[var(--color-ink)]"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-line)] bg-[var(--color-bg)]">
           <h2 className="text-base font-bold text-[var(--color-ink)]">
