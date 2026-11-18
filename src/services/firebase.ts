@@ -58,6 +58,7 @@ import {
   VerifiedProEntitlement,
 } from '../types';
 import { shouldFallbackAccountDeleteError } from './accountDeletion';
+import { resolveSafeCloudBackupWrite } from './backupMerge';
 import {
   AdminCouponCycle,
   AdminCouponTier,
@@ -728,14 +729,72 @@ export async function saveCloudBackup(
   options?: {
     source?: 'auto' | 'manual';
     recordHistory?: boolean;
+    allowEmptyOverwrite?: boolean;
   }
-): Promise<{ syncedAt: number; updatedAtMs: number; skippedAttachmentsCount: number }> {
+): Promise<{
+  syncedAt: number;
+  updatedAtMs: number;
+  skippedAttachmentsCount: number;
+  blockedEmptyOverwrite?: boolean;
+}> {
   const metaPath = `users/${uid}/backup/meta`;
   const metaRef = doc(db, 'users', uid, 'backup', 'meta');
   const userRef = doc(db, 'users', uid);
 
+  let effectiveData: Omit<AppDatabaseData, 'user'> & {
+    orgWorkspaces?: Record<string, OrgWorkspaceData>;
+    activeWorkspace?: string;
+  } = data;
+
+  let existingMetaSnap: Awaited<ReturnType<typeof getDoc>> | null = null;
+  try {
+    const userSnap = await getDoc(userRef);
+    if (!userSnap.exists() && auth.currentUser?.uid === uid) {
+      await ensureUserProfile(auth.currentUser);
+    }
+    existingMetaSnap = await getDoc(metaRef);
+
+    if (existingMetaSnap.exists()) {
+      const existingMetaData = existingMetaSnap.data() as Partial<CloudBackupMeta>;
+      const cloudTotalTx = Number(existingMetaData.totalTransactions || 0);
+      const localTxCount = (effectiveData.transactions || []).length;
+
+      if (cloudTotalTx > 0 && localTxCount === 0 && !options?.allowEmptyOverwrite) {
+        const source = options?.source === 'manual' ? 'manual' : 'auto';
+        const existingCloudData =
+          source === 'manual' ? await fetchCloudBackup(uid).catch(() => null) : null;
+        const decision = resolveSafeCloudBackupWrite({
+          localData: effectiveData,
+          existingCloud: {
+            totalTransactions: cloudTotalTx,
+            data: existingCloudData,
+          },
+          source,
+          allowEmptyOverwrite: Boolean(options?.allowEmptyOverwrite),
+        });
+
+        if (decision.action === 'skip_empty_local') {
+          console.warn(
+            '[saveCloudBackup] Prevented overwriting non-empty cloud backup with empty local transactions.'
+          );
+          const preservedUpdatedAtMs = Number(existingMetaData.updatedAtMs || 0);
+          return {
+            syncedAt: preservedUpdatedAtMs,
+            updatedAtMs: preservedUpdatedAtMs,
+            skippedAttachmentsCount: 0,
+            blockedEmptyOverwrite: true,
+          };
+        }
+
+        effectiveData = decision.mergedData;
+      }
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, metaPath);
+  }
+
   let skippedAttachmentsCount = 0;
-  const sanitizedTransactions = (data.transactions || []).slice(0, 40000).map((tx) => {
+  const sanitizedTransactions = (effectiveData.transactions || []).slice(0, 40000).map((tx) => {
     if (!tx.attachments || tx.attachments.length === 0) return tx;
     const kept = tx.attachments.filter((att) => att.length <= 24_000);
     skippedAttachmentsCount += tx.attachments.length - kept.length;
@@ -750,15 +809,16 @@ export async function saveCloudBackup(
   const updatedAtMs = Date.now();
 
   const rawOrgEntries =
-    data.orgWorkspaces &&
-    typeof data.orgWorkspaces === 'object' &&
-    !Array.isArray(data.orgWorkspaces)
-      ? Object.entries(data.orgWorkspaces).slice(0, 50)
+    effectiveData.orgWorkspaces &&
+    typeof effectiveData.orgWorkspaces === 'object' &&
+    !Array.isArray(effectiveData.orgWorkspaces)
+      ? Object.entries(effectiveData.orgWorkspaces).slice(0, 50)
       : [];
   const hasOrgWorkspaces = rawOrgEntries.length > 0;
   const cleanActiveWorkspace =
-    typeof data.activeWorkspace === 'string' && data.activeWorkspace.trim().length > 0
-      ? data.activeWorkspace.trim().slice(0, 128)
+    typeof effectiveData.activeWorkspace === 'string' &&
+    effectiveData.activeWorkspace.trim().length > 0
+      ? effectiveData.activeWorkspace.trim().slice(0, 128)
       : undefined;
 
   let orgWorkspacesToSave = hasOrgWorkspaces
@@ -770,17 +830,17 @@ export async function saveCloudBackup(
     schemaVersion: 2,
     chunkCount: chunks.length,
     totalTransactions: sanitizedTransactions.length,
-    wallets: (data.wallets || []).slice(0, 200),
-    categories: (data.categories || []).slice(0, 300),
-    budgets: (data.budgets || []).slice(0, 200),
-    debts: (data.debts || []).slice(0, 500),
-    goals: (data.goals || []).slice(0, 200),
-    templates: (data.templates || []).slice(0, 300),
-    moneyCircles: (data.moneyCircles || []).slice(0, 200),
+    wallets: (effectiveData.wallets || []).slice(0, 200),
+    categories: (effectiveData.categories || []).slice(0, 300),
+    budgets: (effectiveData.budgets || []).slice(0, 200),
+    debts: (effectiveData.debts || []).slice(0, 500),
+    goals: (effectiveData.goals || []).slice(0, 200),
+    templates: (effectiveData.templates || []).slice(0, 300),
+    moneyCircles: (effectiveData.moneyCircles || []).slice(0, 200),
     ...(orgWorkspacesToSave ? { orgWorkspaces: orgWorkspacesToSave } : {}),
     ...(cleanActiveWorkspace ? { activeWorkspace: cleanActiveWorkspace } : {}),
-    settings: { ...data.settings, isPro: false },
-    hasCompletedOnboarding: Boolean(data.hasCompletedOnboarding),
+    settings: { ...effectiveData.settings, isPro: false },
+    hasCompletedOnboarding: Boolean(effectiveData.hasCompletedOnboarding),
     updatedAtMs,
   });
 
@@ -797,14 +857,12 @@ export async function saveCloudBackup(
   }
 
   try {
-    const userSnap = await getDoc(userRef);
-    if (!userSnap.exists() && auth.currentUser?.uid === uid) {
-      await ensureUserProfile(auth.currentUser);
-    }
-    const existingMetaSnap = await getDoc(metaRef);
-
-    const previousChunkCount = existingMetaSnap.exists()
-      ? Math.max(0, Number((existingMetaSnap.data() as Partial<CloudBackupMeta>)?.chunkCount || 0))
+    const metaExists = Boolean(existingMetaSnap?.exists());
+    const previousChunkCount = metaExists
+      ? Math.max(
+          0,
+          Number((existingMetaSnap?.data() as Partial<CloudBackupMeta>)?.chunkCount || 0)
+        )
       : 0;
 
     let batch = writeBatch(db);
@@ -817,46 +875,29 @@ export async function saveCloudBackup(
       }
     };
 
-    if (!existingMetaSnap.exists()) {
-      batch.set(metaRef, {
+    batch.set(
+      metaRef,
+      {
         ...metaFields,
-        createdAt: serverTimestamp(),
+        ...(!metaExists ? { createdAt: serverTimestamp() } : {}),
         updatedAt: serverTimestamp(),
-      });
-    } else {
-      batch.update(metaRef, {
-        schemaVersion: metaFields.schemaVersion,
-        chunkCount: metaFields.chunkCount,
-        totalTransactions: metaFields.totalTransactions,
-        wallets: metaFields.wallets,
-        categories: metaFields.categories,
-        budgets: metaFields.budgets,
-        debts: metaFields.debts,
-        goals: metaFields.goals,
-        templates: metaFields.templates,
-        moneyCircles: metaFields.moneyCircles,
-        ...(metaFields.orgWorkspaces !== undefined
-          ? { orgWorkspaces: metaFields.orgWorkspaces }
-          : {}),
-        ...(metaFields.activeWorkspace !== undefined
-          ? { activeWorkspace: metaFields.activeWorkspace }
-          : {}),
-        settings: metaFields.settings,
-        hasCompletedOnboarding: metaFields.hasCompletedOnboarding,
-        updatedAtMs: metaFields.updatedAtMs,
-        updatedAt: serverTimestamp(),
-      });
-    }
+      },
+      { merge: true }
+    );
     ops += 1;
 
     for (let idx = 0; idx < chunks.length; idx++) {
       const chunkRef = doc(db, 'users', uid, 'backupChunks', `chunk_${idx}`);
-      batch.set(chunkRef, {
-        uid,
-        chunkIndex: idx,
-        transactions: stripUndefinedDeep(chunks[idx]),
-        updatedAt: serverTimestamp(),
-      });
+      batch.set(
+        chunkRef,
+        {
+          uid,
+          chunkIndex: idx,
+          transactions: stripUndefinedDeep(chunks[idx]),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
       ops += 1;
       if (ops >= 400) {
         await flushBatch();
@@ -899,7 +940,7 @@ export async function saveCloudBackup(
       const source = options?.source === 'manual' ? 'manual' : 'auto';
       const historyId = `${source}_${updatedAtMs}`;
       const { snapshotJson, storedTransactionsCount } = buildCompactBackupHistorySnapshotJson({
-        ...data,
+        ...effectiveData,
         updatedAtMs,
       });
 
@@ -909,9 +950,9 @@ export async function saveCloudBackup(
         uid,
         source,
         createdAtMs: updatedAtMs,
-        totalTransactions: (data.transactions || []).length,
+        totalTransactions: (effectiveData.transactions || []).length,
         storedTransactionsCount,
-        walletsCount: (data.wallets || []).length,
+        walletsCount: (effectiveData.wallets || []).length,
         snapshotJson,
         createdAt: serverTimestamp(),
       });

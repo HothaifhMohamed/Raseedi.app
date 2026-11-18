@@ -37,6 +37,11 @@ import {
 import { convertCurrency, fromMinor, toMinor } from './currency';
 import { getEffectiveTransactionAmount } from './calculations';
 import { normalizeApprovalStatus } from './entitlements';
+import {
+  filterTransactionsByDateRange,
+  isFirestoreMissingIndexError,
+  sortTransactionsDescending,
+} from './orgTransactionQuery';
 
 export interface OrgActorInfo {
   uid: string;
@@ -480,38 +485,59 @@ export function subscribeActiveOrganization(
     )
   );
 
-  // 8. Transactions (paginated latest N by date desc, includes metadataChanges for offline pending indicator)
-  const txQuery = query(
-    collection(db, 'organizations', orgId, 'transactions'),
-    orderBy('date', 'desc'),
-    limit(txPageSize)
-  );
-  unsubs.push(
-    onSnapshot(
-      txQuery,
-      { includeMetadataChanges: true },
-      (snap) => {
-        const active: Transaction[] = [];
-        const trash: Transaction[] = [];
-        for (const d of snap.docs) {
-          const parsed = parseTransactionDoc(d.data() as Record<string, unknown>);
-          if (!parsed) continue;
-          if (parsed.deletedAt) {
-            trash.push(parsed);
-          } else {
-            active.push(parsed);
+  // 8. Transactions — fetch all workspace transactions without hidden limit/orderBy truncation
+  //    (Firestore orderBy('date') silently excludes docs missing top-level `date`, and missing index fails queries)
+  try {
+    const txCollectionRef = collection(db, 'organizations', orgId, 'transactions');
+    unsubs.push(
+      onSnapshot(
+        txCollectionRef,
+        { includeMetadataChanges: true },
+        (snap) => {
+          const active: Transaction[] = [];
+          const trash: Transaction[] = [];
+          for (const d of snap.docs) {
+            const parsed = parseTransactionDoc(d.data() as Record<string, unknown>);
+            if (!parsed) continue;
+            if (parsed.deletedAt) {
+              trash.push(parsed);
+            } else {
+              active.push(parsed);
+            }
           }
+          const sortedActive = sortTransactionsDescending(active);
+          const sortedTrash = sortTransactionsDescending(trash);
+          const lastCursor = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+          callbacks.onTransactions(sortedActive, sortedTrash, {
+            hasMore: false,
+            lastCursor,
+            hasPendingWrites: snap.metadata.hasPendingWrites,
+          });
+        },
+        (err) => {
+          if (isFirestoreMissingIndexError(err)) {
+            console.error(
+              '[Firestore Missing Index Error] Organizations transactions query requires an index:',
+              err
+            );
+          } else {
+            console.error('[Firestore Transactions Query Error] Failed to fetch transactions:', err);
+          }
+          callbacks.onError?.('transactions', err as Error);
         }
-        const lastCursor = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
-        callbacks.onTransactions(active, trash, {
-          hasMore: snap.docs.length >= txPageSize,
-          lastCursor,
-          hasPendingWrites: snap.metadata.hasPendingWrites,
-        });
-      },
-      (err) => callbacks.onError?.('transactions', err as Error)
-    )
-  );
+      )
+    );
+  } catch (err) {
+    if (isFirestoreMissingIndexError(err)) {
+      console.error(
+        '[Firestore Missing Index Error] Organizations transactions query setup failed:',
+        err
+      );
+    } else {
+      console.error('[Firestore Transactions Query Error] Query setup exception:', err);
+    }
+    callbacks.onError?.('transactions', err as Error);
+  }
 
   // 9. Audit logs — ONLY for owner/admin/accountant (firestore.rules rejects employee/viewer)
   if (userRole === 'owner' || userRole === 'admin' || userRole === 'accountant') {
@@ -570,27 +596,53 @@ export async function loadMoreOrgTransactions(
   hasMore: boolean;
   lastCursor: QueryDocumentSnapshot<DocumentData> | null;
 }> {
-  const q = query(
-    collection(db, 'organizations', orgId, 'transactions'),
-    orderBy('date', 'desc'),
-    startAfter(cursor),
-    limit(pageSize)
-  );
-  const snap = await getDocs(q);
-  const active: Transaction[] = [];
-  const trash: Transaction[] = [];
-  for (const d of snap.docs) {
-    const parsed = parseTransactionDoc(d.data() as Record<string, unknown>);
-    if (!parsed) continue;
-    if (parsed.deletedAt) trash.push(parsed);
-    else active.push(parsed);
+  try {
+    const q = query(
+      collection(db, 'organizations', orgId, 'transactions'),
+      orderBy('date', 'desc'),
+      startAfter(cursor),
+      limit(pageSize)
+    );
+    const snap = await getDocs(q);
+    const active: Transaction[] = [];
+    const trash: Transaction[] = [];
+    for (const d of snap.docs) {
+      const parsed = parseTransactionDoc(d.data() as Record<string, unknown>);
+      if (!parsed) continue;
+      if (parsed.deletedAt) trash.push(parsed);
+      else active.push(parsed);
+    }
+    return {
+      active: sortTransactionsDescending(active),
+      trash: sortTransactionsDescending(trash),
+      hasMore: snap.docs.length >= pageSize,
+      lastCursor: snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null,
+    };
+  } catch (err) {
+    if (isFirestoreMissingIndexError(err)) {
+      console.error(
+        '[Firestore Missing Index Error] loadMoreOrgTransactions requires an index; falling back to full un-ordered fetch:',
+        err
+      );
+      const fallbackSnap = await getDocs(collection(db, 'organizations', orgId, 'transactions'));
+      const active: Transaction[] = [];
+      const trash: Transaction[] = [];
+      for (const d of fallbackSnap.docs) {
+        const parsed = parseTransactionDoc(d.data() as Record<string, unknown>);
+        if (!parsed) continue;
+        if (parsed.deletedAt) trash.push(parsed);
+        else active.push(parsed);
+      }
+      return {
+        active: sortTransactionsDescending(active),
+        trash: sortTransactionsDescending(trash),
+        hasMore: false,
+        lastCursor: fallbackSnap.docs.length > 0 ? fallbackSnap.docs[fallbackSnap.docs.length - 1] : null,
+      };
+    }
+    console.error('[Firestore Query Error] loadMoreOrgTransactions failed:', err);
+    throw err;
   }
-  return {
-    active,
-    trash,
-    hasMore: snap.docs.length >= pageSize,
-    lastCursor: snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null,
-  };
 }
 
 export async function fetchOrgTransactionsInRange(
@@ -598,20 +650,37 @@ export async function fetchOrgTransactionsInRange(
   startDate: string,
   endDate: string
 ): Promise<Transaction[]> {
-  const q = query(
-    collection(db, 'organizations', orgId, 'transactions'),
-    where('date', '>=', startDate),
-    where('date', '<=', endDate),
-    orderBy('date', 'desc'),
-    limit(1500)
-  );
-  const snap = await getDocs(q);
-  const out: Transaction[] = [];
-  for (const d of snap.docs) {
-    const parsed = parseTransactionDoc(d.data() as Record<string, unknown>);
-    if (parsed && !parsed.deletedAt) out.push(parsed);
+  try {
+    const q = query(
+      collection(db, 'organizations', orgId, 'transactions'),
+      where('date', '>=', startDate),
+      where('date', '<=', endDate),
+      orderBy('date', 'desc')
+    );
+    const snap = await getDocs(q);
+    const out: Transaction[] = [];
+    for (const d of snap.docs) {
+      const parsed = parseTransactionDoc(d.data() as Record<string, unknown>);
+      if (parsed && !parsed.deletedAt) out.push(parsed);
+    }
+    return sortTransactionsDescending(out);
+  } catch (err) {
+    if (isFirestoreMissingIndexError(err)) {
+      console.error(
+        '[Firestore Missing Index Error] fetchOrgTransactionsInRange requires an index; falling back to un-ordered fetch + local filter:',
+        err
+      );
+      const fallbackSnap = await getDocs(collection(db, 'organizations', orgId, 'transactions'));
+      const allActive: Transaction[] = [];
+      for (const d of fallbackSnap.docs) {
+        const parsed = parseTransactionDoc(d.data() as Record<string, unknown>);
+        if (parsed && !parsed.deletedAt) allActive.push(parsed);
+      }
+      return filterTransactionsByDateRange(allActive, startDate, endDate);
+    }
+    console.error('[Firestore Query Error] fetchOrgTransactionsInRange failed:', err);
+    throw err;
   }
-  return out;
 }
 
 // ---------------------------------------------------------------------------

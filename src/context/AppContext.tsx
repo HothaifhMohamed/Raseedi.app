@@ -142,6 +142,7 @@ import {
   CloudBackupPayload,
   ScanQuotaInfo,
 } from '../services/firebase';
+import { isFirestoreMissingIndexError } from '../services/orgTransactionQuery';
 import type { BackupHistorySummary } from '../services/backupHistory';
 import { isAuthorizedAdminUser, verifySignedLicenseCode } from '../services/licenseCodes';
 import {
@@ -2524,7 +2525,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         },
         onAuditLogs: (logs) => setActiveCloudAuditLogs(logs),
         onError: (scope, err) => {
-          console.warn(`Org listener error (${scope}):`, err);
+          if (scope === 'transactions' || isFirestoreMissingIndexError(err)) {
+            console.error(`Org ${scope} query/index error:`, err);
+          } else {
+            console.warn(`Org listener error (${scope}):`, err);
+          }
           setIsOrgLoading(false);
         },
       }
@@ -2873,24 +2878,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     try {
       await ensureUserProfile(auth.currentUser);
 
-      const { syncedAt, updatedAtMs, skippedAttachmentsCount } = await saveCloudBackup(
-        auth.currentUser.uid,
-        {
-          transactions: snap.transactions,
-          wallets: snap.wallets,
-          categories: snap.categories,
-          budgets: snap.budgets,
-          debts: snap.debts,
-          goals: snap.goals,
-          templates: snap.templates,
-          moneyCircles: snap.moneyCircles,
-          orgWorkspaces: latestLocalOrgWorkspacesRef.current,
-          activeWorkspace: activeWorkspaceRef.current || 'personal',
-          settings: snap.settings,
-          hasCompletedOnboarding: snap.hasCompletedOnboarding,
-        },
-        { source: 'manual', recordHistory: true }
-      );
+      const { syncedAt, updatedAtMs, skippedAttachmentsCount, blockedEmptyOverwrite } =
+        await saveCloudBackup(
+          auth.currentUser.uid,
+          {
+            transactions: snap.transactions,
+            wallets: snap.wallets,
+            categories: snap.categories,
+            budgets: snap.budgets,
+            debts: snap.debts,
+            goals: snap.goals,
+            templates: snap.templates,
+            moneyCircles: snap.moneyCircles,
+            orgWorkspaces: latestLocalOrgWorkspacesRef.current,
+            activeWorkspace: activeWorkspaceRef.current || 'personal',
+            settings: snap.settings,
+            hasCompletedOnboarding: snap.hasCompletedOnboarding,
+          },
+          { source: 'manual', recordHistory: true, allowEmptyOverwrite: false }
+        );
+
+      if (blockedEmptyOverwrite) {
+        setCloudSyncStatus('idle');
+        return false;
+      }
 
       setCloudSkippedAttachmentsWarning(skippedAttachmentsCount);
       setLastCloudBackupExists(true);
@@ -3079,27 +3090,39 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const timer = window.setTimeout(async () => {
       if (!auth.currentUser) return;
       const snap = latestPersonalRef.current;
+      if (lastCloudBackupExists && snap.transactions.length === 0) {
+        console.warn(
+          '[AutoCloudSync] Skipped automatic upload because local transactions are empty while cloud backup exists.'
+        );
+        return;
+      }
       try {
         setCloudSyncStatus('syncing');
 
-        const { syncedAt, updatedAtMs, skippedAttachmentsCount } = await saveCloudBackup(
-          auth.currentUser.uid,
-          {
-            transactions: snap.transactions,
-            wallets: snap.wallets,
-            categories: snap.categories,
-            budgets: snap.budgets,
-            debts: snap.debts,
-            goals: snap.goals,
-            templates: snap.templates,
-            moneyCircles: snap.moneyCircles,
-            orgWorkspaces: latestLocalOrgWorkspacesRef.current,
-            activeWorkspace: activeWorkspaceRef.current || 'personal',
-            settings: snap.settings,
-            hasCompletedOnboarding: snap.hasCompletedOnboarding,
-          },
-          { source: 'auto', recordHistory: true }
-        );
+        const { syncedAt, updatedAtMs, skippedAttachmentsCount, blockedEmptyOverwrite } =
+          await saveCloudBackup(
+            auth.currentUser.uid,
+            {
+              transactions: snap.transactions,
+              wallets: snap.wallets,
+              categories: snap.categories,
+              budgets: snap.budgets,
+              debts: snap.debts,
+              goals: snap.goals,
+              templates: snap.templates,
+              moneyCircles: snap.moneyCircles,
+              orgWorkspaces: latestLocalOrgWorkspacesRef.current,
+              activeWorkspace: activeWorkspaceRef.current || 'personal',
+              settings: snap.settings,
+              hasCompletedOnboarding: snap.hasCompletedOnboarding,
+            },
+            { source: 'auto', recordHistory: true, allowEmptyOverwrite: false }
+          );
+
+        if (blockedEmptyOverwrite) {
+          setCloudSyncStatus('idle');
+          return;
+        }
 
         setCloudSkippedAttachmentsWarning(skippedAttachmentsCount);
         setLastCloudBackupExists(true);
@@ -3135,6 +3158,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [
     user?.isLoggedIn,
     hasCompletedOnboarding,
+    lastCloudBackupExists,
     personalTransactions,
     personalWallets,
     personalCategories,

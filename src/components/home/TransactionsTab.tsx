@@ -25,7 +25,7 @@ import { ConfirmationModal } from '../common/ConfirmationModal';
 import { AdBanner } from '../common/AdBanner';
 import { MoneyText } from '../common/MoneyText';
 import { HairlineEmptyState } from '../common/HairlineVisuals';
-import { useScrollToTop } from '../../hooks/useScrollToTop';
+import { resetScrollToTop, useScrollToTop } from '../../hooks/useScrollToTop';
 
 export const TransactionsTab: React.FC = () => {
   const {
@@ -68,8 +68,21 @@ export const TransactionsTab: React.FC = () => {
   const [isLoadingMoreCloud, setIsLoadingMoreCloud] = useState(false);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const topRef = useRef<HTMLDivElement>(null);
 
-  useScrollToTop(containerRef, []);
+  useScrollToTop(containerRef, [transactions]);
+
+  useEffect(() => {
+    resetScrollToTop(containerRef.current);
+    const timer = window.setTimeout(() => {
+      if (containerRef.current) {
+        containerRef.current.scrollTop = 0;
+      }
+      topRef.current?.scrollIntoView({ behavior: 'instant', block: 'start' });
+      resetScrollToTop(containerRef.current);
+    }, 100);
+    return () => window.clearTimeout(timer);
+  }, [transactions]);
 
   useEffect(() => {
     if (!activeMenuTxId) return;
@@ -214,6 +227,12 @@ export const TransactionsTab: React.FC = () => {
       className="flex flex-col flex-1 pb-28"
       dir={isRTL ? 'rtl' : 'ltr'}
     >
+      <div
+        ref={topRef}
+        data-testid="transactions-tab-top-anchor"
+        className="scroll-mt-28 h-px w-full pointer-events-none shrink-0"
+        aria-hidden="true"
+      />
       {activeMenuTxId && (
         <div
           data-testid="tx-menu-backdrop"
@@ -332,7 +351,15 @@ export const TransactionsTab: React.FC = () => {
           </button>
         ))}
 
-        {(filters.type !== 'all' || filters.walletId || filters.searchQuery) && (
+        {(filters.type !== 'all' ||
+          Boolean(filters.walletId) ||
+          Boolean(filters.categoryId) ||
+          Boolean(filters.priority) ||
+          Boolean(filters.group) ||
+          Boolean(filters.contact) ||
+          Boolean(filters.startDate) ||
+          Boolean(filters.endDate) ||
+          Boolean(filters.searchQuery)) && (
           <button
             onClick={resetFilters}
             className="px-3 py-1.5 rounded-xl text-xs text-[var(--color-expense)] bg-[var(--color-expense)]/10 hover:bg-[var(--color-expense)]/20 shrink-0 font-semibold min-h-[40px] transition-all duration-300"

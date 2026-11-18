@@ -19,7 +19,7 @@ import { useApp } from '../../context/AppContext';
 import { MoneyText } from '../common/MoneyText';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
 import { HairlineEmptyState } from '../common/HairlineVisuals';
-import { useScrollToTop } from '../../hooks/useScrollToTop';
+import { resetScrollToTop, useScrollToTop } from '../../hooks/useScrollToTop';
 import {
   doesTransactionAffectAccounting,
   getEffectiveTransactionAmount,
@@ -61,6 +61,7 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
   const [activeMenuTxId, setActiveMenuTxId] = useState<string | null>(null);
   const [visibleLimit, setVisibleLimit] = useState(60);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const topRef = useRef<HTMLDivElement>(null);
 
   useScrollToTop(scrollContainerRef, [walletId]);
 
@@ -86,6 +87,18 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
       (tx) => tx.walletId === walletId || tx.toWalletId === walletId
     );
   }, [transactions, walletId]);
+
+  useEffect(() => {
+    resetScrollToTop(scrollContainerRef.current);
+    const timer = window.setTimeout(() => {
+      if (scrollContainerRef.current) {
+        scrollContainerRef.current.scrollTop = 0;
+      }
+      topRef.current?.scrollIntoView({ behavior: 'instant', block: 'start' });
+      resetScrollToTop(scrollContainerRef.current);
+    }, 100);
+    return () => window.clearTimeout(timer);
+  }, [walletId, walletTransactions]);
 
   // Filtered list based on search and type
   const filteredTransactions = useMemo(() => {
@@ -166,6 +179,12 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
       className="flex-1 flex flex-col pb-24 overflow-y-auto"
       dir={isRTL ? 'rtl' : 'ltr'}
     >
+      <div
+        ref={topRef}
+        data-testid="wallet-detail-top-anchor"
+        className="scroll-mt-0 h-px w-full pointer-events-none shrink-0"
+        aria-hidden="true"
+      />
       {activeMenuTxId && (
         <div
           data-testid="wallet-tx-menu-backdrop"
