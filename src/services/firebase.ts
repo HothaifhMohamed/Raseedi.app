@@ -1042,8 +1042,16 @@ export async function saveCloudBackup(
       ? effectiveData.activeWorkspace.trim().slice(0, 128)
       : undefined;
 
+  const hasExplicitOrgWorkspacesMap =
+    effectiveData.orgWorkspaces !== undefined &&
+    effectiveData.orgWorkspaces !== null &&
+    typeof effectiveData.orgWorkspaces === 'object' &&
+    !Array.isArray(effectiveData.orgWorkspaces);
+
   let orgWorkspacesToSave = hasOrgWorkspaces
     ? stripUndefinedDeep(Object.fromEntries(rawOrgEntries))
+    : hasExplicitOrgWorkspacesMap
+    ? {}
     : undefined;
 
   let metaFields = stripUndefinedDeep({
@@ -1058,7 +1066,7 @@ export async function saveCloudBackup(
     goals: (effectiveData.goals || []).slice(0, 200),
     templates: (effectiveData.templates || []).slice(0, 300),
     moneyCircles: (effectiveData.moneyCircles || []).slice(0, 200),
-    ...(orgWorkspacesToSave ? { orgWorkspaces: orgWorkspacesToSave } : {}),
+    ...(orgWorkspacesToSave !== undefined ? { orgWorkspaces: orgWorkspacesToSave } : {}),
     ...(cleanActiveWorkspace ? { activeWorkspace: cleanActiveWorkspace } : {}),
     settings: { ...effectiveData.settings, isPro: false },
     hasCompletedOnboarding: Boolean(effectiveData.hasCompletedOnboarding),
@@ -1624,6 +1632,82 @@ export function subscribeWorkspaceTransactions(
   );
 }
 
+export async function deleteWorkspaceTransactionsCloud(
+  uid: string,
+  workspaceId: string
+): Promise<void> {
+  const safeUid = (uid || '').trim();
+  const safeWs = normalizeWorkspaceId(workspaceId);
+  if (!safeUid || !safeWs || safeWs === 'personal') return;
+  if (!auth.currentUser || auth.currentUser.uid !== safeUid) return;
+
+  try {
+    const colRef = collection(db, 'users', safeUid, 'workspaces', safeWs, 'transactions');
+    const snap = await getDocs(colRef);
+    if (snap.empty) return;
+    for (let i = 0; i < snap.docs.length; i += 350) {
+      const batch = writeBatch(db);
+      for (const d of snap.docs.slice(i, i + 350)) {
+        batch.delete(d.ref);
+      }
+      await batch.commit();
+    }
+  } catch (error) {
+    console.warn(`[deleteWorkspaceTransactionsCloud] (${safeWs}) warning:`, error);
+  }
+}
+
+export async function removeOrgWorkspaceFromBackupMeta(
+  uid: string,
+  orgId: string
+): Promise<void> {
+  const safeUid = (uid || '').trim();
+  const cleanOrgId = (orgId || '').trim();
+  if (!safeUid || !cleanOrgId) return;
+  if (!auth.currentUser || auth.currentUser.uid !== safeUid) return;
+
+  try {
+    const metaRef = doc(db, 'users', safeUid, 'backup', 'meta');
+    const metaSnap = await getDoc(metaRef);
+    if (!metaSnap.exists()) return;
+    const raw = metaSnap.data() as Record<string, unknown>;
+    const existingOrgs =
+      raw.orgWorkspaces &&
+      typeof raw.orgWorkspaces === 'object' &&
+      !Array.isArray(raw.orgWorkspaces)
+        ? (raw.orgWorkspaces as Record<string, OrgWorkspaceData>)
+        : null;
+
+    let changed = false;
+    const nextOrgs: Record<string, OrgWorkspaceData> = {};
+    if (existingOrgs) {
+      for (const [k, ws] of Object.entries(existingOrgs)) {
+        if (k === cleanOrgId || ws?.organization?.id === cleanOrgId) {
+          changed = true;
+          continue;
+        }
+        nextOrgs[k] = ws;
+      }
+    }
+
+    const activeWasDeleted = raw.activeWorkspace === cleanOrgId;
+    if (!changed && !activeWasDeleted) return;
+
+    await setDoc(
+      metaRef,
+      {
+        ...(changed ? { orgWorkspaces: stripUndefinedDeep(nextOrgs) } : {}),
+        ...(activeWasDeleted ? { activeWorkspace: 'personal' } : {}),
+        updatedAtMs: Date.now(),
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+  } catch (error) {
+    console.warn(`[removeOrgWorkspaceFromBackupMeta] (${cleanOrgId}) warning:`, error);
+  }
+}
+
 async function getRequiredIdToken(): Promise<string> {
   const currentUser = auth.currentUser;
   if (!currentUser) {
@@ -2133,7 +2217,11 @@ export async function deleteOrgOnServer(orgId: string, confirmName: string): Pro
     message?: string;
   };
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.message || payload.error || 'ORG_DELETE_FAILED');
+    throw new ServerApiError(
+      payload.error || 'ORG_DELETE_FAILED',
+      payload.message || payload.error || 'ORG_DELETE_FAILED',
+      response.status
+    );
   }
 }
 

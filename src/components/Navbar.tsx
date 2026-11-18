@@ -24,6 +24,7 @@ import {
   LogIn,
   LogOut,
   UploadCloud,
+  Trash2,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { getCurrency } from '../services/currency';
@@ -31,10 +32,14 @@ import {
   isWebNotificationSupported,
   requestBrowserNotificationPermission,
 } from '../services/notifications';
-import { AppNotificationItem, OrganizationIndustry, OrganizationRole } from '../types';
+import { AppNotificationItem, Organization, OrganizationIndustry, OrganizationRole } from '../types';
 import { BrandLogo } from './common/BrandLogo';
 import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../services/numbers';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import {
+  formatWorkspaceDeleteConfirmMessage,
+  resolveWorkspaceOrgPermissions,
+} from '../services/workspaceCleanup';
 
 export const Navbar: React.FC = () => {
   const {
@@ -69,11 +74,14 @@ export const Navbar: React.FC = () => {
     orgMigrationSuccessMessage,
     clearOrgMigrationSuccessMessage,
     organizationsList,
+    orgRefs,
+    localOrgWorkspaces,
     activeOrganization,
     activeOrgRole,
     switchWorkspace,
     createOrganization,
     joinOrganizationByCode,
+    deleteOrganization,
     notifications,
     unreadNotificationsCount,
     markNotificationRead,
@@ -116,6 +124,9 @@ export const Navbar: React.FC = () => {
   const [joinError, setJoinError] = useState<string | null>(null);
   const [isSubmittingOrg, setIsSubmittingOrg] = useState(false);
   const [isSigningInOrg, setIsSigningInOrg] = useState(false);
+  const [deleteTargetOrg, setDeleteTargetOrg] = useState<Organization | null>(null);
+  const [isDeletingWorkspace, setIsDeletingWorkspace] = useState(false);
+  const [deleteWorkspaceError, setDeleteWorkspaceError] = useState<string | null>(null);
   const [notifPermission, setNotifPermission] = useState<string>(() =>
     isWebNotificationSupported() ? Notification.permission : 'unsupported'
   );
@@ -958,58 +969,95 @@ export const Navbar: React.FC = () => {
               {/* Organizations List */}
               {organizationsList.map((org) => {
                 const active = activeWorkspace === org.id;
+                const perm = resolveWorkspaceOrgPermissions({
+                  org,
+                  orgRefs,
+                  localOrgWorkspaces,
+                  currentUserId: user?.id,
+                  activeWorkspace,
+                  activeOrgRole,
+                });
                 return (
-                  <button
+                  <div
                     key={org.id}
-                    type="button"
-                    data-testid={`workspace-modal-org-${org.id}`}
-                    onClick={() => {
-                      switchWorkspace(org.id);
-                      setIsWorkspaceModalOpen(false);
-                    }}
-                    className={`w-full p-3 rounded-xl border text-start flex items-center justify-between gap-3 transition-all duration-200 min-h-[56px] ${
+                    className={`w-full rounded-xl border flex items-center justify-between gap-1 transition-all duration-200 min-h-[56px] ${
                       active
                         ? 'bg-[var(--color-accent)]/10 border-[var(--color-accent)] text-[var(--color-accent)] shadow-xs'
                         : 'bg-white dark:bg-[#1E2E27] border-[var(--color-line)] text-[var(--color-ink)] hover:border-[var(--color-accent)]/50'
                     }`}
                   >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div
-                        className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-                          active
-                            ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)]'
-                            : 'bg-[var(--color-surface-subtle)] text-[var(--color-muted)]'
-                        }`}
-                      >
-                        <Building2 className="w-4 h-4" />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5 min-w-0">
-                          <span className="text-xs font-bold text-[var(--color-ink)] truncate">
-                            {org.name}
-                          </span>
-                          {active && activeOrgRole && (
-                            <span
-                              data-testid="workspace-modal-role-badge"
-                              className="px-1.5 py-0.5 rounded bg-[var(--color-accent)]/15 text-[var(--color-accent)] font-bold text-[9px] shrink-0"
-                            >
-                              {roleLabels[activeOrgRole][isRTL ? 'ar' : 'en']}
+                    <button
+                      type="button"
+                      data-testid={`workspace-modal-org-${org.id}`}
+                      onClick={() => {
+                        switchWorkspace(org.id);
+                        setIsWorkspaceModalOpen(false);
+                      }}
+                      className="flex-1 min-w-0 p-3 text-start flex items-center justify-between gap-2.5"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div
+                          className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                            active
+                              ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)]'
+                              : 'bg-[var(--color-surface-subtle)] text-[var(--color-muted)]'
+                          }`}
+                        >
+                          <Building2 className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <span className="text-xs font-bold text-[var(--color-ink)] truncate">
+                              {org.name}
                             </span>
-                          )}
-                        </div>
-                        <div className="text-[11px] text-[var(--color-muted)] truncate mt-0.5 flex items-center gap-1.5">
-                          <span className="font-mono font-semibold">{org.currency}</span>
-                          <span>•</span>
-                          <span>{isRTL ? 'مساحة مؤسسة' : 'Enterprise'}</span>
+                            {perm.role ? (
+                              <span
+                                data-testid={active ? 'workspace-modal-role-badge' : undefined}
+                                className="px-1.5 py-0.5 rounded bg-[var(--color-accent)]/15 text-[var(--color-accent)] font-bold text-[9px] shrink-0"
+                              >
+                                {roleLabels[perm.role][isRTL ? 'ar' : 'en']}
+                              </span>
+                            ) : perm.isLocalOnly ? (
+                              <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 font-bold text-[9px] shrink-0">
+                                {isRTL ? 'محلية' : 'Local'}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="text-[11px] text-[var(--color-muted)] truncate mt-0.5 flex items-center gap-1.5">
+                            <span className="font-mono font-semibold">{org.currency}</span>
+                            <span>•</span>
+                            <span>{isRTL ? 'مساحة مؤسسة' : 'Enterprise'}</span>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    {active && (
-                      <div className="w-6 h-6 rounded-full bg-[var(--color-accent)] text-[var(--color-on-accent)] flex items-center justify-center shrink-0">
-                        <Check className="w-3.5 h-3.5 stroke-[3]" />
+                      {active && (
+                        <div className="w-6 h-6 rounded-full bg-[var(--color-accent)] text-[var(--color-on-accent)] flex items-center justify-center shrink-0">
+                          <Check className="w-3.5 h-3.5 stroke-[3]" />
+                        </div>
+                      )}
+                    </button>
+
+                    {perm.canDelete && (
+                      <div className="pe-2 shrink-0 flex items-center">
+                        <button
+                          type="button"
+                          data-testid={`workspace-modal-delete-org-${org.id}`}
+                          aria-label={
+                            isRTL ? `حذف مساحة العمل ${org.name}` : `Delete workspace ${org.name}`
+                          }
+                          title={isRTL ? 'حذف مساحة العمل' : 'Delete workspace'}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeleteWorkspaceError(null);
+                            setDeleteTargetOrg(org);
+                          }}
+                          className="w-8 h-8 rounded-lg flex items-center justify-center text-rose-500/75 hover:text-rose-600 hover:bg-rose-500/10 transition-colors"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </div>
                     )}
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -1040,6 +1088,92 @@ export const Navbar: React.FC = () => {
               >
                 <KeyRound className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
                 <span className="truncate">{t('joinOrganization')}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Workspace Permanent Delete Confirmation Modal */}
+      {deleteTargetOrg && (
+        <div
+          data-testid="workspace-delete-confirm-backdrop"
+          onClick={() => {
+            if (!isDeletingWorkspace) setDeleteTargetOrg(null);
+          }}
+          dir={isRTL ? 'rtl' : 'ltr'}
+          className="fixed inset-0 z-[80] bg-black/60 backdrop-blur-[2px] flex items-center justify-center p-4 animate-in fade-in duration-150"
+        >
+          <div
+            data-testid="workspace-delete-confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="workspace-delete-confirm-title"
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm bg-white dark:bg-[#17231E] border border-[var(--color-expense)]/40 rounded-2xl p-5 space-y-4 shadow-2xl"
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-500/15 text-rose-600 dark:text-rose-400 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div className="min-w-0 flex-1 space-y-1">
+                <h3
+                  id="workspace-delete-confirm-title"
+                  className="font-title text-sm font-bold text-[var(--color-ink)]"
+                >
+                  {isRTL ? 'تأكيد حذف مساحة العمل' : 'Confirm Workspace Deletion'}
+                </h3>
+                <p className="text-xs text-[var(--color-muted)] leading-relaxed">
+                  {formatWorkspaceDeleteConfirmMessage(deleteTargetOrg.name, isRTL)}
+                </p>
+              </div>
+            </div>
+
+            {deleteWorkspaceError && (
+              <div className="px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-600 dark:text-rose-300 font-medium">
+                {deleteWorkspaceError}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                data-testid="workspace-delete-cancel-btn"
+                disabled={isDeletingWorkspace}
+                onClick={() => {
+                  setDeleteTargetOrg(null);
+                  setDeleteWorkspaceError(null);
+                }}
+                className="px-4 py-2 rounded-xl border border-[var(--color-line)] bg-white dark:bg-[#1E2E27] text-xs font-semibold text-[var(--color-ink)] min-h-[40px] disabled:opacity-50"
+              >
+                {t('cancel')}
+              </button>
+              <button
+                type="button"
+                data-testid="workspace-delete-confirm-btn"
+                disabled={isDeletingWorkspace}
+                onClick={async () => {
+                  if (!deleteTargetOrg) return;
+                  setIsDeletingWorkspace(true);
+                  setDeleteWorkspaceError(null);
+                  try {
+                    await deleteOrganization(deleteTargetOrg.name, deleteTargetOrg.id);
+                    setDeleteTargetOrg(null);
+                  } catch (err: any) {
+                    setDeleteWorkspaceError(
+                      err?.message ||
+                        (isRTL
+                          ? 'تعذر حذف مساحة العمل حالياً.'
+                          : 'Failed to delete workspace.')
+                    );
+                  } finally {
+                    setIsDeletingWorkspace(false);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold min-h-[40px] flex items-center gap-1.5 disabled:opacity-50"
+              >
+                {isDeletingWorkspace && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{isRTL ? 'حذف نهائياً' : 'Delete Permanently'}</span>
               </button>
             </div>
           </div>

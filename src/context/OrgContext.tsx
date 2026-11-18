@@ -19,6 +19,7 @@ export type OrgHubTab = 'approvals' | 'cost_centers' | 'parties' | 'team' | 'rep
 export interface OrgContextValue {
   activeWorkspace: string;
   orgRefs: OrgRef[];
+  localOrgWorkspaces: Record<string, OrgWorkspaceData>;
   isOrgWorkspace: boolean;
   isOrgLoading: boolean;
   orgSyncPendingWrites: boolean;
@@ -104,7 +105,7 @@ export interface OrgContextValue {
     department?: string;
   }) => Promise<void>;
   transferOrgOwnership: (newOwnerUid: string) => Promise<void>;
-  deleteOrganization: (confirmName: string) => Promise<void>;
+  deleteOrganization: (confirmName: string, targetOrgId?: string) => Promise<void>;
 
   isOrgHubOpen: boolean;
   setIsOrgHubOpen: (open: boolean) => void;

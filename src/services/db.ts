@@ -20,6 +20,7 @@ import {
   CostCenter,
 } from '../types';
 import { SUPPORT_CONFIG } from '../constants/support';
+import { removeOrgFromWorkspacesMap } from './workspaceCleanup';
 
 const DB_NAME = 'raseedi_expense_tracker_db';
 const DB_VERSION = 1;
@@ -590,6 +591,58 @@ export async function saveOrgWorkspaces(
       resolve();
     }
   });
+}
+
+export async function deleteLocalOrgWorkspaceStorage(
+  orgId: string,
+  nextActiveWorkspace = 'personal'
+): Promise<Record<string, OrgWorkspaceData>> {
+  const cleanOrgId = (orgId || '').trim();
+  const stored = await loadOrgWorkspaces();
+  const nextWorkspaces = removeOrgFromWorkspacesMap(stored.workspaces, cleanOrgId);
+  const resolvedActive =
+    stored.activeWorkspace === cleanOrgId
+      ? nextActiveWorkspace || 'personal'
+      : nextActiveWorkspace || stored.activeWorkspace || 'personal';
+
+  await saveOrgWorkspaces(resolvedActive, nextWorkspaces);
+
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      if (localStorage.getItem('raseedi_active_workspace_v1') === cleanOrgId) {
+        localStorage.setItem('raseedi_active_workspace_v1', resolvedActive);
+      }
+      if (cleanOrgId) {
+        const keysToRemove: string[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && k.startsWith('raseedi_') && k.includes(cleanOrgId)) {
+            keysToRemove.push(k);
+          }
+        }
+        keysToRemove.forEach((k) => localStorage.removeItem(k));
+      }
+    }
+  } catch {
+    // Ignore localStorage cleanup errors
+  }
+
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage && cleanOrgId) {
+      const sessionKeys: string[] = [];
+      for (let i = 0; i < window.sessionStorage.length; i++) {
+        const k = window.sessionStorage.key(i);
+        if (k && k.includes(cleanOrgId)) {
+          sessionKeys.push(k);
+        }
+      }
+      sessionKeys.forEach((k) => window.sessionStorage.removeItem(k));
+    }
+  } catch {
+    // Ignore sessionStorage cleanup errors
+  }
+
+  return nextWorkspaces;
 }
 
 const GUEST_MODE_LS_KEY = 'raseedi_guest_mode_v1';

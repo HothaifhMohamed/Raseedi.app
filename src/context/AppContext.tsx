@@ -53,6 +53,7 @@ import {
   loadPreRestoreSnapshot,
   loadOrgWorkspaces,
   saveOrgWorkspaces,
+  deleteLocalOrgWorkspaceStorage,
   loadActiveWorkspacePref,
   saveActiveWorkspacePref,
 } from '../services/db';
@@ -133,7 +134,6 @@ import {
   joinOrgByInviteCode,
   manageOrgMemberOnServer,
   transferOrgOwnershipOnServer,
-  deleteOrgOnServer,
   flushPendingOrgUploads,
   syncOrganizationMetaToCloud,
   syncUserCurrencyRatesToCloud,
@@ -163,6 +163,10 @@ import {
   tagTransactionsWithWorkspace,
   tagWalletsWithWorkspace,
 } from '../services/workspaceSync';
+import {
+  resolveFallbackWorkspaceAfterDelete,
+  resolveWorkspaceOrgPermissions,
+} from '../services/workspaceCleanup';
 import type { BackupHistorySummary } from '../services/backupHistory';
 import {
   UserSubscriptionSummary,
@@ -198,6 +202,7 @@ import {
   upsertOrgPartyCloud,
   deleteOrgPartyCloud,
   updateOrgSettingsCloud,
+  deleteOrganizationWorkspaceCloud,
   OrgActorInfo,
 } from '../services/orgCloud';
 import {
@@ -284,6 +289,7 @@ interface AppContextType {
   // Dual Workspace & Cloud Enterprise State
   activeWorkspace: string; // 'personal' | orgId
   orgRefs: OrgRef[];
+  localOrgWorkspaces: Record<string, OrgWorkspaceData>;
   isOrgWorkspace: boolean;
   isOrgLoading: boolean;
   orgSyncPendingWrites: boolean;
@@ -368,7 +374,7 @@ interface AppContextType {
     department?: string;
   }) => Promise<void>;
   transferOrgOwnership: (newOwnerUid: string) => Promise<void>;
-  deleteOrganization: (confirmName: string) => Promise<void>;
+  deleteOrganization: (confirmName: string, targetOrgId?: string) => Promise<void>;
 
   // Unified Enterprise Hub Modal
   isOrgHubOpen: boolean;
@@ -5102,28 +5108,120 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   );
 
   const deleteOrganization = useCallback(
-    async (confirmName: string) => {
-      if (!isOrgWorkspace || !activeOrganization) return;
-      if (isUsingLocalOrgMode) {
-        if (confirmName.trim() !== activeOrganization.name.trim()) {
-          throw new Error('NAME_MISMATCH');
-        }
-        const nextMap = { ...latestLocalOrgWorkspacesRef.current };
-        delete nextMap[activeOrganization.id];
-        latestLocalOrgWorkspacesRef.current = nextMap;
-        setLocalOrgWorkspaces(nextMap);
-        await saveOrgWorkspaces('personal', nextMap);
+    async (confirmName: string, targetOrgId?: string) => {
+      const orgIdToDelete = (targetOrgId || activeOrganization?.id || '').trim();
+      if (!orgIdToDelete || orgIdToDelete === 'personal') return;
+
+      const cloudRef = orgRefs.find((r) => r.orgId === orgIdToDelete) || null;
+      const localWs =
+        latestLocalOrgWorkspacesRef.current[orgIdToDelete] ||
+        Object.values(latestLocalOrgWorkspacesRef.current).find(
+          (w) => w?.organization?.id === orgIdToDelete
+        ) ||
+        null;
+      const listMatch = organizationsList.find((o) => o.id === orgIdToDelete) || null;
+      const targetOrgName =
+        (activeCloudOrg?.id === orgIdToDelete ? activeCloudOrg.name : '') ||
+        cloudRef?.orgName ||
+        localWs?.organization?.name ||
+        listMatch?.name ||
+        '';
+
+      const permissions = resolveWorkspaceOrgPermissions({
+        org: {
+          id: orgIdToDelete,
+          ownerUid:
+            (activeCloudOrg?.id === orgIdToDelete ? activeCloudOrg.ownerUid : '') ||
+            localWs?.organization?.ownerUid ||
+            listMatch?.ownerUid ||
+            '',
+          localFirstMode: localWs?.organization?.localFirstMode,
+        },
+        orgRefs,
+        localOrgWorkspaces: latestLocalOrgWorkspacesRef.current,
+        currentUserId: user?.id || auth.currentUser?.uid || null,
+        activeWorkspace: activeWorkspaceRef.current,
+        activeOrgRole,
+      });
+
+      if (!permissions.canDelete) {
+        throw new Error(
+          settings.language === 'en'
+            ? 'Only the organization owner can delete a shared cloud organization.'
+            : 'فقط مالك المؤسسة يمكنه حذف المؤسسة السحابية المشتركة.'
+        );
+      }
+
+      if (targetOrgName.trim() && confirmName.trim() !== targetOrgName.trim()) {
+        throw new Error('NAME_MISMATCH');
+      }
+
+      const uidForCloud = user?.isLoggedIn
+        ? user.id || auth.currentUser?.uid || null
+        : auth.currentUser?.uid || null;
+
+      await deleteOrganizationWorkspaceCloud({
+        orgId: orgIdToDelete,
+        orgName: confirmName.trim() || targetOrgName.trim(),
+        uid: uidForCloud,
+        hasCloudOrgRef: Boolean(cloudRef),
+      });
+
+      const nextWorkspace = resolveFallbackWorkspaceAfterDelete(
+        activeWorkspaceRef.current,
+        orgIdToDelete
+      );
+      const nextMap = await deleteLocalOrgWorkspaceStorage(orgIdToDelete, nextWorkspace);
+      latestLocalOrgWorkspacesRef.current = nextMap;
+      setLocalOrgWorkspaces(nextMap);
+      setOrgRefs((prev) => prev.filter((r) => r.orgId !== orgIdToDelete));
+      setLegacyLocalOrgs((prev) => prev.filter((w) => w.organization.id !== orgIdToDelete));
+
+      if (nextWorkspace !== activeWorkspaceRef.current) {
+        syncRequestIdRef.current += 1;
         setActiveWorkspace('personal');
         saveActiveWorkspacePref('personal');
+        setActiveWalletId(null);
+        setSelectedTransactionIds([]);
+        resetFilters();
         setIsOrgHubOpen(false);
-        return;
+        setIsOrgLoading(false);
+        setActiveCloudOrg(null);
+        setActiveCloudMembers([]);
+        setActiveCloudWallets([]);
+        setActiveCloudCategories([]);
+        setActiveCloudBudgets([]);
+        setActiveCloudCostCenters([]);
+        setActiveCloudParties([]);
+        setActiveCloudTransactions([]);
+        setActiveCloudTrashTransactions([]);
+        setExtraOrgTransactions([]);
+        setExtraOrgTrashTransactions([]);
+        setOrgTxLastCursor(null);
+        setOrgHasMoreTx(false);
+        setActiveCloudAuditLogs([]);
+        setOrgSyncPendingWrites(false);
       }
-      await deleteOrgOnServer(activeOrganization.id, confirmName);
-      setActiveWorkspace('personal');
-      saveActiveWorkspacePref('personal');
-      setIsOrgHubOpen(false);
+
+      showToast(
+        settings.language === 'en'
+          ? `Workspace "${targetOrgName || orgIdToDelete}" was permanently deleted.`
+          : `تم حذف مساحة العمل "${targetOrgName || orgIdToDelete}" نهائياً.`,
+        'info'
+      );
     },
-    [isOrgWorkspace, isUsingLocalOrgMode, activeOrganization]
+    [
+      activeOrganization?.id,
+      orgRefs,
+      organizationsList,
+      activeCloudOrg,
+      user?.id,
+      user?.isLoggedIn,
+      activeOrgRole,
+      settings.language,
+      resetFilters,
+      showToast,
+    ]
   );
 
   // ===========================================================================
@@ -7752,6 +7850,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     () => ({
       activeWorkspace,
       orgRefs,
+      localOrgWorkspaces,
       isOrgWorkspace,
       isOrgLoading,
       orgSyncPendingWrites,
@@ -7819,6 +7918,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     [
       activeWorkspace,
       orgRefs,
+      localOrgWorkspaces,
       isOrgWorkspace,
       isOrgLoading,
       orgSyncPendingWrites,
@@ -7903,6 +8003,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
         activeWorkspace,
         orgRefs,
+        localOrgWorkspaces,
         isOrgWorkspace,
         isOrgLoading,
         orgSyncPendingWrites,

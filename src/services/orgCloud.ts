@@ -17,7 +17,13 @@ import {
   DocumentData,
   Timestamp,
 } from 'firebase/firestore';
-import { db } from './firebase';
+import {
+  db,
+  deleteOrgOnServer,
+  deleteWorkspaceTransactionsCloud,
+  removeOrgWorkspaceFromBackupMeta,
+  ServerApiError,
+} from './firebase';
 import {
   AuditLogAction,
   AuditLogEntry,
@@ -1629,5 +1635,42 @@ export async function migrateLegacyOrgToCloud(
     for (const fn of slice) fn(batch);
     await batch.commit();
     onProgress?.(Math.min(i + slice.length, total), total);
+  }
+}
+
+/**
+ * Deletes an organization cleanly from Cloud Firestore:
+ * - For shared/cloud orgs (`hasCloudOrgRef`), invokes the verified `/api/org/delete` endpoint
+ *   (treating 404 ORG_NOT_FOUND as already deleted on server).
+ * - Cleans up user-scoped workspace transactions (`users/{uid}/workspaces/{orgId}/transactions`)
+ *   and removes stale `orgWorkspaces` entries from `users/{uid}/backup/meta`.
+ */
+export async function deleteOrganizationWorkspaceCloud(params: {
+  orgId: string;
+  orgName: string;
+  uid?: string | null;
+  hasCloudOrgRef: boolean;
+}): Promise<void> {
+  const cleanOrgId = (params.orgId || '').trim();
+  if (!cleanOrgId) return;
+
+  if (params.hasCloudOrgRef) {
+    try {
+      await deleteOrgOnServer(cleanOrgId, params.orgName);
+    } catch (err) {
+      const isAlreadyMissing =
+        err instanceof ServerApiError &&
+        (err.status === 404 || err.code === 'ORG_NOT_FOUND');
+      if (!isAlreadyMissing) {
+        throw err;
+      }
+    }
+  }
+
+  if (params.uid) {
+    await Promise.all([
+      deleteWorkspaceTransactionsCloud(params.uid, cleanOrgId),
+      removeOrgWorkspaceFromBackupMeta(params.uid, cleanOrgId),
+    ]);
   }
 }

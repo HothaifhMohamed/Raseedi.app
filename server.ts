@@ -2871,6 +2871,22 @@ Return JSON matching the schema with:
         ]);
 
         if (!orgSnap.exists) {
+          const userOrgRef = adminDb.collection('users').doc(uid).collection('orgRefs').doc(cleanOrgId);
+          const refSnap = await userOrgRef.get();
+          if (refSnap.exists) {
+            const refData = refSnap.data() as Record<string, unknown> | undefined;
+            const refOrgName = String(refData?.orgName || '').trim();
+            if (refOrgName && (confirmName || '').trim() !== refOrgName) {
+              res.status(400).json({
+                error: 'CONFIRM_NAME_MISMATCH',
+                message: 'اسم المؤسسة المؤكد غير مطابق. اكتب اسم المؤسسة بدقة للحذف.',
+              });
+              return;
+            }
+            await userOrgRef.delete();
+            res.json({ ok: true, orphanCleaned: true });
+            return;
+          }
           res.status(404).json({ error: 'ORG_NOT_FOUND', message: 'المؤسسة غير موجودة.' });
           return;
         }

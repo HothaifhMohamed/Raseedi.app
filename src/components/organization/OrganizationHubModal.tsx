@@ -54,6 +54,10 @@ import { normalizeApprovalStatus } from '../../services/entitlements';
 import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../../services/numbers';
 import { resolveOrgAttachmentUrl } from '../../services/firebase';
 import { escapeCsvCell } from '../../services/csvImport';
+import {
+  formatWorkspaceDeleteConfirmMessage,
+  resolveWorkspaceOrgPermissions,
+} from '../../services/workspaceCleanup';
 import { MoneyText } from '../common/MoneyText';
 import {
   AuditLogAction,
@@ -80,6 +84,9 @@ export const OrganizationHubModal: React.FC = () => {
     setIsOrgHubOpen,
     orgHubTab,
     setOrgHubTab,
+    activeWorkspace,
+    orgRefs,
+    localOrgWorkspaces,
     activeOrganization,
     orgMembers,
     orgCostCenters,
@@ -178,6 +185,8 @@ export const OrganizationHubModal: React.FC = () => {
   const [confirmTransferOpen, setConfirmTransferOpen] = useState(false);
   const [isTransferringOwner, setIsTransferringOwner] = useState(false);
   const [deleteOrgConfirmName, setDeleteOrgConfirmName] = useState('');
+  const [confirmQuickDeleteOpen, setConfirmQuickDeleteOpen] = useState(false);
+  const [quickDeleteError, setQuickDeleteError] = useState<string | null>(null);
   const [isDeletingOrg, setIsDeletingOrg] = useState(false);
   const [teamFeedback, setTeamFeedback] = useState<{ text: string; error?: boolean } | null>(null);
 
@@ -220,6 +229,9 @@ export const OrganizationHubModal: React.FC = () => {
     setOrgLockDateInput(activeOrganization.lockedUntilDate || '');
     setGeneratedInvite(null);
     setTeamFeedback(null);
+    setConfirmQuickDeleteOpen(false);
+    setQuickDeleteError(null);
+    setDeleteOrgConfirmName('');
   }, [activeOrganization?.id]);
 
   // Load invites when Team tab is active for owner/admin
@@ -243,6 +255,26 @@ export const OrganizationHubModal: React.FC = () => {
   }, [isOrgHubOpen, orgHubTab, canOrgManage, activeOrganization?.id, listOrgInvites]);
 
   const currency = activeOrganization?.currency || settings.mainCurrency;
+
+  const activeOrgPermissions = useMemo(() => {
+    if (!activeOrganization) {
+      return {
+        role: null,
+        isCloudOrg: false,
+        isLocalOnly: false,
+        isOrphan: false,
+        canDelete: false,
+      };
+    }
+    return resolveWorkspaceOrgPermissions({
+      org: activeOrganization,
+      orgRefs,
+      localOrgWorkspaces,
+      currentUserId: user?.id,
+      activeWorkspace,
+      activeOrgRole,
+    });
+  }, [activeOrganization, orgRefs, localOrgWorkspaces, user?.id, activeWorkspace, activeOrgRole]);
 
   const approvalItems = useMemo(() => {
     if (approvalFilter === 'trash') return orgTrashTransactions;
@@ -801,14 +833,36 @@ export const OrganizationHubModal: React.FC = () => {
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setIsOrgHubOpen(false)}
-            aria-label={t('close')}
-            className="w-11 h-11 rounded-xl border border-[var(--color-line)] flex items-center justify-center text-[var(--color-muted)] hover:text-[var(--color-ink)] shrink-0"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {activeOrgPermissions.canDelete && (
+              <button
+                type="button"
+                data-testid="org-hub-quick-delete-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setQuickDeleteError(null);
+                  setConfirmQuickDeleteOpen(true);
+                }}
+                aria-label={
+                  isRTL
+                    ? `حذف مساحة العمل ${activeOrganization.name}`
+                    : `Delete workspace ${activeOrganization.name}`
+                }
+                title={isRTL ? 'حذف مساحة العمل' : 'Delete workspace'}
+                className="w-11 h-11 rounded-xl border border-rose-500/25 text-rose-500/80 hover:text-rose-600 hover:bg-rose-500/10 flex items-center justify-center transition-colors shrink-0"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setIsOrgHubOpen(false)}
+              aria-label={t('close')}
+              className="w-11 h-11 rounded-xl border border-[var(--color-line)] flex items-center justify-center text-[var(--color-muted)] hover:text-[var(--color-ink)] shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Top 5 Navigation Tabs */}
@@ -2265,15 +2319,16 @@ export const OrganizationHubModal: React.FC = () => {
                 )}
               </div>
 
-              {/* Owner Danger Zone: Ownership Transfer & Organization Deletion */}
-              {activeOrgRole === 'owner' && (
+              {/* Owner / Local Danger Zone: Ownership Transfer & Organization Deletion */}
+              {(activeOrgRole === 'owner' || activeOrgPermissions.canDelete) && (
                 <div className="pt-3 border-t border-[var(--color-expense)]/30 space-y-3">
                   <h3 className="text-xs font-bold text-[var(--color-expense)] flex items-center gap-1.5">
                     <AlertTriangle className="w-4 h-4" />
                     <span>{isRTL ? 'منطقة المالك الحساسة' : 'Owner Danger Zone'}</span>
                   </h3>
 
-                  {/* Transfer Ownership */}
+                  {/* Transfer Ownership (Cloud Owner Only) */}
+                  {activeOrgRole === 'owner' && !activeOrgPermissions.isLocalOnly && (
                   <div className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-2.5">
                     <div className="text-xs font-bold text-[var(--color-ink)] flex items-center gap-1.5">
                       <ArrowRightLeft className="w-4 h-4 text-[var(--color-accent)]" />
@@ -2329,6 +2384,7 @@ export const OrganizationHubModal: React.FC = () => {
                       )}
                     </div>
                   </div>
+                  )}
 
                   {/* Delete Organization */}
                   <form
@@ -2991,6 +3047,91 @@ export const OrganizationHubModal: React.FC = () => {
             className="max-w-full max-h-[85vh] rounded-xl object-contain shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           />
+        </div>
+      )}
+
+      {/* Quick Delete Workspace Confirmation Modal */}
+      {confirmQuickDeleteOpen && activeOrganization && (
+        <div
+          data-testid="org-hub-delete-confirm-backdrop"
+          onClick={() => {
+            if (!isDeletingOrg) setConfirmQuickDeleteOpen(false);
+          }}
+          dir={isRTL ? 'rtl' : 'ltr'}
+          className="fixed inset-0 z-[80] bg-black/65 backdrop-blur-[2px] flex items-center justify-center p-4"
+        >
+          <div
+            data-testid="org-hub-delete-confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="org-hub-delete-confirm-title"
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm bg-[var(--color-surface)] border border-[var(--color-expense)]/40 rounded-2xl p-5 space-y-4 shadow-2xl"
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-500/15 text-rose-600 dark:text-rose-400 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div className="min-w-0 flex-1 space-y-1">
+                <h3
+                  id="org-hub-delete-confirm-title"
+                  className="font-title text-sm font-bold text-[var(--color-ink)]"
+                >
+                  {isRTL ? 'تأكيد حذف مساحة العمل' : 'Confirm Workspace Deletion'}
+                </h3>
+                <p className="text-xs text-[var(--color-muted)] leading-relaxed">
+                  {formatWorkspaceDeleteConfirmMessage(activeOrganization.name, isRTL)}
+                </p>
+              </div>
+            </div>
+
+            {quickDeleteError && (
+              <div className="px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-600 dark:text-rose-300 font-medium">
+                {quickDeleteError}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                data-testid="org-hub-delete-cancel-btn"
+                disabled={isDeletingOrg}
+                onClick={() => {
+                  setConfirmQuickDeleteOpen(false);
+                  setQuickDeleteError(null);
+                }}
+                className="px-4 py-2 rounded-xl border border-[var(--color-line)] bg-[var(--color-bg)] text-xs font-semibold text-[var(--color-ink)] min-h-[40px] disabled:opacity-50"
+              >
+                {t('cancel')}
+              </button>
+              <button
+                type="button"
+                data-testid="org-hub-delete-confirm-btn"
+                disabled={isDeletingOrg}
+                onClick={async () => {
+                  setIsDeletingOrg(true);
+                  setQuickDeleteError(null);
+                  try {
+                    await deleteOrganization(activeOrganization.name, activeOrganization.id);
+                    setDeleteOrgConfirmName('');
+                    setConfirmQuickDeleteOpen(false);
+                    setIsOrgHubOpen(false);
+                  } catch (err: any) {
+                    setQuickDeleteError(
+                      err?.message ||
+                        (isRTL ? 'تعذر حذف المؤسسة حالياً.' : 'Failed to delete organization.')
+                    );
+                  } finally {
+                    setIsDeletingOrg(false);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold min-h-[40px] flex items-center gap-1.5 disabled:opacity-50"
+              >
+                {isDeletingOrg && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>{isRTL ? 'حذف نهائياً' : 'Delete Permanently'}</span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
