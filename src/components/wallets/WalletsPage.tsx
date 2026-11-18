@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import {
   Plus,
   EyeOff,
@@ -112,10 +112,13 @@ export const WalletsPage: React.FC = () => {
     }
   }, [sortedWallets.length, isReorderMode]);
 
-  const handleMoveWallet = (index: number, direction: 'up' | 'down') => {
-    const nextOrdered = reorderWalletsBySwap(sortedWallets, index, direction);
-    reorderWallets(nextOrdered);
-  };
+  const handleMoveWallet = useCallback(
+    (index: number, direction: 'up' | 'down') => {
+      const nextOrdered = reorderWalletsBySwap(sortedWallets, index, direction);
+      reorderWallets(nextOrdered);
+    },
+    [sortedWallets, reorderWallets]
+  );
 
   // Total balance across all wallets
   const totalBalance = useMemo(() => {
@@ -221,13 +224,16 @@ export const WalletsPage: React.FC = () => {
   };
 
   // Tap wallet card logic: check if locked first, else open quick actions menu
-  const handleCardClick = (w: Wallet) => {
-    if (w.isLocked && w.pin && lockedWalletIds.includes(w.id)) {
-      setPinModalTargetWallet(w);
-    } else {
-      setQuickActionWalletId(w.id);
-    }
-  };
+  const handleCardClick = useCallback(
+    (w: Wallet) => {
+      if (w.isLocked && w.pin && lockedWalletIds.includes(w.id)) {
+        setPinModalTargetWallet(w);
+      } else {
+        setQuickActionWalletId(w.id);
+      }
+    },
+    [lockedWalletIds]
+  );
 
   const handleRequestDeleteWallet = (w: Wallet) => {
     if (wallets.length <= 1) {
@@ -391,7 +397,11 @@ export const WalletsPage: React.FC = () => {
           />
         </div>
       ) : (
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5" data-testid="wallets-card-list">
+      <div
+        className="grid grid-cols-1 md:grid-cols-2 gap-3.5"
+        style={{ contentVisibility: 'auto' }}
+        data-testid="wallets-card-list"
+      >
         {sortedWallets.map((w, index) => {
           const isHidden = Boolean(hiddenBalances[w.id]);
           const isLocked = Boolean(w.isLocked && lockedWalletIds.includes(w.id));
@@ -414,8 +424,8 @@ export const WalletsPage: React.FC = () => {
               isOrgWorkspace={isOrgWorkspace}
               custodianName={custodianName}
               isRTL={isRTL}
-              onClick={() => handleCardClick(w)}
-              onMove={(direction) => handleMoveWallet(index, direction)}
+              onSelect={handleCardClick}
+              onMove={handleMoveWallet}
             />
           );
         })}

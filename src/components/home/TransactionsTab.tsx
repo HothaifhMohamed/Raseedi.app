@@ -25,6 +25,7 @@ import { ConfirmationModal } from '../common/ConfirmationModal';
 import { AdBanner } from '../common/AdBanner';
 import { MoneyText } from '../common/MoneyText';
 import { HairlineEmptyState } from '../common/HairlineVisuals';
+import { useScrollToTop } from '../../hooks/useScrollToTop';
 
 export const TransactionsTab: React.FC = () => {
   const {
@@ -66,6 +67,9 @@ export const TransactionsTab: React.FC = () => {
   const [visibleTxLimit, setVisibleTxLimit] = useState(60);
   const [isLoadingMoreCloud, setIsLoadingMoreCloud] = useState(false);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useScrollToTop(containerRef, []);
 
   useEffect(() => {
     if (!activeMenuTxId) return;
@@ -204,7 +208,12 @@ export const TransactionsTab: React.FC = () => {
   const allFilteredIds = filteredTransactions.map((t) => t.id);
 
   return (
-    <div className="flex flex-col flex-1 pb-28" dir={isRTL ? 'rtl' : 'ltr'}>
+    <div
+      ref={containerRef}
+      data-testid="transactions-tab-root"
+      className="flex flex-col flex-1 pb-28"
+      dir={isRTL ? 'rtl' : 'ltr'}
+    >
       {activeMenuTxId && (
         <div
           data-testid="tx-menu-backdrop"

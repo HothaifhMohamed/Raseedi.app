@@ -19,6 +19,7 @@ import { useApp } from '../../context/AppContext';
 import { MoneyText } from '../common/MoneyText';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
 import { HairlineEmptyState } from '../common/HairlineVisuals';
+import { useScrollToTop } from '../../hooks/useScrollToTop';
 import {
   doesTransactionAffectAccounting,
   getEffectiveTransactionAmount,
@@ -59,6 +60,9 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
   const [showStats, setShowStats] = useState(false);
   const [activeMenuTxId, setActiveMenuTxId] = useState<string | null>(null);
   const [visibleLimit, setVisibleLimit] = useState(60);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useScrollToTop(scrollContainerRef, [walletId]);
 
   useModalBackHandler(showMoveModal, () => setShowMoveModal(false), 'wallet-detail-move');
   useModalBackHandler(showCategoryModal, () => setShowCategoryModal(false), 'wallet-detail-category');
@@ -156,7 +160,12 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
   const BackIcon = isRTL ? ArrowRight : ArrowLeft;
 
   return (
-    <div className="flex-1 flex flex-col pb-24 overflow-y-auto" dir={isRTL ? 'rtl' : 'ltr'}>
+    <div
+      ref={scrollContainerRef}
+      data-testid="wallet-detail-scroll-container"
+      className="flex-1 flex flex-col pb-24 overflow-y-auto"
+      dir={isRTL ? 'rtl' : 'ltr'}
+    >
       {activeMenuTxId && (
         <div
           data-testid="wallet-tx-menu-backdrop"

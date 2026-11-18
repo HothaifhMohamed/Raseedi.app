@@ -7,6 +7,7 @@ import React from 'react';
 import { ArrowLeft, ArrowRight } from 'lucide-react';
 import { AppProvider, useApp } from './context/AppContext';
 import { useModalBackHandler } from './hooks/useModalBackHandler';
+import { resetScrollToTop } from './hooks/useScrollToTop';
 import { Navbar } from './components/Navbar';
 import { BottomNav } from './components/BottomNav';
 import { SplashScreen } from './components/SplashScreen';
@@ -91,6 +92,10 @@ const MainLayout: React.FC = () => {
       setShowFullLedger(false);
     }
   }, [activeNav, homeTab]);
+
+  React.useLayoutEffect(() => {
+    resetScrollToTop();
+  }, [activeNav, homeTab, showFullLedger, activeWalletId]);
 
   React.useEffect(() => {
     return subscribeAdConsentChanges(() => {

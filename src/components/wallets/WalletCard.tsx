@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback } from 'react';
 import { ArrowDown, ArrowUp, EyeOff, Lock } from 'lucide-react';
 import { Wallet } from '../../types';
 import { convertCurrency } from '../../services/currency';
@@ -17,11 +17,11 @@ interface WalletCardProps {
   isOrgWorkspace: boolean;
   custodianName?: string;
   isRTL: boolean;
-  onClick: () => void;
-  onMove: (direction: 'up' | 'down') => void;
+  onSelect: (wallet: Wallet) => void;
+  onMove: (index: number, direction: 'up' | 'down') => void;
 }
 
-export const WalletCard: React.FC<WalletCardProps> = ({
+const WalletCardComponent: React.FC<WalletCardProps> = ({
   wallet: w,
   index,
   totalCount,
@@ -33,7 +33,7 @@ export const WalletCard: React.FC<WalletCardProps> = ({
   isOrgWorkspace,
   custodianName,
   isRTL,
-  onClick,
+  onSelect,
   onMove,
 }) => {
   const cardColor = w.color?.startsWith('#') ? w.color : '#0E5A43';
@@ -60,34 +60,43 @@ export const WalletCard: React.FC<WalletCardProps> = ({
     ? 'opacity-75 grayscale-[25%] border border-white/15'
     : 'border border-white/15';
 
+  const handleCardClick = useCallback(() => {
+    if (!isReorderMode) onSelect(w);
+  }, [isReorderMode, onSelect, w]);
+
+  const handleCardKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (!isReorderMode && (e.key === 'Enter' || e.key === ' ')) {
+        e.preventDefault();
+        onSelect(w);
+      }
+    },
+    [isReorderMode, onSelect, w]
+  );
+
   return (
     <div
       data-wallet-id={w.id}
       data-excluded={isExcluded ? 'true' : 'false'}
       role={isReorderMode ? undefined : 'button'}
       tabIndex={isReorderMode ? undefined : 0}
-      onClick={() => {
-        if (!isReorderMode) onClick();
-      }}
-      onKeyDown={(e) => {
-        if (!isReorderMode && (e.key === 'Enter' || e.key === ' ')) {
-          e.preventDefault();
-          onClick();
-        }
-      }}
-      className={`relative overflow-hidden rounded-2xl p-5 min-h-[154px] flex flex-col justify-between text-white select-none shadow-[0_12px_28px_-10px_rgba(9,50,37,0.35)] transition-all duration-300 ${
+      onClick={handleCardClick}
+      onKeyDown={handleCardKeyDown}
+      className={`relative overflow-hidden rounded-2xl p-5 min-h-[154px] flex flex-col justify-between text-white select-none shadow-md transform-gpu will-change-transform transition-transform duration-200 ${
         isReorderMode
           ? 'cursor-default ring-2 ring-[var(--color-accent)]/50'
-          : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-[0_16px_32px_-10px_rgba(9,50,37,0.45)] active:scale-[0.985]'
+          : 'cursor-pointer hover:-translate-y-0.5 active:scale-[0.985]'
       } ${statusClasses}`}
       style={{
         background: `linear-gradient(135deg, ${cardColor} 0%, color-mix(in srgb, ${cardColor} 74%, #061A14) 100%)`,
+        contentVisibility: 'auto',
+        containIntrinsicSize: 'auto 154px',
       }}
     >
-      {/* Subtle Gold Shimmer & Card Surface Accent */}
+      {/* Subtle Gold Shimmer & Card Surface Accent (zero heavy filter/backdrop-blur) */}
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute -top-12 -end-12 w-36 h-36 rounded-full bg-[#E2B954]/20 blur-2xl"
+        className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(226,185,84,0.16),transparent_62%)]"
       />
       <div
         aria-hidden="true"
@@ -97,7 +106,7 @@ export const WalletCard: React.FC<WalletCardProps> = ({
       {/* Top Row: Wallet Icon + Name + Excluded Badge + Currency (or Reorder Controls) */}
       <div className="relative flex items-start justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
-          <div className="w-10 h-10 rounded-xl bg-white/14 border border-white/20 backdrop-blur-xs flex items-center justify-center shrink-0">
+          <div className="w-10 h-10 rounded-xl bg-white/15 border border-white/20 flex items-center justify-center shrink-0">
             <IconRenderer name={w.icon || 'Wallet'} className="w-5 h-5 text-white" />
           </div>
           <div className="min-w-0">
@@ -128,10 +137,10 @@ export const WalletCard: React.FC<WalletCardProps> = ({
             </span>
             <button
               type="button"
-              onClick={() => onMove('up')}
+              onClick={() => onMove(index, 'up')}
               disabled={index === 0}
               aria-label={isRTL ? `نقل ${w.name} لأعلى` : `Move ${w.name} up`}
-              className={`p-2 rounded-xl bg-black/30 min-h-[40px] min-w-[40px] flex items-center justify-center transition-all duration-300 ${
+              className={`p-2 rounded-xl bg-black/30 min-h-[40px] min-w-[40px] flex items-center justify-center transition-colors duration-200 ${
                 index === 0
                   ? 'opacity-35 cursor-not-allowed'
                   : 'hover:bg-black/45 active:scale-95 text-white'
@@ -141,10 +150,10 @@ export const WalletCard: React.FC<WalletCardProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => onMove('down')}
+              onClick={() => onMove(index, 'down')}
               disabled={index === totalCount - 1}
               aria-label={isRTL ? `نقل ${w.name} لأسفل` : `Move ${w.name} down`}
-              className={`p-2 rounded-xl bg-black/30 min-h-[40px] min-w-[40px] flex items-center justify-center transition-all duration-300 ${
+              className={`p-2 rounded-xl bg-black/30 min-h-[40px] min-w-[40px] flex items-center justify-center transition-colors duration-200 ${
                 index === totalCount - 1
                   ? 'opacity-35 cursor-not-allowed'
                   : 'hover:bg-black/45 active:scale-95 text-white'
@@ -264,3 +273,6 @@ export const WalletCard: React.FC<WalletCardProps> = ({
     </div>
   );
 };
+
+export const WalletCard = React.memo(WalletCardComponent);
+WalletCard.displayName = 'WalletCard';
