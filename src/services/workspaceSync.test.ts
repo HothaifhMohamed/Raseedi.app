@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { Transaction } from '../types';
 import {
   buildWorkspaceTransactionRecord,
+  canPerformAutomaticCloudWrite,
   extractTransactionFromWorkspaceDoc,
   getWorkspaceTransactionDocPath,
   getWorkspaceTransactionsPath,
@@ -10,7 +11,11 @@ import {
   isTransactionInWorkspace,
   normalizeWorkspaceId,
   reconcileWorkspaceTransactions,
+  shouldBlockEmptyCloudOverwrite,
+  tagTransactionsWithWorkspace,
+  tagWalletsWithWorkspace,
 } from './workspaceSync';
+import { Wallet } from '../types';
 
 function makeTx(overrides: Partial<Transaction> = {}): Transaction {
   return {
@@ -127,5 +132,88 @@ describe('workspaceSync unified path and workspace isolation', () => {
       reconciled.map((t) => t.id),
       ['tx-offline-new', 'tx-cloud-1', 'tx-cloud-2']
     );
+  });
+
+  it('blocks automatic cloud writes before isCloudLoaded completes and blocks empty overwrites across backup and unified collections', () => {
+    assert.equal(
+      canPerformAutomaticCloudWrite({
+        isAuthenticated: true,
+        isCloudLoaded: false,
+        isEmergencyRecoveryActive: false,
+      }),
+      false
+    );
+    assert.equal(
+      canPerformAutomaticCloudWrite({
+        isAuthenticated: true,
+        isCloudLoaded: true,
+        isEmergencyRecoveryActive: true,
+      }),
+      false
+    );
+    assert.equal(
+      canPerformAutomaticCloudWrite({
+        isAuthenticated: false,
+        isCloudLoaded: true,
+        isEmergencyRecoveryActive: false,
+      }),
+      false
+    );
+    assert.equal(
+      canPerformAutomaticCloudWrite({
+        isAuthenticated: true,
+        isCloudLoaded: true,
+        isEmergencyRecoveryActive: false,
+      }),
+      true
+    );
+
+    // Protect when unified cloud has transactions even if legacy backup meta count is 0
+    assert.equal(
+      shouldBlockEmptyCloudOverwrite({
+        localTransactionsCount: 0,
+        cloudBackupTransactionsCount: 0,
+        hasUnifiedCloudTransactions: true,
+      }),
+      true
+    );
+    assert.equal(
+      shouldBlockEmptyCloudOverwrite({
+        localTransactionsCount: 0,
+        cloudBackupTransactionsCount: 5,
+        hasUnifiedCloudTransactions: false,
+      }),
+      true
+    );
+    // Allow write when local has imported transactions
+    assert.equal(
+      shouldBlockEmptyCloudOverwrite({
+        localTransactionsCount: 3,
+        cloudBackupTransactionsCount: 5,
+        hasUnifiedCloudTransactions: true,
+      }),
+      false
+    );
+  });
+
+  it('tags transactions and wallets cleanly with normalized workspaceId', () => {
+    const txs = tagTransactionsWithWorkspace([makeTx({ id: 't-1' })], 'org-99');
+    assert.equal(txs[0].workspaceId, 'org-99');
+
+    const wallets: Wallet[] = [
+      {
+        id: 'w-1',
+        name: 'Cash',
+        currency: 'EGP',
+        initialBalance: 0,
+        balance: 0,
+        color: '#000',
+        icon: 'Wallet',
+        isArchived: false,
+        order: 0,
+      },
+    ];
+    const taggedWallets = tagWalletsWithWorkspace(wallets, '');
+    assert.equal(taggedWallets[0].workspaceId, 'personal');
   });
 });

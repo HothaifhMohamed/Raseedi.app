@@ -59,6 +59,7 @@ export interface Wallet {
   order?: number;
   walletType?: WalletType;
   custodianMemberUid?: string;
+  workspaceId?: string;
   updatedAt?: number;
 }
 
@@ -71,6 +72,7 @@ export interface Category {
   type: 'expense' | 'income' | 'both';
   isDefault?: boolean;
   isHidden?: boolean;
+  workspaceId?: string;
   order: number;
 }
 

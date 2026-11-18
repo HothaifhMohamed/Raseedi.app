@@ -24,6 +24,7 @@ import {
   parseImportFileBuffer,
   autoDetectCsvMapping,
   mapCsvRowsToTransactions,
+  buildImportedTransactionsPayload,
   normalizeCsvDate,
   parseArabicDate,
   parseImportAmount,
@@ -713,6 +714,43 @@ test('smart import: auto-wallet creation (0 initial), transfer To-Wallet routing
   assert.equal(res.autoCreatedCategories[1].nameAr, 'اشتراك جيم');
   assert.equal(res.autoCreatedCategories[1].type, 'expense');
 });
+
+test('csvImport workspace tagging: tags imported transactions and auto-created wallets with active workspaceId', () => {
+  const headers = ['التاريخ', 'المبلغ', 'المحفظة', 'الملاحظات'];
+  const mapping = autoDetectCsvMapping(headers);
+  const res = mapCsvRowsToTransactions({
+    rows: [
+      ['2026-11-10', '-250', 'محفظة الشركة الجديدة', 'شراء مستلزمات'],
+      ['2026-11-11', '1200', 'محفظة الشركة الجديدة', 'تحصيل عميل'],
+    ],
+    mapping,
+    categories: DEFAULT_CATEGORIES,
+    existingTransactions: [],
+    wallets: [],
+    defaultCurrency: 'EGP',
+    workspaceId: 'org-company-1',
+  });
+
+  assert.equal(res.validCount, 2);
+  assert.equal(res.autoCreatedWallets.length, 1);
+  assert.equal(res.autoCreatedWallets[0].workspaceId, 'org-company-1');
+  assert.equal(res.previewRows[0].workspaceId, 'org-company-1');
+
+  const built = buildImportedTransactionsPayload({
+    rows: res.previewRows,
+    existingWallets: [],
+    newWallets: res.autoCreatedWallets,
+    defaultCurrency: 'EGP',
+    workspaceId: 'org-company-1',
+  });
+
+  assert.equal(built.taggedNewWallets[0].workspaceId, 'org-company-1');
+  assert.equal(built.transactions.length, 2);
+  assert.equal(built.transactions[0].workspaceId, 'org-company-1');
+  assert.equal(built.transactions[1].workspaceId, 'org-company-1');
+  assert.equal(built.transactions[0].deletedAt, null);
+});
+
 
 
 

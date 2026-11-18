@@ -35,6 +35,7 @@ import {
   parseImportFileBuffer,
   autoDetectCsvMapping,
   mapCsvRowsToTransactions,
+  buildImportedTransactionsPayload,
   CsvColumnMapping,
 } from '../../services/csvImport';
 import { formatLocalDate } from '../../services/calculations';
@@ -55,6 +56,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     templates,
     moneyCircles,
     queueLegacyOrgsForMigration,
+    activeWorkspace,
     settings,
     user,
     isPro,
@@ -109,6 +111,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
   });
   const [targetWalletId, setTargetWalletId] = useState(wallets[0]?.id || '');
   const [skipDuplicates, setSkipDuplicates] = useState(true);
+  const [isImportingCsv, setIsImportingCsv] = useState(false);
   const [isRefreshingHistory, setIsRefreshingHistory] = useState(false);
   const [restoringHistoryId, setRestoringHistoryId] = useState<string | null>(null);
   const importFileBytesRef = useRef<{ bytes: Uint8Array; fileName: string; mimeType: string } | null>(
@@ -451,8 +454,9 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
       existingTransactions: transactions,
       wallets,
       defaultCurrency: importDefaultCurrency,
+      workspaceId: activeWorkspace,
     });
-  }, [csvRows, csvMapping, categories, transactions, wallets, importDefaultCurrency]);
+  }, [csvRows, csvMapping, categories, transactions, wallets, importDefaultCurrency, activeWorkspace]);
 
   const rowsReadyToImport = useMemo(() => {
     return csvPreviewResult.previewRows.filter(
@@ -477,65 +481,78 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     return csvPreviewResult.autoCreatedCategories.filter((c) => neededIds.has(c.id));
   }, [rowsReadyToImport, csvPreviewResult.autoCreatedCategories]);
 
-  const handleConfirmCsvImport = () => {
-    const fallbackWallet = wallets.find((w) => w.id === targetWalletId) || wallets[0];
-    const allKnownWallets = [...wallets, ...readyWalletsToCreate];
-    if (rowsReadyToImport.length === 0) return;
+  const handleConfirmCsvImport = async () => {
+    if (rowsReadyToImport.length === 0 || isImportingCsv) return;
 
-    const batch = rowsReadyToImport.map((r) => {
-      const rowWallet =
-        (r.walletId && allKnownWallets.find((w) => w.id === r.walletId)) ||
-        fallbackWallet ||
-        readyWalletsToCreate[0];
-      return {
-        type: r.type,
-        amount: r.amount,
-        currency: rowWallet?.currency || importDefaultCurrency,
-        date: r.date,
-        time: '12:00',
-        categoryId: r.categoryId,
-        walletId: rowWallet?.id || '',
-        ...(r.type === 'transfer' && r.toWalletId ? { toWalletId: r.toWalletId } : {}),
-        notes: r.notes,
-        priority: 'normal' as const,
-        doesNotAffectBalance: false,
-      };
+    const { transactions: batch, taggedNewWallets } = buildImportedTransactionsPayload({
+      rows: rowsReadyToImport,
+      existingWallets: wallets,
+      newWallets: readyWalletsToCreate,
+      fallbackWalletId: targetWalletId,
+      defaultCurrency: importDefaultCurrency,
+      workspaceId: activeWorkspace,
     });
 
     const skippedInvalid = csvPreviewResult.invalidCount;
     const skippedDup = skipDuplicates ? csvPreviewResult.duplicateCount : 0;
-    const createdWalletsCount = readyWalletsToCreate.length;
+    const createdWalletsCount = taggedNewWallets.length;
     const createdCatsCount = readyCategoriesToCreate.length;
-    const imported = importTransactionsBatch(batch, {
-      newWallets: readyWalletsToCreate,
-      newCategories: readyCategoriesToCreate,
-    });
-    resetImportPreviewState();
 
-    const extraPartsAr: string[] = [];
-    const extraPartsEn: string[] = [];
-    if (createdWalletsCount > 0) {
-      extraPartsAr.push(`إنشاء ${createdWalletsCount} محفظة تلقائياً`);
-      extraPartsEn.push(`${createdWalletsCount} wallet(s) created`);
-    }
-    if (createdCatsCount > 0) {
-      extraPartsAr.push(`إنشاء ${createdCatsCount} تصنيف تلقائياً`);
-      extraPartsEn.push(`${createdCatsCount} category(ies) created`);
-    }
-    if (skippedInvalid > 0 || skippedDup > 0) {
-      extraPartsAr.push(`تخطي ${skippedInvalid} غير صالح و ${skippedDup} مكرر`);
-      extraPartsEn.push(`skipped ${skippedInvalid} invalid, ${skippedDup} duplicate`);
-    }
+    setIsImportingCsv(true);
+    setMessage(null);
+    try {
+      const imported = await importTransactionsBatch(batch, {
+        newWallets: taggedNewWallets,
+        newCategories: readyCategoriesToCreate,
+      });
 
-    setMessage({
-      text: isRTL
-        ? `تم استيراد ${imported} معاملة بنجاح!${
-            extraPartsAr.length > 0 ? ` (${extraPartsAr.join(' • ')})` : ''
-          }`
-        : `Successfully imported ${imported} transactions!${
-            extraPartsEn.length > 0 ? ` (${extraPartsEn.join(' • ')})` : ''
-          }`,
-    });
+      if (imported <= 0) {
+        setMessage({
+          text: isRTL
+            ? 'لم يتم استيراد أي معاملات جديدة (تحقق من الصلاحيات أو الفترة المحاسبية).'
+            : 'No transactions were imported (check permissions or locked accounting period).',
+          error: true,
+        });
+        return;
+      }
+
+      resetImportPreviewState();
+
+      const extraPartsAr: string[] = [];
+      const extraPartsEn: string[] = [];
+      if (createdWalletsCount > 0) {
+        extraPartsAr.push(`إنشاء ${createdWalletsCount} محفظة تلقائياً`);
+        extraPartsEn.push(`${createdWalletsCount} wallet(s) created`);
+      }
+      if (createdCatsCount > 0) {
+        extraPartsAr.push(`إنشاء ${createdCatsCount} تصنيف تلقائياً`);
+        extraPartsEn.push(`${createdCatsCount} category(ies) created`);
+      }
+      if (skippedInvalid > 0 || skippedDup > 0) {
+        extraPartsAr.push(`تخطي ${skippedInvalid} غير صالح و ${skippedDup} مكرر`);
+        extraPartsEn.push(`skipped ${skippedInvalid} invalid, ${skippedDup} duplicate`);
+      }
+
+      setMessage({
+        text: isRTL
+          ? `تم استيراد وحفظ ${imported} معاملة بنجاح!${
+              extraPartsAr.length > 0 ? ` (${extraPartsAr.join(' • ')})` : ''
+            }`
+          : `Successfully imported and saved ${imported} transactions!${
+              extraPartsEn.length > 0 ? ` (${extraPartsEn.join(' • ')})` : ''
+            }`,
+      });
+    } catch (err) {
+      const errDetail = err instanceof Error ? err.message : '';
+      setMessage({
+        text: isRTL
+          ? `تعذر إتمام حفظ المعاملات المستوردة${errDetail ? `: ${errDetail}` : '. يرجى المحاولة مرة أخرى.'}`
+          : `Failed to save imported transactions${errDetail ? `: ${errDetail}` : '. Please try again.'}`,
+        error: true,
+      });
+    } finally {
+      setIsImportingCsv(false);
+    }
   };
 
   if (!isOpen) return null;
@@ -1582,13 +1599,20 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                   <button
                     type="button"
                     data-testid="confirm-spreadsheet-import"
-                    disabled={rowsReadyToImport.length === 0}
+                    disabled={rowsReadyToImport.length === 0 || isImportingCsv}
                     onClick={handleConfirmCsvImport}
-                    className="w-full py-2.5 bg-[var(--color-accent)] disabled:opacity-40 text-[var(--color-on-accent)] font-semibold rounded-xl text-xs min-h-[44px]"
+                    className="w-full py-2.5 bg-[var(--color-accent)] disabled:opacity-40 text-[var(--color-on-accent)] font-semibold rounded-xl text-xs min-h-[44px] flex items-center justify-center gap-2"
                   >
-                    {isRTL
-                      ? `استيراد ${rowsReadyToImport.length} معاملة صالحة`
-                      : `Import ${rowsReadyToImport.length} valid transactions`}
+                    {isImportingCsv && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                    <span>
+                      {isImportingCsv
+                        ? isRTL
+                          ? 'جاري الحفظ والمزامنة السحابية...'
+                          : 'Saving & syncing to cloud...'
+                        : isRTL
+                        ? `استيراد ${rowsReadyToImport.length} معاملة صالحة`
+                        : `Import ${rowsReadyToImport.length} valid transactions`}
+                    </span>
                   </button>
                 </div>
               )}

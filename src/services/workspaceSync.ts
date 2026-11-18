@@ -1,4 +1,4 @@
-import { Transaction, TransactionType } from '../types';
+import { Transaction, TransactionType, Wallet } from '../types';
 import { fromMinor, toMinor } from './currency';
 import { sortTransactionsDescending } from './orgTransactionQuery';
 
@@ -59,6 +59,54 @@ export function isActiveWorkspaceTransaction(
   if (!tx || !tx.id) return false;
   if (typeof tx.deletedAt === 'number' && tx.deletedAt > 0) return false;
   return isTransactionInWorkspace(tx, activeWorkspaceId);
+}
+
+export function canPerformAutomaticCloudWrite(params: {
+  isAuthenticated: boolean;
+  isCloudLoaded: boolean;
+  isEmergencyRecoveryActive?: boolean;
+}): boolean {
+  return Boolean(
+    params.isAuthenticated && params.isCloudLoaded && !params.isEmergencyRecoveryActive
+  );
+}
+
+export function shouldBlockEmptyCloudOverwrite(params: {
+  localTransactionsCount: number;
+  cloudBackupTransactionsCount?: number;
+  unifiedCloudTransactionsCount?: number;
+  hasUnifiedCloudTransactions?: boolean;
+  allowEmptyOverwrite?: boolean;
+}): boolean {
+  if (params.allowEmptyOverwrite) return false;
+  if (params.localTransactionsCount > 0) return false;
+  const hasCloudData =
+    Number(params.cloudBackupTransactionsCount || 0) > 0 ||
+    Number(params.unifiedCloudTransactionsCount || 0) > 0 ||
+    Boolean(params.hasUnifiedCloudTransactions);
+  return hasCloudData;
+}
+
+export function tagTransactionsWithWorkspace<T extends Partial<Transaction>>(
+  txs: T[],
+  workspaceId?: string | null
+): (T & { workspaceId: string })[] {
+  const safeWs = normalizeWorkspaceId(workspaceId);
+  return txs.map((tx) => ({
+    ...tx,
+    workspaceId: safeWs,
+  }));
+}
+
+export function tagWalletsWithWorkspace(
+  wallets: Wallet[],
+  workspaceId?: string | null
+): Wallet[] {
+  const safeWs = normalizeWorkspaceId(workspaceId);
+  return wallets.map((w) => ({
+    ...w,
+    workspaceId: safeWs,
+  }));
 }
 
 export function stripUndefinedDeep<T>(value: T): T {

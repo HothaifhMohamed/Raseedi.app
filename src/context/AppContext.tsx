@@ -144,6 +144,7 @@ import {
   batchDeleteWorkspaceTransactionsCloud,
   fetchWorkspaceTransactionsCloud,
   subscribeWorkspaceTransactions,
+  isOfflineFirestoreError,
   isEntitlementActive,
   resolvePlanTierFromProfile,
   CloudBackupPayload,
@@ -156,9 +157,12 @@ import {
   shouldRestoreCloudOnStartup,
 } from '../services/safeRecovery';
 import {
+  canPerformAutomaticCloudWrite,
   isActiveWorkspaceTransaction,
   normalizeWorkspaceId,
   reconcileWorkspaceTransactions,
+  tagTransactionsWithWorkspace,
+  tagWalletsWithWorkspace,
 } from '../services/workspaceSync';
 import type { BackupHistorySummary } from '../services/backupHistory';
 import { isAuthorizedAdminUser, verifySignedLicenseCode } from '../services/licenseCodes';
@@ -473,6 +477,7 @@ interface AppContextType {
   cloudSkippedAttachmentsWarning: number;
   cloudConflict: { cloudUpdatedAtMs: number } | null;
   lastCloudBackupExists: boolean;
+  isCloudLoaded: boolean;
   cloudBackupHistory: BackupHistorySummary[];
   refreshCloudBackupHistory: () => Promise<void>;
   restoreFromBackupHistoryEntry: (backupId: string) => Promise<boolean>;
@@ -520,7 +525,7 @@ interface AppContextType {
   importTransactionsBatch: (
     items: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>[],
     options?: { newWallets?: Wallet[]; newCategories?: Category[] }
-  ) => number;
+  ) => Promise<number>;
   updateTransaction: (id: string, data: Partial<Transaction>) => void;
   deleteTransaction: (id: string) => void;
   deleteSelectedTransactions: () => void;
@@ -680,10 +685,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [cloudSkippedAttachmentsWarning, setCloudSkippedAttachmentsWarning] = useState(0);
   const [cloudConflict, setCloudConflict] = useState<{ cloudUpdatedAtMs: number } | null>(null);
   const [lastCloudBackupExists, setLastCloudBackupExists] = useState(false);
+  const [isCloudLoaded, setIsCloudLoaded] = useState(false);
   const [cloudBackupHistory, setCloudBackupHistory] = useState<BackupHistorySummary[]>([]);
   const [preRestoreSnapshotDate, setPreRestoreSnapshotDate] = useState<number | null>(null);
   const skipNextAutoSyncRef = React.useRef(false);
   const hasCompletedInitialCloudSyncRef = React.useRef(false);
+  const isCloudLoadedRef = React.useRef(false);
+  const workspaceSyncEpochRef = React.useRef(0);
   const pendingLocalTxIdsRef = React.useRef<Set<string>>(new Set());
   const locallyDeletedTxIdsRef = React.useRef<Set<string>>(new Set());
   const isEmergencyRecoveryActiveRef = React.useRef(false);
@@ -1203,30 +1211,27 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     (workspaceId: string, tx: Transaction, isNew = false) => {
       const normalizedWs = normalizeWorkspaceId(workspaceId);
       const taggedTx: Transaction = { ...tx, workspaceId: normalizedWs };
+      workspaceSyncEpochRef.current += 1;
       locallyDeletedTxIdsRef.current.delete(taggedTx.id);
       pendingLocalTxIdsRef.current.add(taggedTx.id);
 
       const uid = auth.currentUser?.uid;
       if (!uid) return;
-      void upsertWorkspaceTransactionCloud(uid, normalizedWs, taggedTx, { isNew })
-        .then(() => {
-          pendingLocalTxIdsRef.current.delete(taggedTx.id);
-        })
-        .catch((err) => {
-          console.error('[RealTimeSync] Failed to write transaction:', err);
-          setCloudSyncError(
-            formatFirestoreErrorForDisplay(
-              err,
-              latestPersonalRef.current.settings.language === 'ar'
-            )
-          );
-          setCloudDiagnosticsError(
-            formatFirestoreErrorForDisplay(
-              err,
-              latestPersonalRef.current.settings.language === 'ar'
-            )
-          );
-        });
+      void upsertWorkspaceTransactionCloud(uid, normalizedWs, taggedTx, { isNew }).catch((err) => {
+        console.error('[RealTimeSync] Failed to write transaction:', err);
+        setCloudSyncError(
+          formatFirestoreErrorForDisplay(
+            err,
+            latestPersonalRef.current.settings.language === 'ar'
+          )
+        );
+        setCloudDiagnosticsError(
+          formatFirestoreErrorForDisplay(
+            err,
+            latestPersonalRef.current.settings.language === 'ar'
+          )
+        );
+      });
     },
     []
   );
@@ -1235,6 +1240,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     (workspaceId: string, txs: Transaction[]) => {
       if (txs.length === 0) return;
       const normalizedWs = normalizeWorkspaceId(workspaceId);
+      workspaceSyncEpochRef.current += 1;
       const tagged = txs.map((tx) => {
         locallyDeletedTxIdsRef.current.delete(tx.id);
         pendingLocalTxIdsRef.current.add(tx.id);
@@ -1243,27 +1249,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       const uid = auth.currentUser?.uid;
       if (!uid) return;
-      void batchUpsertWorkspaceTransactionsCloud(uid, normalizedWs, tagged)
-        .then(() => {
-          for (const tx of tagged) {
-            pendingLocalTxIdsRef.current.delete(tx.id);
-          }
-        })
-        .catch((err) => {
-          console.error('[RealTimeSync] Failed batch transaction write:', err);
-          setCloudSyncError(
-            formatFirestoreErrorForDisplay(
-              err,
-              latestPersonalRef.current.settings.language === 'ar'
-            )
-          );
-          setCloudDiagnosticsError(
-            formatFirestoreErrorForDisplay(
-              err,
-              latestPersonalRef.current.settings.language === 'ar'
-            )
-          );
-        });
+      void batchUpsertWorkspaceTransactionsCloud(uid, normalizedWs, tagged).catch((err) => {
+        console.error('[RealTimeSync] Failed batch transaction write:', err);
+        setCloudSyncError(
+          formatFirestoreErrorForDisplay(
+            err,
+            latestPersonalRef.current.settings.language === 'ar'
+          )
+        );
+        setCloudDiagnosticsError(
+          formatFirestoreErrorForDisplay(
+            err,
+            latestPersonalRef.current.settings.language === 'ar'
+          )
+        );
+      });
     },
     []
   );
@@ -1272,6 +1272,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     (workspaceId: string, txIds: string[]) => {
       if (txIds.length === 0) return;
       const normalizedWs = normalizeWorkspaceId(workspaceId);
+      workspaceSyncEpochRef.current += 1;
       for (const id of txIds) {
         pendingLocalTxIdsRef.current.delete(id);
         locallyDeletedTxIdsRef.current.add(id);
@@ -1351,9 +1352,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         syncWorkspaceTxDeleteImmediately(orgId, deletedIds);
       }
 
-      // Silent background cloud metadata backup for local-first orgs when authenticated
+      // Silent background cloud metadata backup for local-first orgs ONLY after cloud hydration completes
       const currentUid = auth.currentUser?.uid;
-      if (currentUid) {
+      if (
+        canPerformAutomaticCloudWrite({
+          isAuthenticated: Boolean(currentUid),
+          isCloudLoaded: hasCompletedInitialCloudSyncRef.current && isCloudLoadedRef.current,
+          isEmergencyRecoveryActive: isEmergencyRecoveryActiveRef.current,
+        }) &&
+        currentUid
+      ) {
         const snap = latestPersonalRef.current;
         void syncOrganizationMetaToCloud(
           currentUid,
@@ -1555,18 +1563,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       };
       // Respect user deletions post-onboarding: never force DEFAULT_* when onboarded
       const resolvedWallets = sortWalletsByOrder(
-        backup.wallets?.length
-          ? backup.wallets
-          : resolvedOnboarded
-          ? []
-          : DEFAULT_WALLETS
+        tagWalletsWithWorkspace(
+          backup.wallets?.length
+            ? backup.wallets
+            : resolvedOnboarded
+            ? []
+            : DEFAULT_WALLETS,
+          'personal'
+        )
       );
       const resolvedCategories = backup.categories?.length
         ? backup.categories
         : resolvedOnboarded
         ? []
         : DEFAULT_CATEGORIES;
-      const resolvedTransactions = backup.transactions || [];
+      const resolvedTransactions = reconcileWorkspaceTransactions(
+        backup.transactions || [],
+        latestPersonalRef.current.transactions,
+        {
+          activeWorkspaceId: 'personal',
+          hasServerSnapshot: true,
+          pendingLocalIds: pendingLocalTxIdsRef.current,
+          locallyDeletedIds: locallyDeletedTxIdsRef.current,
+        }
+      );
       const resolvedBudgets = backup.budgets || [];
       const resolvedDebts = backup.debts || [];
       const resolvedGoals = backup.goals || [];
@@ -2451,6 +2471,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (!firebaseUser) {
         hasCompletedInitialCloudSyncRef.current = false;
+        isCloudLoadedRef.current = false;
+        setIsCloudLoaded(false);
         setFirebaseAuthUser(null);
         setLastCloudBackupExists(false);
         setScanQuota(null);
@@ -2465,6 +2487,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
 
       hasCompletedInitialCloudSyncRef.current = false;
+      isCloudLoadedRef.current = false;
+      setIsCloudLoaded(false);
       const nextUser: UserAccount = {
         id: firebaseUser.uid,
         name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Raseedi User',
@@ -2479,12 +2503,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setUser(nextUser);
 
       try {
-        const [profile, cloudMeta] = await Promise.all([
+        const isOnline = typeof navigator === 'undefined' || navigator.onLine;
+        const [profile, cloudMeta, unifiedPersonalTxs] = await Promise.all([
           ensureUserProfile(firebaseUser),
           fetchCloudBackupMeta(firebaseUser.uid, { forceServer: false }).catch((metaErr) => {
             console.error('[Cloud Startup] fetchCloudBackupMeta failed:', metaErr);
             return null;
           }),
+          fetchWorkspaceTransactionsCloud(firebaseUser.uid, 'personal', {
+            forceServer: isOnline,
+          }).catch(() =>
+            fetchWorkspaceTransactionsCloud(firebaseUser.uid, 'personal', {
+              forceServer: false,
+            }).catch(() => [])
+          ),
         ]);
 
         const active = isEntitlementActive(profile);
@@ -2545,7 +2577,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }
         }
 
-        setLastCloudBackupExists(Boolean(cloudMeta));
+        const hasCloudData = Boolean(cloudMeta) || unifiedPersonalTxs.length > 0;
+        setLastCloudBackupExists(hasCloudData);
         void fetchCloudBackupHistory(firebaseUser.uid)
           .then((list) => setCloudBackupHistory(list))
           .catch(() => {});
@@ -2553,7 +2586,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
         const snap = latestPersonalRef.current;
         const postAction = resolvePostGoogleSignInAction({
-          hasCloudBackup: Boolean(cloudMeta),
+          hasCloudBackup: hasCloudData,
           wasActiveGuest: isGuestModeRef.current,
           hasLocalOnboarding: Boolean(snap.hasCompletedOnboarding),
           localTransactionsCount: snap.transactions.length,
@@ -2562,13 +2595,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         saveGuestModePref(false);
         setIsGuestMode(false);
 
-        // Cloud-First hydration: restore & merge cloud data when postAction requests it OR whenever local is empty/behind cloud
+        // Cloud-First hydration prioritizing unified workspace path as single source of truth
         const needsCloudFirstHydration =
           postAction === 'restore_cloud_and_enter' ||
           shouldRestoreCloudOnStartup({
             localTransactionsCount: snap.transactions.length,
-            hasCloudBackup: Boolean(cloudMeta),
-            cloudUpdatedAtMs: cloudMeta?.updatedAtMs || 0,
+            hasCloudBackup: hasCloudData,
+            cloudUpdatedAtMs:
+              cloudMeta?.updatedAtMs || (unifiedPersonalTxs.length > 0 ? Date.now() : 0),
             localLastKnownCloudUpdatedAtMs: snap.settings.lastKnownCloudUpdatedAtMs,
           });
 
@@ -2582,7 +2616,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               return null;
             }
           );
-          if (!cloudBackup || (cloudBackup.transactions || []).length === 0) {
+          if (
+            unifiedPersonalTxs.length === 0 &&
+            (!cloudBackup || (cloudBackup.transactions || []).length === 0)
+          ) {
             const historyFallback = await fetchLatestCloudBackupFromHistory(firebaseUser.uid, {
               forceServer: false,
             }).catch(() => null);
@@ -2591,11 +2628,31 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }
           }
 
+          const resolvedCloudPersonalTxs =
+            unifiedPersonalTxs.length > 0
+              ? reconcileWorkspaceTransactions(
+                  unifiedPersonalTxs,
+                  cloudBackup?.transactions || [],
+                  {
+                    activeWorkspaceId: 'personal',
+                    hasServerSnapshot: true,
+                    pendingLocalIds: pendingLocalTxIdsRef.current,
+                    locallyDeletedIds: locallyDeletedTxIdsRef.current,
+                  }
+                )
+              : (cloudBackup?.transactions || []).filter((tx) =>
+                  isActiveWorkspaceTransaction(tx, 'personal')
+                );
+
           if (cloudBackup) {
+            const cloudPayloadWithUnified: CloudBackupPayload = {
+              ...cloudBackup,
+              transactions: resolvedCloudPersonalTxs,
+            };
             if (snap.transactions.length > 0 && postAction !== 'restore_cloud_and_enter') {
               const merged = mergeCloudAndLocalState({
                 localData: snap,
-                cloudData: cloudBackup,
+                cloudData: cloudPayloadWithUnified,
                 preferCloud: true,
               });
               applyCloudBackupLocally(
@@ -2608,11 +2665,53 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 nextUser
               );
             } else {
-              applyCloudBackupLocally(cloudBackup, nextUser);
+              applyCloudBackupLocally(cloudPayloadWithUnified, nextUser);
             }
+          } else if (resolvedCloudPersonalTxs.length > 0) {
+            const hydrated = reconcileWorkspaceTransactions(
+              resolvedCloudPersonalTxs,
+              snap.transactions,
+              {
+                activeWorkspaceId: 'personal',
+                hasServerSnapshot: true,
+                pendingLocalIds: pendingLocalTxIdsRef.current,
+                locallyDeletedIds: locallyDeletedTxIdsRef.current,
+              }
+            );
+            skipNextAutoSyncRef.current = true;
+            setPersonalTransactions(hydrated);
+            setHasCompletedOnboarding(true);
+            setCloudConflict(null);
+            savePersonalState(
+              {
+                user: nextUser,
+                transactions: hydrated,
+                hasCompletedOnboarding: true,
+              },
+              { skipDirty: true }
+            );
           } else {
             savePersonalState({ user: nextUser }, { skipDirty: true });
           }
+        } else if (unifiedPersonalTxs.length > 0) {
+          const reconciled = reconcileWorkspaceTransactions(
+            unifiedPersonalTxs,
+            snap.transactions,
+            {
+              activeWorkspaceId: 'personal',
+              hasServerSnapshot: true,
+              pendingLocalIds: pendingLocalTxIdsRef.current,
+              locallyDeletedIds: locallyDeletedTxIdsRef.current,
+            }
+          );
+          skipNextAutoSyncRef.current = true;
+          setPersonalTransactions(reconciled);
+          setHasCompletedOnboarding(true);
+          setCloudConflict(null);
+          savePersonalState(
+            { user: nextUser, transactions: reconciled, hasCompletedOnboarding: true },
+            { skipDirty: true }
+          );
         } else if (postAction === 'start_onboarding') {
           setHasCompletedOnboarding(false);
           setCloudConflict(null);
@@ -2620,6 +2719,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         } else {
           setCloudConflict(null);
           savePersonalState({ user: nextUser }, { skipDirty: true });
+        }
+
+        if (isOnline) {
+          isCloudLoadedRef.current = true;
+          setIsCloudLoaded(true);
         }
       } catch (err) {
         console.error('Cloud auth sync error:', err);
@@ -2645,11 +2749,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const backfillKey = `${uid}::${activeWsId}`;
     let cancelled = false;
     let hasAuthoritativeServer = false;
+    isCloudLoadedRef.current = false;
+    setIsCloudLoaded(false);
+
+    const markCloudReady = () => {
+      if (cancelled) return;
+      isCloudLoadedRef.current = true;
+      setIsCloudLoaded(true);
+    };
 
     const applyReconciledToCache = (cloudTxs: Transaction[], fromServer: boolean) => {
       if (cancelled) return;
       if (fromServer) {
         hasAuthoritativeServer = true;
+        markCloudReady();
       }
 
       if (activeWsId === 'personal') {
@@ -2720,20 +2833,28 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (cancelled || isEmergencyRecoveryActiveRef.current) return;
       if (typeof navigator !== 'undefined' && !navigator.onLine) return;
 
+      const fetchEpoch = workspaceSyncEpochRef.current;
       try {
         const serverTxs = await fetchWorkspaceTransactionsCloud(uid, activeWsId, {
           forceServer: true,
         });
         if (cancelled) return;
+        if (fetchEpoch !== workspaceSyncEpochRef.current) {
+          // Newer local mutations occurred while server fetch was in-flight; keep listener authoritative
+          markCloudReady();
+          return;
+        }
 
         if (serverTxs.length > 0) {
           hasAuthoritativeServer = true;
+          setLastCloudBackupExists(true);
           applyReconciledToCache(serverTxs, true);
           return;
         }
 
         // First-time unified collection migration / backfill check (runs once per (uid, workspace))
         if (unifiedBackfilledKeysRef.current.has(backfillKey) || isEmergencyRecoveryActiveRef.current) {
+          markCloudReady();
           return;
         }
         unifiedBackfilledKeysRef.current.add(backfillKey);
@@ -2780,6 +2901,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (localSeed.length > 0 && !isEmergencyRecoveryActiveRef.current) {
           await batchUpsertWorkspaceTransactionsCloud(uid, activeWsId, localSeed);
         }
+        markCloudReady();
       } catch (err) {
         console.error(`[WorkspaceSync] Cloud-First fetch failed for ${activeWsId}:`, err);
       }
@@ -2789,13 +2911,23 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       uid,
       activeWsId,
       (cloudTxs, meta) => {
-        if (!meta.fromCache && !meta.hasPendingWrites) {
-          pendingLocalTxIdsRef.current.clear();
-          locallyDeletedTxIdsRef.current.clear();
-        } else if (!meta.fromCache) {
+        if (!meta.fromCache) {
+          const cloudIdSet = new Set(cloudTxs.map((t) => t.id));
           const pendingSet = new Set(meta.pendingIds);
           for (const id of Array.from(pendingLocalTxIdsRef.current)) {
-            if (!pendingSet.has(id)) pendingLocalTxIdsRef.current.delete(id);
+            if (cloudIdSet.has(id) && !pendingSet.has(id)) {
+              pendingLocalTxIdsRef.current.delete(id);
+            }
+          }
+          if (!meta.hasPendingWrites) {
+            for (const id of Array.from(locallyDeletedTxIdsRef.current)) {
+              if (!cloudIdSet.has(id)) {
+                locallyDeletedTxIdsRef.current.delete(id);
+              }
+            }
+          }
+          if (cloudTxs.length > 0) {
+            setLastCloudBackupExists(true);
           }
         }
         applyReconciledToCache(cloudTxs, !meta.fromCache);
@@ -2960,6 +3092,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setOrgHasMoreTx(meta.hasMore);
           setOrgSyncPendingWrites(meta.hasPendingWrites);
           setIsOrgLoading(false);
+          isCloudLoadedRef.current = true;
+          setIsCloudLoaded(true);
         },
         onAuditLogs: (logs) => setActiveCloudAuditLogs(logs),
         onError: (scope, err) => {
@@ -3098,12 +3232,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       });
       void refreshScanQuota();
 
-      const cloudMeta = await fetchCloudBackupMeta(firebaseUser.uid).catch(() => null);
-      setLastCloudBackupExists(Boolean(cloudMeta));
+      const [cloudMeta, unifiedPersonalTxs] = await Promise.all([
+        fetchCloudBackupMeta(firebaseUser.uid, { forceServer: true }).catch(() => null),
+        fetchWorkspaceTransactionsCloud(firebaseUser.uid, 'personal', { forceServer: true }).catch(
+          () => []
+        ),
+      ]);
+      const hasCloudData = Boolean(cloudMeta) || unifiedPersonalTxs.length > 0;
+      setLastCloudBackupExists(hasCloudData);
 
       const snap = latestPersonalRef.current;
       const postAction = resolvePostGoogleSignInAction({
-        hasCloudBackup: Boolean(cloudMeta),
+        hasCloudBackup: hasCloudData,
         wasActiveGuest,
         hasLocalOnboarding: Boolean(snap.hasCompletedOnboarding),
         localTransactionsCount: snap.transactions.length,
@@ -3114,9 +3254,38 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       let restored = false;
       if (postAction === 'restore_cloud_and_enter') {
-        const cloudBackup = await fetchCloudBackup(firebaseUser.uid);
+        const cloudBackup = await fetchCloudBackup(firebaseUser.uid, { forceServer: true }).catch(
+          () => null
+        );
+        const resolvedUnified =
+          unifiedPersonalTxs.length > 0
+            ? reconcileWorkspaceTransactions(
+                unifiedPersonalTxs,
+                cloudBackup?.transactions || [],
+                { activeWorkspaceId: 'personal', hasServerSnapshot: true }
+              )
+            : (cloudBackup?.transactions || []).filter((tx) =>
+                isActiveWorkspaceTransaction(tx, 'personal')
+              );
+
         if (cloudBackup) {
-          applyCloudBackupLocally(cloudBackup, nextUser);
+          applyCloudBackupLocally(
+            { ...cloudBackup, transactions: resolvedUnified },
+            nextUser
+          );
+          restored = true;
+        } else if (resolvedUnified.length > 0) {
+          skipNextAutoSyncRef.current = true;
+          setPersonalTransactions(resolvedUnified);
+          setHasCompletedOnboarding(true);
+          savePersonalState(
+            {
+              user: nextUser,
+              transactions: resolvedUnified,
+              hasCompletedOnboarding: true,
+            },
+            { skipDirty: true }
+          );
           restored = true;
         }
       } else if (postAction === 'start_onboarding') {
@@ -3127,6 +3296,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setCloudConflict(null);
         savePersonalState({ user: nextUser }, { skipDirty: true });
       }
+
+      hasCompletedInitialCloudSyncRef.current = true;
+      isCloudLoadedRef.current = true;
+      setIsCloudLoaded(true);
 
       void fetchCloudBackupHistory(firebaseUser.uid)
         .then((list) => setCloudBackupHistory(list))
@@ -3779,8 +3952,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // Silent Auto Cloud Sync (personal & local-first org state, keeping last 7 auto backups)
   useEffect(() => {
-    if (!user?.isLoggedIn || !auth.currentUser || !hasCompletedOnboarding) return;
-    if (!hasCompletedInitialCloudSyncRef.current) return;
+    if (!hasCompletedOnboarding) return;
+    if (
+      !canPerformAutomaticCloudWrite({
+        isAuthenticated: Boolean(user?.isLoggedIn && auth.currentUser),
+        isCloudLoaded:
+          isCloudLoaded &&
+          hasCompletedInitialCloudSyncRef.current &&
+          isCloudLoadedRef.current,
+        isEmergencyRecoveryActive: isEmergencyRecoveryActiveRef.current,
+      })
+    ) {
+      return;
+    }
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
     if (skipNextAutoSyncRef.current) {
       skipNextAutoSyncRef.current = false;
@@ -3788,7 +3972,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
 
     const timer = window.setTimeout(async () => {
-      if (!auth.currentUser) return;
+      if (
+        !canPerformAutomaticCloudWrite({
+          isAuthenticated: Boolean(auth.currentUser),
+          isCloudLoaded:
+            hasCompletedInitialCloudSyncRef.current && isCloudLoadedRef.current,
+          isEmergencyRecoveryActive: isEmergencyRecoveryActiveRef.current,
+        }) ||
+        !auth.currentUser
+      ) {
+        return;
+      }
       const snap = latestPersonalRef.current;
       if (lastCloudBackupExists && snap.transactions.length === 0) {
         console.warn(
@@ -3858,6 +4052,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [
     user?.isLoggedIn,
     hasCompletedOnboarding,
+    isCloudLoaded,
     lastCloudBackupExists,
     personalTransactions,
     personalWallets,
@@ -5191,24 +5386,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   );
 
   const importTransactionsBatch = useCallback(
-    (
+    async (
       items: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>[],
       options?: { newWallets?: Wallet[]; newCategories?: Category[] }
-    ) => {
+    ): Promise<number> => {
       if (items.length === 0) return 0;
 
       const baseNow = Date.now();
       const actor = getOrgActor();
+      const targetWsId =
+        isOrgWorkspace && activeOrganization ? activeOrganization.id : 'personal';
       const filteredItems =
         isOrgWorkspace && activeOrganization
           ? items.filter((d) => !isDateInLockedPeriod(d.date, activeOrganization.lockedUntilDate))
           : items;
       if (filteredItems.length === 0) return 0;
 
-      const extraWallets = options?.newWallets || [];
+      const extraWallets = tagWalletsWithWorkspace(options?.newWallets || [], targetWsId);
       const extraCategories = options?.newCategories || [];
 
-      const newTxs: Transaction[] = filteredItems.map((data, idx) => ({
+      const rawNewTxs: Transaction[] = filteredItems.map((data, idx) => ({
         ...data,
         ...(isOrgWorkspace && activeOrganization
           ? {
@@ -5229,45 +5426,107 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         createdAt: baseNow - idx,
         updatedAt: baseNow - idx,
       }));
+      const newTxs = tagTransactionsWithWorkspace(rawNewTxs, targetWsId);
+
+      const isOnline = typeof navigator === 'undefined' || navigator.onLine;
+      const uid = auth.currentUser?.uid;
 
       if (isOrgWorkspace && activeOrganization) {
         if (!canOrgWrite) return 0;
         if (isUsingLocalOrgMode) {
-          mutateLocalOrgWorkspace(activeOrganization.id, (ws) => {
-            const existingWalletIds = new Set((ws.wallets || []).map((w) => w.id));
-            const uniqueNewWallets = extraWallets.filter((w) => !existingWalletIds.has(w.id));
-            let nextWallets = [...(ws.wallets || []), ...uniqueNewWallets];
-            for (const tx of newTxs) {
-              nextWallets = applyOrgTxBalanceToWallets(
-                nextWallets,
-                tx,
-                settings.customExchangeRates,
-                1
-              );
+          const currentMap = latestLocalOrgWorkspacesRef.current;
+          const existingWs = currentMap[activeOrganization.id];
+          if (!existingWs) return 0;
+
+          const existingWalletIds = new Set((existingWs.wallets || []).map((w) => w.id));
+          const uniqueNewWallets = extraWallets.filter((w) => !existingWalletIds.has(w.id));
+          let nextWallets = [...(existingWs.wallets || []), ...uniqueNewWallets];
+          for (const tx of newTxs) {
+            nextWallets = applyOrgTxBalanceToWallets(
+              nextWallets,
+              tx,
+              settings.customExchangeRates,
+              1
+            );
+          }
+          const existingCatIds = new Set((existingWs.categories || []).map((c) => c.id));
+          const uniqueNewCats = extraCategories.filter((c) => !existingCatIds.has(c.id));
+          const nextCategories = [...(existingWs.categories || []), ...uniqueNewCats];
+
+          const updatedWs: OrgWorkspaceData = {
+            ...existingWs,
+            wallets: nextWallets,
+            categories: nextCategories,
+            transactions: [...newTxs, ...(existingWs.transactions || [])],
+            auditLogs: appendLocalOrgAuditLog(
+              existingWs,
+              'create',
+              'transaction',
+              activeOrganization.id,
+              actor,
+              `استيراد دفعة (${newTxs.length} معاملة)`
+            ),
+          };
+          const nextMap: Record<string, OrgWorkspaceData> = {
+            ...currentMap,
+            [activeOrganization.id]: updatedWs,
+          };
+          latestLocalOrgWorkspacesRef.current = nextMap;
+          setLocalOrgWorkspaces(nextMap);
+          await saveOrgWorkspaces(activeWorkspaceRef.current, nextMap);
+
+          workspaceSyncEpochRef.current += 1;
+          for (const tx of newTxs) {
+            locallyDeletedTxIdsRef.current.delete(tx.id);
+            pendingLocalTxIdsRef.current.add(tx.id);
+          }
+
+          if (uid) {
+            if (isOnline) {
+              try {
+                await batchUpsertWorkspaceTransactionsCloud(uid, activeOrganization.id, newTxs);
+                const snap = latestPersonalRef.current;
+                await syncOrganizationMetaToCloud(
+                  uid,
+                  {
+                    transactions: snap.transactions,
+                    wallets: snap.wallets,
+                    categories: snap.categories,
+                    budgets: snap.budgets,
+                    debts: snap.debts,
+                    goals: snap.goals,
+                    templates: snap.templates,
+                    moneyCircles: snap.moneyCircles,
+                    settings: snap.settings,
+                    hasCompletedOnboarding: snap.hasCompletedOnboarding,
+                  },
+                  nextMap,
+                  activeWorkspaceRef.current
+                );
+                setLastCloudBackupExists(true);
+                setCloudSyncStatus('synced');
+                setCloudSyncError(null);
+              } catch (err) {
+                if (!isOfflineFirestoreError(err)) {
+                  const formatted = formatFirestoreErrorForDisplay(
+                    err,
+                    latestPersonalRef.current.settings.language === 'ar'
+                  );
+                  setCloudSyncError(formatted);
+                  setCloudDiagnosticsError(formatted);
+                  throw err;
+                }
+              }
+            } else {
+              void batchUpsertWorkspaceTransactionsCloud(uid, activeOrganization.id, newTxs);
             }
-            const existingCatIds = new Set((ws.categories || []).map((c) => c.id));
-            const uniqueNewCats = extraCategories.filter((c) => !existingCatIds.has(c.id));
-            const nextCategories = [...(ws.categories || []), ...uniqueNewCats];
-            return {
-              ...ws,
-              wallets: nextWallets,
-              categories: nextCategories,
-              transactions: [...newTxs, ...(ws.transactions || [])],
-              auditLogs: appendLocalOrgAuditLog(
-                ws,
-                'create',
-                'transaction',
-                activeOrganization.id,
-                actor,
-                `استيراد دفعة (${newTxs.length} معاملة)`
-              ),
-            };
-          });
+          }
           return newTxs.length;
         }
+
         const existingCloudWalletIds = new Set(activeCloudWallets.map((w) => w.id));
         const uniqueNewCloudWallets = extraWallets.filter((w) => !existingCloudWalletIds.has(w.id));
-        void (async () => {
+        try {
           for (const w of uniqueNewCloudWallets) {
             await upsertOrgWalletCloud(activeOrganization.id, w, true, actor);
           }
@@ -5281,36 +5540,105 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             settings.customExchangeRates,
             actor
           );
-        })().catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Batch import failed'));
-        return newTxs.length;
+          return newTxs.length;
+        } catch (err) {
+          setOrgActionError(err instanceof Error ? err.message : 'Batch import failed');
+          throw err;
+        }
       }
 
-      const existingPersonalWalletIds = new Set(personalWallets.map((w) => w.id));
-      const uniqueNewPersonalWallets = extraWallets.filter((w) => !existingPersonalWalletIds.has(w.id));
-      let updatedWallets = [...personalWallets, ...uniqueNewPersonalWallets];
+      const currentPersonal = latestPersonalRef.current;
+      const existingPersonalWalletIds = new Set(currentPersonal.wallets.map((w) => w.id));
+      const uniqueNewPersonalWallets = extraWallets.filter(
+        (w) => !existingPersonalWalletIds.has(w.id)
+      );
+      let updatedWallets = [...currentPersonal.wallets, ...uniqueNewPersonalWallets];
       for (const tx of newTxs) {
         updatedWallets = applyDeltasToWallets(updatedWallets, tx, 1);
       }
 
-      const existingPersonalCatIds = new Set(personalCategories.map((c) => c.id));
+      const existingPersonalCatIds = new Set(currentPersonal.categories.map((c) => c.id));
       const uniqueNewPersonalCats = extraCategories.filter((c) => !existingPersonalCatIds.has(c.id));
       const nextCategories =
         uniqueNewPersonalCats.length > 0
-          ? [...personalCategories, ...uniqueNewPersonalCats]
-          : personalCategories;
+          ? [...currentPersonal.categories, ...uniqueNewPersonalCats]
+          : currentPersonal.categories;
 
-      const nextTx = [...newTxs, ...personalTransactions];
+      const nextTx = [...newTxs, ...currentPersonal.transactions];
+      const nextData: AppDatabaseData = {
+        ...currentPersonal,
+        transactions: nextTx,
+        wallets: updatedWallets,
+        categories: nextCategories,
+        hasCompletedOnboarding: true,
+      };
+      latestPersonalRef.current = nextData;
+      skipNextAutoSyncRef.current = true;
+
       setPersonalTransactions(nextTx);
       setPersonalWallets(updatedWallets);
       if (uniqueNewPersonalCats.length > 0) {
         setPersonalCategories(nextCategories);
       }
-      savePersonalState({
-        transactions: nextTx,
-        wallets: updatedWallets,
-        ...(uniqueNewPersonalCats.length > 0 ? { categories: nextCategories } : {}),
-      });
-      syncWorkspaceTxsBatchImmediately('personal', newTxs);
+      setHasCompletedOnboarding(true);
+
+      await persistData(nextData);
+
+      workspaceSyncEpochRef.current += 1;
+      for (const tx of newTxs) {
+        locallyDeletedTxIdsRef.current.delete(tx.id);
+        pendingLocalTxIdsRef.current.add(tx.id);
+      }
+
+      if (uid) {
+        if (isOnline) {
+          try {
+            setCloudSyncStatus('syncing');
+            await batchUpsertWorkspaceTransactionsCloud(uid, 'personal', newTxs);
+            await saveCloudBackup(
+              uid,
+              {
+                transactions: nextTx,
+                wallets: updatedWallets,
+                categories: nextCategories,
+                budgets: nextData.budgets,
+                debts: nextData.debts,
+                goals: nextData.goals,
+                templates: nextData.templates,
+                moneyCircles: nextData.moneyCircles,
+                orgWorkspaces: latestLocalOrgWorkspacesRef.current,
+                activeWorkspace: activeWorkspaceRef.current || 'personal',
+                settings: nextData.settings,
+                hasCompletedOnboarding: true,
+              },
+              { source: 'manual', recordHistory: true, allowEmptyOverwrite: false }
+            );
+            setLastCloudBackupExists(true);
+            setCloudSyncStatus('synced');
+            setCloudSyncError(null);
+            saveUnsyncedDirtyFlag(false);
+            setHasUnsyncedLocalChanges(false);
+          } catch (err) {
+            if (!isOfflineFirestoreError(err)) {
+              const formatted = formatFirestoreErrorForDisplay(
+                err,
+                nextData.settings.language === 'ar'
+              );
+              setCloudSyncStatus('error');
+              setCloudSyncError(formatted);
+              setCloudDiagnosticsError(formatted);
+              throw err;
+            }
+            saveUnsyncedDirtyFlag(true);
+            setHasUnsyncedLocalChanges(true);
+          }
+        } else {
+          saveUnsyncedDirtyFlag(true);
+          setHasUnsyncedLocalChanges(true);
+          void batchUpsertWorkspaceTransactionsCloud(uid, 'personal', newTxs);
+        }
+      }
+
       return newTxs.length;
     },
     [
@@ -5321,14 +5649,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       activeOrgRole,
       canOrgWrite,
       activeCloudWallets,
-      mutateLocalOrgWorkspace,
       settings.customExchangeRates,
-      personalWallets,
-      personalCategories,
       applyDeltasToWallets,
-      personalTransactions,
-      savePersonalState,
-      syncWorkspaceTxsBatchImmediately,
     ]
   );
 
@@ -6087,8 +6409,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const addWallet = useCallback(
     (data: Omit<Wallet, 'id'>) => {
+      const targetWsId = isOrgWorkspace && activeOrganization ? activeOrganization.id : 'personal';
       const newWallet: Wallet = {
         ...data,
+        workspaceId: targetWsId,
         id: `w-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
         balance: data.initialBalance,
         initialBalanceMinor: toMinor(data.initialBalance, data.currency),
@@ -7773,6 +8097,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         cloudSkippedAttachmentsWarning,
         cloudConflict,
         lastCloudBackupExists,
+        isCloudLoaded,
         cloudBackupHistory,
         refreshCloudBackupHistory,
         restoreFromBackupHistoryEntry,

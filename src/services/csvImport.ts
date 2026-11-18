@@ -6,6 +6,7 @@ import * as XLSX from 'xlsx';
 import { Category, Transaction, TransactionType, Wallet } from '../types';
 import { normalizeArabicText, normalizeDigits } from './dialectParser';
 import { normalizeArabicPersianNumerals } from './numbers';
+import { normalizeWorkspaceId } from './workspaceSync';
 
 export interface CsvColumnMapping {
   dateIndex: number; // -1 if unmapped
@@ -52,6 +53,7 @@ export interface CsvPreviewRow {
   toWalletId?: string;
   toWalletName?: string;
   isNewToWallet?: boolean;
+  workspaceId?: string;
   notes: string;
   isDuplicate: boolean;
   isValid: boolean;
@@ -876,6 +878,7 @@ export function mapCsvRowsToTransactions(params: {
   existingTransactions: Transaction[];
   wallets?: Wallet[];
   defaultCurrency?: string;
+  workspaceId?: string;
 }): CsvImportMappingResult {
   const {
     rows,
@@ -884,7 +887,9 @@ export function mapCsvRowsToTransactions(params: {
     existingTransactions,
     wallets = [],
     defaultCurrency = wallets[0]?.currency || 'EGP',
+    workspaceId,
   } = params;
+  const safeWorkspaceId = normalizeWorkspaceId(workspaceId);
 
   // Pre-index existing transactions in O(N) for fast duplicate detection even at 5,000+ rows
   const existingKeys = new Set<string>();
@@ -948,6 +953,7 @@ export function mapCsvRowsToTransactions(params: {
       color: AUTO_WALLET_COLORS[(wallets.length + autoCreatedWallets.length) % AUTO_WALLET_COLORS.length],
       icon: 'Wallet',
       isArchived: false,
+      workspaceId: safeWorkspaceId,
       order: wallets.length + autoCreatedWallets.length + 1,
     };
     autoCreatedWallets.push(newWallet);
@@ -1164,6 +1170,7 @@ export function mapCsvRowsToTransactions(params: {
       toWalletId: matchedToWallet?.id,
       toWalletName: matchedToWallet?.name || (rawToWallet.trim() || undefined),
       isNewToWallet,
+      workspaceId: safeWorkspaceId,
       notes: rawNotes.trim(),
       isDuplicate,
       isValid,
@@ -1179,5 +1186,56 @@ export function mapCsvRowsToTransactions(params: {
     duplicateCount,
     autoCreatedWallets,
     autoCreatedCategories,
+  };
+}
+
+export function buildImportedTransactionsPayload(params: {
+  rows: CsvPreviewRow[];
+  existingWallets: Wallet[];
+  newWallets: Wallet[];
+  fallbackWalletId?: string;
+  defaultCurrency: string;
+  workspaceId?: string;
+}): {
+  transactions: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>[];
+  taggedNewWallets: Wallet[];
+} {
+  const safeWorkspaceId = normalizeWorkspaceId(params.workspaceId);
+  const taggedNewWallets: Wallet[] = params.newWallets.map((w) => ({
+    ...w,
+    workspaceId: safeWorkspaceId,
+  }));
+  const fallbackWallet =
+    params.existingWallets.find((w) => w.id === params.fallbackWalletId) ||
+    params.existingWallets[0];
+  const allKnownWallets = [...params.existingWallets, ...taggedNewWallets];
+
+  const transactions: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>[] = params.rows.map(
+    (r) => {
+      const rowWallet =
+        (r.walletId && allKnownWallets.find((w) => w.id === r.walletId)) ||
+        fallbackWallet ||
+        taggedNewWallets[0];
+      return {
+        type: r.type,
+        amount: r.amount,
+        currency: rowWallet?.currency || params.defaultCurrency,
+        date: r.date,
+        time: '12:00',
+        categoryId: r.categoryId,
+        walletId: rowWallet?.id || '',
+        ...(r.type === 'transfer' && r.toWalletId ? { toWalletId: r.toWalletId } : {}),
+        notes: r.notes,
+        priority: 'normal' as const,
+        doesNotAffectBalance: false,
+        workspaceId: safeWorkspaceId,
+        deletedAt: null,
+      };
+    }
+  );
+
+  return {
+    transactions,
+    taggedNewWallets,
   };
 }

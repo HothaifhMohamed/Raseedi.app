@@ -70,6 +70,7 @@ import {
   getWorkspaceTransactionsPath,
   normalizeValidFirestoreId,
   normalizeWorkspaceId,
+  shouldBlockEmptyCloudOverwrite,
 } from './workspaceSync';
 import { shouldFallbackAccountDeleteError } from './accountDeletion';
 import { resolveSafeCloudBackupWrite } from './backupMerge';
@@ -683,7 +684,7 @@ export async function signOutGoogle(): Promise<void> {
   await signOut(auth);
 }
 
-function isOfflineFirestoreError(err: unknown): boolean {
+export function isOfflineFirestoreError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   const code = String((err as { code?: unknown }).code || '').toLowerCase();
   const msg = String((err as { message?: unknown }).message || '').toLowerCase();
@@ -818,20 +819,75 @@ export async function saveCloudBackup(
     }
     existingMetaSnap = await getDocServerFirst(metaRef, false);
 
-    if (existingMetaSnap.exists()) {
-      const existingMetaData = existingMetaSnap.data() as Partial<CloudBackupMeta>;
-      const cloudTotalTx = Number(existingMetaData.totalTransactions || 0);
-      const localTxCount = (effectiveData.transactions || []).length;
+    const existingMetaData = existingMetaSnap.exists()
+      ? (existingMetaSnap.data() as Partial<CloudBackupMeta>)
+      : null;
+    const cloudTotalTx = Number(existingMetaData?.totalTransactions || 0);
+    const localTxCount = (effectiveData.transactions || []).length;
 
-      if (cloudTotalTx > 0 && localTxCount === 0 && !options?.allowEmptyOverwrite) {
+    // Zero-Data Overwrite Protection: check both legacy meta AND unified workspace collections
+    // so an empty local cache can NEVER wipe non-empty cloud transactions.
+    if (localTxCount === 0 && !options?.allowEmptyOverwrite) {
+      const activeWsToCheck = normalizeWorkspaceId(effectiveData.activeWorkspace || 'personal');
+      const [hasPersonalUnified, hasActiveUnified] = await Promise.all([
+        hasWorkspaceTransactionsInCloud(uid, 'personal').catch(() => false),
+        activeWsToCheck !== 'personal'
+          ? hasWorkspaceTransactionsInCloud(uid, activeWsToCheck).catch(() => false)
+          : Promise.resolve(false),
+      ]);
+      const hasAnyUnified = hasPersonalUnified || hasActiveUnified;
+
+      if (
+        shouldBlockEmptyCloudOverwrite({
+          localTransactionsCount: localTxCount,
+          cloudBackupTransactionsCount: cloudTotalTx,
+          hasUnifiedCloudTransactions: hasAnyUnified,
+          allowEmptyOverwrite: Boolean(options?.allowEmptyOverwrite),
+        })
+      ) {
         const source = options?.source === 'manual' ? 'manual' : 'auto';
-        const existingCloudData =
-          source === 'manual' ? await fetchCloudBackup(uid).catch(() => null) : null;
+        const [existingCloudData, unifiedPersonalTxs] =
+          source === 'manual'
+            ? await Promise.all([
+                fetchCloudBackup(uid).catch(() => null),
+                hasPersonalUnified
+                  ? fetchWorkspaceTransactionsCloud(uid, 'personal', { forceServer: false }).catch(
+                      () => []
+                    )
+                  : Promise.resolve([]),
+              ])
+            : [null, []];
+
+        const preservedCloudPayload = existingCloudData
+          ? {
+              ...existingCloudData,
+              transactions:
+                unifiedPersonalTxs.length > 0
+                  ? unifiedPersonalTxs
+                  : existingCloudData.transactions,
+            }
+          : unifiedPersonalTxs.length > 0
+          ? {
+              transactions: unifiedPersonalTxs,
+              wallets: existingMetaData?.wallets || [],
+              categories: existingMetaData?.categories || [],
+              budgets: existingMetaData?.budgets || [],
+              debts: existingMetaData?.debts || [],
+              goals: existingMetaData?.goals || [],
+              templates: existingMetaData?.templates || [],
+              moneyCircles: existingMetaData?.moneyCircles || [],
+              orgWorkspaces: existingMetaData?.orgWorkspaces,
+              activeWorkspace: existingMetaData?.activeWorkspace,
+              settings: effectiveData.settings,
+              hasCompletedOnboarding: true,
+            }
+          : null;
+
         const decision = resolveSafeCloudBackupWrite({
           localData: effectiveData,
           existingCloud: {
-            totalTransactions: cloudTotalTx,
-            data: existingCloudData,
+            totalTransactions: Math.max(cloudTotalTx, unifiedPersonalTxs.length, hasAnyUnified ? 1 : 0),
+            data: preservedCloudPayload,
           },
           source,
           allowEmptyOverwrite: Boolean(options?.allowEmptyOverwrite),
@@ -839,9 +895,9 @@ export async function saveCloudBackup(
 
         if (decision.action === 'skip_empty_local') {
           console.warn(
-            '[saveCloudBackup] Prevented overwriting non-empty cloud backup with empty local transactions.'
+            '[saveCloudBackup] Prevented overwriting non-empty cloud/unified data with empty local transactions.'
           );
-          const preservedUpdatedAtMs = Number(existingMetaData.updatedAtMs || 0);
+          const preservedUpdatedAtMs = Number(existingMetaData?.updatedAtMs || 0);
           return {
             syncedAt: preservedUpdatedAtMs,
             updatedAtMs: preservedUpdatedAtMs,
@@ -852,6 +908,19 @@ export async function saveCloudBackup(
 
         effectiveData = decision.mergedData;
       }
+    }
+
+    if (
+      existingMetaData &&
+      (effectiveData.wallets || []).length === 0 &&
+      Array.isArray(existingMetaData.wallets) &&
+      existingMetaData.wallets.length > 0 &&
+      !options?.allowEmptyOverwrite
+    ) {
+      effectiveData = {
+        ...effectiveData,
+        wallets: existingMetaData.wallets,
+      };
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, metaPath);
@@ -1401,6 +1470,28 @@ export async function fetchWorkspaceTransactionsCloud(
   } catch (error) {
     console.error(`[fetchWorkspaceTransactionsCloud] (${colPath}) error:`, error);
     handleFirestoreError(error, OperationType.LIST, colPath);
+  }
+}
+
+export async function hasWorkspaceTransactionsInCloud(
+  uid: string,
+  workspaceId = 'personal'
+): Promise<boolean> {
+  if (!uid) return false;
+  const safeWs = normalizeWorkspaceId(workspaceId);
+  const colPath = getWorkspaceTransactionsPath(uid, safeWs);
+  try {
+    const snap = await getDocsServerFirst(
+      query(collection(db, 'users', uid, 'workspaces', safeWs, 'transactions'), limit(1)),
+      false
+    );
+    return snap.docs.some((d) => {
+      const tx = extractTransactionFromWorkspaceDoc(d.data() as Record<string, unknown>, safeWs);
+      return Boolean(tx);
+    });
+  } catch (error) {
+    console.warn(`[hasWorkspaceTransactionsInCloud] (${colPath}) check warning:`, error);
+    return false;
   }
 }
 
