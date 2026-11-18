@@ -303,6 +303,60 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidWorkspaceTransaction(data, userId, workspaceId, txId) {
+      return data.keys().hasAll([
+        'id',
+        'uid',
+        'workspaceId',
+        'date',
+        'type',
+        'amount',
+        'currency',
+        'walletId',
+        'categoryId',
+        'payload',
+        'updatedAt'
+      ])
+        && data.keys().hasOnly([
+          'id',
+          'uid',
+          'workspaceId',
+          'date',
+          'time',
+          'type',
+          'amount',
+          'amountMinor',
+          'currency',
+          'walletId',
+          'toWalletId',
+          'categoryId',
+          'createdAtMs',
+          'updatedAtMs',
+          'deletedAt',
+          'payload',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.id is string && data.id == txId && isValidId(data.id)
+        && data.uid is string && data.uid == userId && data.uid == request.auth.uid && isValidId(data.uid)
+        && data.workspaceId is string && data.workspaceId == workspaceId && isValidId(data.workspaceId)
+        && data.date is string && data.date.size() > 0 && data.date.size() <= 16
+        && (!('time' in data) || (data.time is string && data.time.size() <= 16))
+        && data.type in ['expense', 'income', 'transfer']
+        && data.amount is number && data.amount >= 0 && data.amount <= 1000000000
+        && (!('amountMinor' in data) || (data.amountMinor is int && data.amountMinor >= 0))
+        && data.currency is string && data.currency.size() > 0 && data.currency.size() <= 8
+        && data.walletId is string && data.walletId.size() > 0 && data.walletId.size() <= 128
+        && (!('toWalletId' in data) || data.toWalletId == null || (data.toWalletId is string && data.toWalletId.size() <= 128))
+        && data.categoryId is string && data.categoryId.size() <= 128
+        && (!('createdAtMs' in data) || (data.createdAtMs is number && data.createdAtMs >= 0))
+        && (!('updatedAtMs' in data) || (data.updatedAtMs is number && data.updatedAtMs >= 0))
+        && (!('deletedAt' in data) || data.deletedAt == null || (data.deletedAt is number && data.deletedAt >= 0))
+        && data.payload is map && data.payload.size() <= 55
+        && (!('createdAt' in data) || data.createdAt is timestamp || data.createdAt is number)
+        && data.updatedAt is timestamp;
+    }
+
     function isValidOrgSettingsUpdate(data) {
       return data.name is string && data.name.size() > 0 && data.name.size() <= 120
         && data.currency is string && data.currency.size() > 0 && data.currency.size() <= 8
@@ -747,7 +801,8 @@ service cloud.firestore {
         allow get: if isValidId(userId)
           && isValidId(chunkId)
           && isOwner(userId);
-        allow list: if false;
+        allow list: if isValidId(userId)
+          && isOwner(userId);
         allow create: if isValidId(userId)
           && isValidId(chunkId)
           && isOwner(userId)
@@ -798,6 +853,42 @@ service cloud.firestore {
         allow delete: if isValidId(userId)
           && isValidId(backupId)
           && isOwner(userId);
+      }
+
+      // Unified workspace-scoped real-time transactions (personal + user-owned workspaces)
+      match /workspaces/{workspaceId} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow write: if false;
+
+        match /transactions/{txId} {
+          allow get: if isValidId(userId)
+            && isValidId(workspaceId)
+            && isValidId(txId)
+            && isOwner(userId);
+          allow list: if isValidId(userId)
+            && isValidId(workspaceId)
+            && isOwner(userId);
+          allow create: if isValidId(userId)
+            && isValidId(workspaceId)
+            && isValidId(txId)
+            && isOwner(userId)
+            && isValidWorkspaceTransaction(incoming(), userId, workspaceId, txId)
+            && incoming().updatedAt == request.time;
+          allow update: if isValidId(userId)
+            && isValidId(workspaceId)
+            && isValidId(txId)
+            && isOwner(userId)
+            && isValidWorkspaceTransaction(incoming(), userId, workspaceId, txId)
+            && (!('uid' in existing()) || incoming().uid == existing().uid)
+            && (!('id' in existing()) || incoming().id == existing().id)
+            && (!('workspaceId' in existing()) || incoming().workspaceId == existing().workspaceId)
+            && (!('createdAt' in existing()) || incoming().get('createdAt', null) == existing().get('createdAt', null))
+            && incoming().updatedAt == request.time;
+          allow delete: if isValidId(userId)
+            && isValidId(workspaceId)
+            && isValidId(txId)
+            && isOwner(userId);
+        }
       }
     }
 

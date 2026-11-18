@@ -138,6 +138,12 @@ import {
   flushPendingOrgUploads,
   syncOrganizationMetaToCloud,
   syncUserCurrencyRatesToCloud,
+  upsertWorkspaceTransactionCloud,
+  batchUpsertWorkspaceTransactionsCloud,
+  deleteWorkspaceTransactionCloud,
+  batchDeleteWorkspaceTransactionsCloud,
+  fetchWorkspaceTransactionsCloud,
+  subscribeWorkspaceTransactions,
   isEntitlementActive,
   resolvePlanTierFromProfile,
   CloudBackupPayload,
@@ -149,6 +155,11 @@ import {
   mergeCloudAndLocalState,
   shouldRestoreCloudOnStartup,
 } from '../services/safeRecovery';
+import {
+  isActiveWorkspaceTransaction,
+  normalizeWorkspaceId,
+  reconcileWorkspaceTransactions,
+} from '../services/workspaceSync';
 import type { BackupHistorySummary } from '../services/backupHistory';
 import { isAuthorizedAdminUser, verifySignedLicenseCode } from '../services/licenseCodes';
 import {
@@ -673,6 +684,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [preRestoreSnapshotDate, setPreRestoreSnapshotDate] = useState<number | null>(null);
   const skipNextAutoSyncRef = React.useRef(false);
   const hasCompletedInitialCloudSyncRef = React.useRef(false);
+  const pendingLocalTxIdsRef = React.useRef<Set<string>>(new Set());
+  const locallyDeletedTxIdsRef = React.useRef<Set<string>>(new Set());
+  const isEmergencyRecoveryActiveRef = React.useRef(false);
+  const unifiedBackfilledKeysRef = React.useRef<Set<string>>(new Set());
 
   // Verified server PRO entitlement
   const [verifiedPro, setVerifiedPro] = useState<VerifiedProEntitlement | null>(null);
@@ -948,12 +963,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const orgTransactions = useMemo(() => {
     if (isUsingLocalOrgMode && activeLocalOrgWs) {
-      return (activeLocalOrgWs.transactions || []).filter((t) => !t.deletedAt);
+      return (activeLocalOrgWs.transactions || []).filter((t) =>
+        isActiveWorkspaceTransaction(t, activeWorkspace)
+      );
     }
     if (extraOrgTransactions.length === 0) return activeCloudTransactions;
     const seen = new Set(activeCloudTransactions.map((t) => t.id));
     return [...activeCloudTransactions, ...extraOrgTransactions.filter((t) => !seen.has(t.id))];
-  }, [isUsingLocalOrgMode, activeLocalOrgWs, activeCloudTransactions, extraOrgTransactions]);
+  }, [
+    isUsingLocalOrgMode,
+    activeLocalOrgWs,
+    activeWorkspace,
+    activeCloudTransactions,
+    extraOrgTransactions,
+  ]);
 
   const orgTrashTransactions = useMemo(() => {
     if (isUsingLocalOrgMode && activeLocalOrgWs) {
@@ -969,7 +992,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     [isUsingLocalOrgMode, activeLocalOrgWs, activeCloudWallets]
   );
 
-  const transactions = isOrgWorkspace ? orgTransactions : personalTransactions;
+  const isolatedPersonalTransactions = useMemo(
+    () => personalTransactions.filter((t) => isActiveWorkspaceTransaction(t, 'personal')),
+    [personalTransactions]
+  );
+
+  const transactions = isOrgWorkspace ? orgTransactions : isolatedPersonalTransactions;
   const wallets = useMemo(
     () => sortWalletsByOrder(isOrgWorkspace ? activeOrgWalletsList : personalWallets),
     [isOrgWorkspace, activeOrgWalletsList, personalWallets]
@@ -1171,6 +1199,109 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const clearOrgActionError = useCallback(() => setOrgActionError(null), []);
   const clearOrgMigrationSuccessMessage = useCallback(() => setOrgMigrationSuccessMessage(null), []);
 
+  const syncWorkspaceTxWriteImmediately = useCallback(
+    (workspaceId: string, tx: Transaction, isNew = false) => {
+      const normalizedWs = normalizeWorkspaceId(workspaceId);
+      const taggedTx: Transaction = { ...tx, workspaceId: normalizedWs };
+      locallyDeletedTxIdsRef.current.delete(taggedTx.id);
+      pendingLocalTxIdsRef.current.add(taggedTx.id);
+
+      const uid = auth.currentUser?.uid;
+      if (!uid) return;
+      void upsertWorkspaceTransactionCloud(uid, normalizedWs, taggedTx, { isNew })
+        .then(() => {
+          pendingLocalTxIdsRef.current.delete(taggedTx.id);
+        })
+        .catch((err) => {
+          console.error('[RealTimeSync] Failed to write transaction:', err);
+          setCloudSyncError(
+            formatFirestoreErrorForDisplay(
+              err,
+              latestPersonalRef.current.settings.language === 'ar'
+            )
+          );
+          setCloudDiagnosticsError(
+            formatFirestoreErrorForDisplay(
+              err,
+              latestPersonalRef.current.settings.language === 'ar'
+            )
+          );
+        });
+    },
+    []
+  );
+
+  const syncWorkspaceTxsBatchImmediately = useCallback(
+    (workspaceId: string, txs: Transaction[]) => {
+      if (txs.length === 0) return;
+      const normalizedWs = normalizeWorkspaceId(workspaceId);
+      const tagged = txs.map((tx) => {
+        locallyDeletedTxIdsRef.current.delete(tx.id);
+        pendingLocalTxIdsRef.current.add(tx.id);
+        return { ...tx, workspaceId: normalizedWs };
+      });
+
+      const uid = auth.currentUser?.uid;
+      if (!uid) return;
+      void batchUpsertWorkspaceTransactionsCloud(uid, normalizedWs, tagged)
+        .then(() => {
+          for (const tx of tagged) {
+            pendingLocalTxIdsRef.current.delete(tx.id);
+          }
+        })
+        .catch((err) => {
+          console.error('[RealTimeSync] Failed batch transaction write:', err);
+          setCloudSyncError(
+            formatFirestoreErrorForDisplay(
+              err,
+              latestPersonalRef.current.settings.language === 'ar'
+            )
+          );
+          setCloudDiagnosticsError(
+            formatFirestoreErrorForDisplay(
+              err,
+              latestPersonalRef.current.settings.language === 'ar'
+            )
+          );
+        });
+    },
+    []
+  );
+
+  const syncWorkspaceTxDeleteImmediately = useCallback(
+    (workspaceId: string, txIds: string[]) => {
+      if (txIds.length === 0) return;
+      const normalizedWs = normalizeWorkspaceId(workspaceId);
+      for (const id of txIds) {
+        pendingLocalTxIdsRef.current.delete(id);
+        locallyDeletedTxIdsRef.current.add(id);
+      }
+
+      const uid = auth.currentUser?.uid;
+      if (!uid) return;
+      const promise =
+        txIds.length === 1
+          ? deleteWorkspaceTransactionCloud(uid, normalizedWs, txIds[0])
+          : batchDeleteWorkspaceTransactionsCloud(uid, normalizedWs, txIds);
+      void promise
+        .then(() => {
+          for (const id of txIds) {
+            locallyDeletedTxIdsRef.current.delete(id);
+          }
+        })
+        .catch((err) => {
+          console.error('[RealTimeSync] Failed to delete transaction:', err);
+          setCloudDiagnosticsError(
+            formatFirestoreErrorForDisplay(
+              err,
+              latestPersonalRef.current.settings.language === 'ar'
+            )
+          );
+        });
+    },
+    []
+  );
+
   const mutateLocalOrgWorkspace = useCallback(
     (orgId: string, updater: (ws: OrgWorkspaceData) => OrgWorkspaceData): OrgWorkspaceData | null => {
       const currentMap = latestLocalOrgWorkspacesRef.current;
@@ -1185,7 +1316,42 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setLocalOrgWorkspaces(nextMap);
       void saveOrgWorkspaces(activeWorkspaceRef.current, nextMap);
 
-      // Silent background cloud sync for local-first orgs when authenticated
+      // Immediate unified Firestore write for changed/added/deleted transactions in this workspace
+      const prevById = new Map((existing.transactions || []).map((t) => [t.id, t]));
+      const nextById = new Map((updatedWs.transactions || []).map((t) => [t.id, t]));
+      const upsertedTxs: Transaction[] = [];
+      const deletedIds: string[] = [];
+
+      for (const tx of updatedWs.transactions || []) {
+        const prev = prevById.get(tx.id);
+        if (
+          !prev ||
+          tx.updatedAt !== prev.updatedAt ||
+          tx.deletedAt !== prev.deletedAt ||
+          tx.approvalStatus !== prev.approvalStatus ||
+          tx.walletId !== prev.walletId ||
+          tx.categoryId !== prev.categoryId ||
+          tx.amount !== prev.amount
+        ) {
+          upsertedTxs.push({ ...tx, workspaceId: orgId });
+        }
+      }
+      for (const prevId of prevById.keys()) {
+        if (!nextById.has(prevId)) {
+          deletedIds.push(prevId);
+        }
+      }
+      if (upsertedTxs.length === 1) {
+        const single = upsertedTxs[0];
+        syncWorkspaceTxWriteImmediately(orgId, single, !prevById.has(single.id));
+      } else if (upsertedTxs.length > 1) {
+        syncWorkspaceTxsBatchImmediately(orgId, upsertedTxs);
+      }
+      if (deletedIds.length > 0) {
+        syncWorkspaceTxDeleteImmediately(orgId, deletedIds);
+      }
+
+      // Silent background cloud metadata backup for local-first orgs when authenticated
       const currentUid = auth.currentUser?.uid;
       if (currentUid) {
         const snap = latestPersonalRef.current;
@@ -1226,7 +1392,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       return updatedWs;
     },
-    []
+    [
+      syncWorkspaceTxWriteImmediately,
+      syncWorkspaceTxsBatchImmediately,
+      syncWorkspaceTxDeleteImmediately,
+    ]
   );
 
   const applyVerifiedProState = useCallback(async (entitlement: VerifiedProEntitlement | null) => {
@@ -1911,6 +2081,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             const generated: Transaction = {
               ...tx,
               id: `recurring-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              workspaceId: 'personal',
               date: dueDate,
               isRecurring: false,
               recurrenceRule: undefined,
@@ -1987,9 +2158,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           wallets: updatedWallets,
           user: loadedData.user || null,
         });
+        syncWorkspaceTxsBatchImmediately('personal', newTxList);
       }
     },
-    []
+    [syncWorkspaceTxsBatchImmediately]
   );
 
   // Load from database on startup
@@ -2461,6 +2633,200 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     return () => unsubscribe();
   }, [applyCloudBackupLocally, applyVerifiedProState, refreshScanQuota, savePersonalState]);
+
+  // Unified Real-Time Sync + Cloud-First Hydration for users/{uid}/workspaces/{workspaceId}/transactions
+  // Keeps localStorage/IndexedDB strictly as an offline cache and syncs immediately in both directions.
+  useEffect(() => {
+    if (!user?.isLoggedIn || !user.id || auth.currentUser?.uid !== user.id) return;
+    if (isCloudActiveOrg) return; // Multi-user shared orgs use /organizations/{orgId}/transactions
+
+    const uid = user.id;
+    const activeWsId = normalizeWorkspaceId(activeWorkspace);
+    const backfillKey = `${uid}::${activeWsId}`;
+    let cancelled = false;
+    let hasAuthoritativeServer = false;
+
+    const applyReconciledToCache = (cloudTxs: Transaction[], fromServer: boolean) => {
+      if (cancelled) return;
+      if (fromServer) {
+        hasAuthoritativeServer = true;
+      }
+
+      if (activeWsId === 'personal') {
+        const localCurrent = latestPersonalRef.current.transactions;
+        const reconciled = reconcileWorkspaceTransactions(cloudTxs, localCurrent, {
+          activeWorkspaceId: 'personal',
+          hasServerSnapshot: hasAuthoritativeServer,
+          pendingLocalIds: pendingLocalTxIdsRef.current,
+          locallyDeletedIds: locallyDeletedTxIdsRef.current,
+        });
+
+        const sameLength = reconciled.length === localCurrent.length;
+        const sameItems =
+          sameLength &&
+          reconciled.every(
+            (tx, i) =>
+              localCurrent[i]?.id === tx.id && localCurrent[i]?.updatedAt === tx.updatedAt
+          );
+
+        if (!sameItems) {
+          skipNextAutoSyncRef.current = true;
+          setPersonalTransactions(reconciled);
+          void persistData({
+            ...latestPersonalRef.current,
+            transactions: reconciled,
+          });
+        }
+        return;
+      }
+
+      const currentWs = latestLocalOrgWorkspacesRef.current[activeWsId];
+      if (!currentWs) return;
+      const localAll = currentWs.transactions || [];
+      const trashItems = localAll.filter((t) => Boolean(t.deletedAt));
+      const activeLocal = localAll.filter((t) => !t.deletedAt);
+      const reconciled = reconcileWorkspaceTransactions(cloudTxs, activeLocal, {
+        activeWorkspaceId: activeWsId,
+        hasServerSnapshot: hasAuthoritativeServer,
+        pendingLocalIds: pendingLocalTxIdsRef.current,
+        locallyDeletedIds: locallyDeletedTxIdsRef.current,
+      });
+
+      const sameLength = reconciled.length === activeLocal.length;
+      const sameItems =
+        sameLength &&
+        reconciled.every(
+          (tx, i) =>
+            activeLocal[i]?.id === tx.id && activeLocal[i]?.updatedAt === tx.updatedAt
+        );
+
+      if (!sameItems) {
+        const trashById = new Set(reconciled.map((t) => t.id));
+        const combined = [...reconciled, ...trashItems.filter((t) => !trashById.has(t.id))];
+        const nextMap: Record<string, OrgWorkspaceData> = {
+          ...latestLocalOrgWorkspacesRef.current,
+          [activeWsId]: {
+            ...currentWs,
+            transactions: combined,
+          },
+        };
+        latestLocalOrgWorkspacesRef.current = nextMap;
+        setLocalOrgWorkspaces(nextMap);
+        void saveOrgWorkspaces(activeWorkspaceRef.current, nextMap);
+      }
+    };
+
+    const runCloudFirstFetchAndBackfill = async () => {
+      if (cancelled || isEmergencyRecoveryActiveRef.current) return;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+      try {
+        const serverTxs = await fetchWorkspaceTransactionsCloud(uid, activeWsId, {
+          forceServer: true,
+        });
+        if (cancelled) return;
+
+        if (serverTxs.length > 0) {
+          hasAuthoritativeServer = true;
+          applyReconciledToCache(serverTxs, true);
+          return;
+        }
+
+        // First-time unified collection migration / backfill check (runs once per (uid, workspace))
+        if (unifiedBackfilledKeysRef.current.has(backfillKey) || isEmergencyRecoveryActiveRef.current) {
+          return;
+        }
+        unifiedBackfilledKeysRef.current.add(backfillKey);
+
+        // 1) Check legacy cloud backup chunks / history for this exact workspace
+        let legacyCloudTxs: Transaction[] = [];
+        const cloudBackup = await fetchCloudBackup(uid, { forceServer: true }).catch(() => null);
+        if (activeWsId === 'personal') {
+          legacyCloudTxs = (cloudBackup?.transactions || []).filter((tx) =>
+            isActiveWorkspaceTransaction(tx, 'personal')
+          );
+          if (legacyCloudTxs.length === 0) {
+            const hist = await fetchLatestCloudBackupFromHistory(uid, { forceServer: true }).catch(
+              () => null
+            );
+            legacyCloudTxs = (hist?.transactions || []).filter((tx) =>
+              isActiveWorkspaceTransaction(tx, 'personal')
+            );
+          }
+        } else {
+          legacyCloudTxs = (cloudBackup?.orgWorkspaces?.[activeWsId]?.transactions || []).filter(
+            (tx) => !tx.deletedAt
+          );
+        }
+
+        if (cancelled || isEmergencyRecoveryActiveRef.current) return;
+
+        if (legacyCloudTxs.length > 0) {
+          await batchUpsertWorkspaceTransactionsCloud(uid, activeWsId, legacyCloudTxs);
+          applyReconciledToCache(legacyCloudTxs, true);
+          return;
+        }
+
+        // 2) If cloud unified path & legacy backup are both empty, promote any existing local-only
+        // transactions for this workspace into Firestore so nothing created pre-login is stranded.
+        const localSeed =
+          activeWsId === 'personal'
+            ? latestPersonalRef.current.transactions.filter((tx) =>
+                isActiveWorkspaceTransaction(tx, 'personal')
+              )
+            : (latestLocalOrgWorkspacesRef.current[activeWsId]?.transactions || []).filter(
+                (tx) => !tx.deletedAt
+              );
+        if (localSeed.length > 0 && !isEmergencyRecoveryActiveRef.current) {
+          await batchUpsertWorkspaceTransactionsCloud(uid, activeWsId, localSeed);
+        }
+      } catch (err) {
+        console.error(`[WorkspaceSync] Cloud-First fetch failed for ${activeWsId}:`, err);
+      }
+    };
+
+    const unsub = subscribeWorkspaceTransactions(
+      uid,
+      activeWsId,
+      (cloudTxs, meta) => {
+        if (!meta.fromCache && !meta.hasPendingWrites) {
+          pendingLocalTxIdsRef.current.clear();
+          locallyDeletedTxIdsRef.current.clear();
+        } else if (!meta.fromCache) {
+          const pendingSet = new Set(meta.pendingIds);
+          for (const id of Array.from(pendingLocalTxIdsRef.current)) {
+            if (!pendingSet.has(id)) pendingLocalTxIdsRef.current.delete(id);
+          }
+        }
+        applyReconciledToCache(cloudTxs, !meta.fromCache);
+        setCloudSyncStatus(meta.hasPendingWrites ? 'syncing' : 'synced');
+      },
+      (err) => {
+        const formatted = formatFirestoreErrorForDisplay(
+          err,
+          latestPersonalRef.current.settings.language === 'ar'
+        );
+        setCloudDiagnosticsError(formatted);
+      }
+    );
+
+    void runCloudFirstFetchAndBackfill();
+
+    const handleBackOnline = () => {
+      void runCloudFirstFetchAndBackfill();
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', handleBackOnline);
+    }
+
+    return () => {
+      cancelled = true;
+      unsub();
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('online', handleBackOnline);
+      }
+    };
+  }, [user?.isLoggedIn, user?.id, activeWorkspace, isCloudActiveOrg]);
 
   // Real-time subscription sync from Firestore /users/{uid} (reflects Admin edits/cancellations immediately)
   useEffect(() => {
@@ -2981,6 +3347,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return false;
       }
 
+      // Also ensure all personal and user-owned workspace transactions are synced to the unified path
+      const uid = auth.currentUser.uid;
+      const personalScoped = snap.transactions.filter((tx) =>
+        isActiveWorkspaceTransaction(tx, 'personal')
+      );
+      if (personalScoped.length > 0) {
+        await batchUpsertWorkspaceTransactionsCloud(uid, 'personal', personalScoped);
+      }
+      for (const [wsId, wsData] of Object.entries(latestLocalOrgWorkspacesRef.current)) {
+        const wsTxs = (wsData?.transactions || []).filter((tx) => !tx.deletedAt);
+        if (wsTxs.length > 0) {
+          await batchUpsertWorkspaceTransactionsCloud(uid, wsId, wsTxs);
+        }
+      }
+
       setCloudSkippedAttachmentsWarning(skippedAttachmentsCount);
       setLastCloudBackupExists(true);
       setCloudConflict(null);
@@ -3016,15 +3397,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setCloudSyncStatus('syncing');
     setCloudSyncError(null);
     try {
+      const uid = auth.currentUser.uid;
       await createPreRestoreSnapshot();
-      const [profile, cloudBackup] = await Promise.all([
-        fetchUserProfile(auth.currentUser.uid),
-        fetchCloudBackup(auth.currentUser.uid),
+      const [profile, cloudBackup, unifiedPersonal] = await Promise.all([
+        fetchUserProfile(uid),
+        fetchCloudBackup(uid, { forceServer: true }),
+        fetchWorkspaceTransactionsCloud(uid, 'personal', { forceServer: true }).catch(() => []),
       ]);
 
       const active = isEntitlementActive(profile);
       await applyVerifiedProState({
-        uid: auth.currentUser.uid,
+        uid,
         isPro: active,
         proPlan: active ? profile?.proPlan || 'code' : 'free',
         planTier: resolvePlanTierFromProfile(profile),
@@ -3035,8 +3418,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       });
       void refreshScanQuota();
 
-      if (cloudBackup) {
-        applyCloudBackupLocally(cloudBackup, latestPersonalRef.current.user);
+      if (cloudBackup || unifiedPersonal.length > 0) {
+        const mergedPersonal =
+          unifiedPersonal.length > 0
+            ? reconcileWorkspaceTransactions(unifiedPersonal, cloudBackup?.transactions || [], {
+                activeWorkspaceId: 'personal',
+                hasServerSnapshot: false,
+              })
+            : (cloudBackup?.transactions || []).filter((tx) =>
+                isActiveWorkspaceTransaction(tx, 'personal')
+              );
+
+        if (cloudBackup) {
+          applyCloudBackupLocally(
+            { ...cloudBackup, transactions: mergedPersonal },
+            latestPersonalRef.current.user
+          );
+        } else {
+          skipNextAutoSyncRef.current = true;
+          setPersonalTransactions(mergedPersonal);
+          void persistData({
+            ...latestPersonalRef.current,
+            transactions: mergedPersonal,
+          });
+        }
         setLastCloudBackupExists(true);
         return true;
       }
@@ -3079,6 +3484,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return { ok: false, recoveredPersonalCount: 0, recoveredOrgCount: 0, errorMessage: msg };
     }
 
+    isEmergencyRecoveryActiveRef.current = true;
     setIsCloudSyncing(true);
     setCloudSyncStatus('syncing');
     setCloudSyncError(null);
@@ -3086,70 +3492,157 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     try {
       const uid = auth.currentUser.uid;
+      const currentWsId = normalizeWorkspaceId(activeWorkspaceRef.current);
+      const isSharedCloudOrg =
+        currentWsId !== 'personal' &&
+        !latestLocalOrgWorkspacesRef.current[currentWsId] &&
+        orgRefs.some((r) => r.orgId === currentWsId);
+
       await createPreRestoreSnapshot().catch(() => {});
 
-      // 1. Clear local transactions cache before forced cloud fetch
+      pendingLocalTxIdsRef.current.clear();
+      locallyDeletedTxIdsRef.current.clear();
       skipNextAutoSyncRef.current = true;
-      setPersonalTransactions([]);
-      if (typeof window !== 'undefined') {
-        try {
-          const raw = localStorage.getItem('raseedi_data_v1');
-          if (raw) {
-            const parsed = JSON.parse(raw) as Record<string, unknown>;
-            localStorage.setItem(
-              'raseedi_data_v1',
-              JSON.stringify({ ...parsed, transactions: [] })
-            );
-          }
-        } catch {
-          // ignore localStorage cache parse failures
-        }
-      }
 
-      // 2. Force server-direct personal backup fetch (ignoring Firestore local cache)
       let recoveredPersonalCount = 0;
-      let cloudBackup = await fetchCloudBackup(uid, { forceServer: true });
-      if (!cloudBackup || (cloudBackup.transactions || []).length === 0) {
-        const historyFallback = await fetchLatestCloudBackupFromHistory(uid, {
-          forceServer: true,
-        }).catch(() => null);
-        if (historyFallback && (historyFallback.transactions || []).length > 0) {
-          cloudBackup = cloudBackup
-            ? {
-                ...cloudBackup,
-                ...historyFallback,
-                transactions: historyFallback.transactions,
-                wallets:
-                  (cloudBackup.wallets || []).length > 0
-                    ? cloudBackup.wallets
-                    : historyFallback.wallets,
-              }
-            : historyFallback;
-        }
-      }
-
-      if (cloudBackup) {
-        recoveredPersonalCount = (cloudBackup.transactions || []).length;
-        applyCloudBackupLocally(cloudBackup, latestPersonalRef.current.user);
-        setLastCloudBackupExists(true);
-      }
-
-      // 3. If an organization workspace is active, also force server-direct fetch of all org transactions (no orderBy)
       let recoveredOrgCount = 0;
-      const currentOrgId =
-        activeWorkspaceRef.current && activeWorkspaceRef.current !== 'personal'
-          ? activeWorkspaceRef.current
-          : null;
-      if (currentOrgId && !latestLocalOrgWorkspacesRef.current[currentOrgId]) {
+
+      if (isSharedCloudOrg) {
+        // Shared multi-user org workspace: recover strictly from /organizations/{orgId}/transactions
         setActiveCloudTransactions([]);
         setActiveCloudTrashTransactions([]);
         setExtraOrgTransactions([]);
         setExtraOrgTrashTransactions([]);
-        const orgRes = await forceFetchOrgTransactionsFromServer(currentOrgId);
+        const orgRes = await forceFetchOrgTransactionsFromServer(currentWsId);
         setActiveCloudTransactions(orgRes.active);
         setActiveCloudTrashTransactions(orgRes.trash);
         setOrgHasMoreTx(false);
         recoveredOrgCount = orgRes.active.length;
+      } else {
+        // Unified user-scoped workspace recovery ('personal' OR user-owned local org workspace)
+        // 1. Clear ONLY the active workspace's local transactions cache before forced server fetch
+        if (currentWsId === 'personal') {
+          setPersonalTransactions([]);
+          if (typeof window !== 'undefined') {
+            try {
+              const raw = localStorage.getItem('raseedi_data_v1');
+              if (raw) {
+                const parsed = JSON.parse(raw) as Record<string, unknown>;
+                localStorage.setItem(
+                  'raseedi_data_v1',
+                  JSON.stringify({ ...parsed, transactions: [] })
+                );
+              }
+            } catch {
+              // ignore localStorage cache parse failures
+            }
+          }
+        } else {
+          const existingLocalOrg = latestLocalOrgWorkspacesRef.current[currentWsId];
+          if (existingLocalOrg) {
+            const clearedMap: Record<string, OrgWorkspaceData> = {
+              ...latestLocalOrgWorkspacesRef.current,
+              [currentWsId]: {
+                ...existingLocalOrg,
+                transactions: [],
+              },
+            };
+            latestLocalOrgWorkspacesRef.current = clearedMap;
+            setLocalOrgWorkspaces(clearedMap);
+            void saveOrgWorkspaces(activeWorkspaceRef.current, clearedMap);
+          }
+        }
+
+        // 2. Force server-direct fetch from unified path users/{uid}/workspaces/{wsId}/transactions
+        const unifiedServerTxs = await fetchWorkspaceTransactionsCloud(uid, currentWsId, {
+          forceServer: true,
+        });
+
+        // 3. Also check legacy backupChunks / backupHistory for non-migrated transactions strictly matching currentWsId
+        let cloudBackup = await fetchCloudBackup(uid, { forceServer: true }).catch((err) => {
+          console.warn('[EmergencyRecovery] Legacy backup fetch note:', err);
+          return null;
+        });
+        if (!cloudBackup || (cloudBackup.transactions || []).length === 0) {
+          const historyFallback = await fetchLatestCloudBackupFromHistory(uid, {
+            forceServer: true,
+          }).catch(() => null);
+          if (historyFallback && (historyFallback.transactions || []).length > 0) {
+            cloudBackup = cloudBackup
+              ? {
+                  ...cloudBackup,
+                  ...historyFallback,
+                  transactions: historyFallback.transactions,
+                  wallets:
+                    (cloudBackup.wallets || []).length > 0
+                      ? cloudBackup.wallets
+                      : historyFallback.wallets,
+                }
+              : historyFallback;
+          }
+        }
+
+        const legacyWorkspaceTxs =
+          currentWsId === 'personal'
+            ? (cloudBackup?.transactions || []).filter((tx) =>
+                isActiveWorkspaceTransaction(tx, 'personal')
+              )
+            : (cloudBackup?.orgWorkspaces?.[currentWsId]?.transactions || []).filter(
+                (tx) => !tx.deletedAt
+              );
+
+        // Merge unified docs (authoritative) + any legacy-only docs strictly within currentWsId
+        const unifiedIds = new Set(unifiedServerTxs.map((t) => t.id));
+        const missingInUnified = legacyWorkspaceTxs.filter((tx) => tx?.id && !unifiedIds.has(tx.id));
+        if (missingInUnified.length > 0) {
+          await batchUpsertWorkspaceTransactionsCloud(uid, currentWsId, missingInUnified).catch(
+            (err) => console.warn('[EmergencyRecovery] Unified backfill warning:', err)
+          );
+        }
+
+        const recoveredForWorkspace = reconcileWorkspaceTransactions(
+          unifiedServerTxs,
+          missingInUnified,
+          {
+            activeWorkspaceId: currentWsId,
+            hasServerSnapshot: false,
+          }
+        );
+
+        if (currentWsId === 'personal') {
+          recoveredPersonalCount = recoveredForWorkspace.length;
+          if (cloudBackup) {
+            applyCloudBackupLocally(
+              { ...cloudBackup, transactions: recoveredForWorkspace },
+              latestPersonalRef.current.user
+            );
+          } else {
+            setPersonalTransactions(recoveredForWorkspace);
+            void persistData({
+              ...latestPersonalRef.current,
+              transactions: recoveredForWorkspace,
+            });
+          }
+          setLastCloudBackupExists(Boolean(cloudBackup || recoveredForWorkspace.length > 0));
+        } else {
+          recoveredOrgCount = recoveredForWorkspace.length;
+          const targetWs =
+            latestLocalOrgWorkspacesRef.current[currentWsId] ||
+            cloudBackup?.orgWorkspaces?.[currentWsId];
+          if (targetWs) {
+            const nextMap: Record<string, OrgWorkspaceData> = {
+              ...latestLocalOrgWorkspacesRef.current,
+              [currentWsId]: {
+                ...targetWs,
+                transactions: recoveredForWorkspace,
+              },
+            };
+            latestLocalOrgWorkspacesRef.current = nextMap;
+            setLocalOrgWorkspaces(nextMap);
+            void saveOrgWorkspaces(activeWorkspaceRef.current, nextMap);
+          }
+          setLastCloudBackupExists(Boolean(cloudBackup || recoveredForWorkspace.length > 0));
+        }
       }
 
       await fetchCloudBackupHistory(uid, { forceServer: true })
@@ -3175,9 +3668,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         errorMessage: formatted,
       };
     } finally {
+      isEmergencyRecoveryActiveRef.current = false;
       setIsCloudSyncing(false);
     }
-  }, [applyCloudBackupLocally, createPreRestoreSnapshot]);
+  }, [applyCloudBackupLocally, createPreRestoreSnapshot, orgRefs]);
 
   const restoreFromBackupHistoryEntry = useCallback(
     async (backupId: string): Promise<boolean> => {
@@ -4617,7 +5111,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               submittedByName: data.submittedByName || actor.name,
               deletedAt: null,
             }
-          : {}),
+          : {
+              workspaceId: 'personal',
+              deletedAt: null,
+            }),
         id: `tx-${now}-${Math.random().toString(36).slice(2, 6)}`,
         createdAt: now,
         updatedAt: now,
@@ -4666,6 +5163,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setPersonalTransactions(nextTx);
         setPersonalWallets(updatedWallets);
         savePersonalState({ transactions: nextTx, wallets: updatedWallets, settings: nextSettings });
+        syncWorkspaceTxWriteImmediately('personal', newTx, true);
       }
 
       return newTx;
@@ -4688,6 +5186,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       personalWallets,
       personalTransactions,
       savePersonalState,
+      syncWorkspaceTxWriteImmediately,
     ]
   );
 
@@ -4722,7 +5221,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               submittedByName: data.submittedByName || actor.name,
               deletedAt: null,
             }
-          : {}),
+          : {
+              workspaceId: 'personal',
+              deletedAt: null,
+            }),
         id: `csv-${baseNow}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
         createdAt: baseNow - idx,
         updatedAt: baseNow - idx,
@@ -4808,6 +5310,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         wallets: updatedWallets,
         ...(uniqueNewPersonalCats.length > 0 ? { categories: nextCategories } : {}),
       });
+      syncWorkspaceTxsBatchImmediately('personal', newTxs);
       return newTxs.length;
     },
     [
@@ -4825,6 +5328,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       applyDeltasToWallets,
       personalTransactions,
       savePersonalState,
+      syncWorkspaceTxsBatchImmediately,
     ]
   );
 
@@ -4937,11 +5441,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         personalWallets,
         settings.customExchangeRates
       );
+      const taggedMergedTx: Transaction = { ...mergedTx, workspaceId: 'personal' };
 
-      const nextTx = personalTransactions.map((t) => (t.id === id ? mergedTx : t));
+      const nextTx = personalTransactions.map((t) => (t.id === id ? taggedMergedTx : t));
       setPersonalTransactions(nextTx);
       setPersonalWallets(updatedWallets);
       savePersonalState({ transactions: nextTx, wallets: updatedWallets });
+      syncWorkspaceTxWriteImmediately('personal', taggedMergedTx, false);
     },
     [
       transactions,
@@ -4960,6 +5466,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       personalWallets,
       personalTransactions,
       savePersonalState,
+      syncWorkspaceTxWriteImmediately,
     ]
   );
 
@@ -5086,6 +5593,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setPersonalTransactions(nextTx);
       setPersonalWallets(updatedWallets);
       savePersonalState({ transactions: nextTx, wallets: updatedWallets });
+      syncWorkspaceTxDeleteImmediately('personal', [id]);
 
       setUndoAction({
         id: `undo-${Date.now()}`,
@@ -5094,6 +5602,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setPersonalTransactions(prevTx);
           setPersonalWallets(prevWallets);
           savePersonalState({ transactions: prevTx, wallets: prevWallets });
+          syncWorkspaceTxWriteImmediately('personal', { ...oldTx, workspaceId: 'personal' }, true);
         },
       });
     },
@@ -5113,6 +5622,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       personalWallets,
       personalTransactions,
       savePersonalState,
+      syncWorkspaceTxDeleteImmediately,
+      syncWorkspaceTxWriteImmediately,
       t,
     ]
   );
@@ -5191,6 +5702,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
 
     const toDeleteSet = new Set(selectedTransactionIds);
+    const deletedPersonalTxs = personalTransactions.filter((t) => toDeleteSet.has(t.id));
     let updatedWallets = [...personalWallets];
     for (const id of selectedTransactionIds) {
       const oldTx = personalTransactions.find((t) => t.id === id);
@@ -5205,6 +5717,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setPersonalWallets(updatedWallets);
     setSelectedTransactionIds([]);
     savePersonalState({ transactions: nextTx, wallets: updatedWallets });
+    syncWorkspaceTxDeleteImmediately(
+      'personal',
+      deletedPersonalTxs.map((t) => t.id)
+    );
 
     setUndoAction({
       id: `undo-multi-${Date.now()}`,
@@ -5213,6 +5729,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setPersonalTransactions(previousTx);
         setPersonalWallets(previousWallets);
         savePersonalState({ transactions: previousTx, wallets: previousWallets });
+        syncWorkspaceTxsBatchImmediately('personal', deletedPersonalTxs);
       },
     });
   }, [
@@ -5232,6 +5749,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     personalWallets,
     personalTransactions,
     savePersonalState,
+    syncWorkspaceTxDeleteImmediately,
+    syncWorkspaceTxsBatchImmediately,
     t,
   ]);
 
@@ -5408,9 +5927,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       const previousTx = [...personalTransactions];
       const previousWallets = [...personalWallets];
+      const changedMovedTxs = nextTx.filter((tx, i) => tx !== personalTransactions[i]);
+      const revertedMovedTxs = previousTx.filter((tx, i) => nextTx[i] !== tx);
       setPersonalTransactions(nextTx);
       setPersonalWallets(updatedWallets);
       savePersonalState({ transactions: nextTx, wallets: updatedWallets });
+      syncWorkspaceTxsBatchImmediately('personal', changedMovedTxs);
       setUndoAction({
         id: `undo-move-${Date.now()}`,
         message:
@@ -5421,6 +5943,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setPersonalTransactions(previousTx);
           setPersonalWallets(previousWallets);
           savePersonalState({ transactions: previousTx, wallets: previousWallets });
+          syncWorkspaceTxsBatchImmediately('personal', revertedMovedTxs);
         },
       });
     },
@@ -5440,6 +5963,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       personalWallets,
       personalTransactions,
       savePersonalState,
+      syncWorkspaceTxsBatchImmediately,
     ]
   );
 
@@ -5489,9 +6013,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const nextTx = personalTransactions.map((t) =>
         toChangeSet.has(t.id) ? { ...t, categoryId: newCategoryId, updatedAt: Date.now() } : t
       );
+      const changedTxs = nextTx.filter((tx) => toChangeSet.has(tx.id));
       setSelectedTransactionIds([]);
       setPersonalTransactions(nextTx);
       savePersonalState({ transactions: nextTx });
+      syncWorkspaceTxsBatchImmediately('personal', changedTxs);
     },
     [
       selectedTransactionIds,
@@ -5504,6 +6030,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       mutateLocalOrgWorkspace,
       personalTransactions,
       savePersonalState,
+      syncWorkspaceTxsBatchImmediately,
     ]
   );
 
@@ -5845,6 +6372,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             : w
         );
 
+      const touchedMigratedTx = migratedTx.filter((tx, i) => tx !== personalTransactions[i]);
       setPersonalWallets(nextWallets);
       setPersonalTransactions(migratedTx);
       setPersonalBudgets(migratedBudgets);
@@ -5857,6 +6385,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         templates: migratedTemplates,
         goals: migratedGoals,
       });
+      syncWorkspaceTxsBatchImmediately('personal', touchedMigratedTx);
     },
     [
       wallets,
@@ -5875,6 +6404,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       personalGoals,
       personalWallets,
       savePersonalState,
+      syncWorkspaceTxsBatchImmediately,
     ]
   );
 
@@ -6085,9 +6615,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return;
       }
 
-      const migratedTx = personalTransactions.map((tx) =>
-        tx.categoryId === categoryId ? { ...tx, categoryId: targetCategoryId, updatedAt: Date.now() } : tx
-      );
+      const touchedMigratedCategoryTx: Transaction[] = [];
+      const migratedTx = personalTransactions.map((tx) => {
+        if (tx.categoryId !== categoryId) return tx;
+        const nextItem: Transaction = {
+          ...tx,
+          categoryId: targetCategoryId,
+          workspaceId: 'personal',
+          updatedAt: Date.now(),
+        };
+        touchedMigratedCategoryTx.push(nextItem);
+        return nextItem;
+      });
       const migratedBudgets = personalBudgets.map((b) =>
         b.categoryId === categoryId ? { ...b, categoryId: targetCategoryId } : b
       );
@@ -6106,6 +6645,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         budgets: migratedBudgets,
         templates: migratedTemplates,
       });
+      if (touchedMigratedCategoryTx.length > 0) {
+        syncWorkspaceTxsBatchImmediately('personal', touchedMigratedCategoryTx);
+      }
     },
     [
       isOrgWorkspace,
@@ -6120,6 +6662,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       personalTemplates,
       personalCategories,
       savePersonalState,
+      syncWorkspaceTxsBatchImmediately,
     ]
   );
 
@@ -6628,6 +7171,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               personalCategories.find((c) => c.type === 'expense' || c.type === 'both')?.id ||
               'cat-other',
             walletId: linkedW.id,
+            workspaceId: 'personal',
+            deletedAt: null,
             notes:
               settings.language === 'en'
                 ? `Money Circle installment #${monthNumber} — ${target.name}`
@@ -6651,6 +7196,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             transactions: nextTx,
             wallets: nextWallets,
           });
+          syncWorkspaceTxWriteImmediately('personal', newTx, true);
           return;
         }
       }
@@ -6666,6 +7212,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       settings.customExchangeRates,
       settings.language,
       savePersonalState,
+      syncWorkspaceTxWriteImmediately,
     ]
   );
 
@@ -6700,6 +7247,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               personalCategories.find((c) => c.type === 'income' || c.type === 'both')?.id ||
               'cat-other',
             walletId: linkedW.id,
+            workspaceId: 'personal',
+            deletedAt: null,
             notes:
               settings.language === 'en'
                 ? `Money Circle payout received — ${target.name}`
@@ -6723,6 +7272,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             transactions: nextTx,
             wallets: nextWallets,
           });
+          syncWorkspaceTxWriteImmediately('personal', newTx, true);
           return;
         }
       }
@@ -6738,6 +7288,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       settings.customExchangeRates,
       settings.language,
       savePersonalState,
+      syncWorkspaceTxWriteImmediately,
     ]
   );
 

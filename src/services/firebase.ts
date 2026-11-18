@@ -60,8 +60,17 @@ import {
   OrgWorkspaceData,
   PlanTier,
   ProPlanCode,
+  Transaction,
   VerifiedProEntitlement,
 } from '../types';
+import {
+  buildWorkspaceTransactionRecord,
+  extractTransactionFromWorkspaceDoc,
+  getWorkspaceTransactionDocPath,
+  getWorkspaceTransactionsPath,
+  normalizeValidFirestoreId,
+  normalizeWorkspaceId,
+} from './workspaceSync';
 import { shouldFallbackAccountDeleteError } from './accountDeletion';
 import { resolveSafeCloudBackupWrite } from './backupMerge';
 import { sortTransactionsDescending } from './orgTransactionQuery';
@@ -1239,6 +1248,201 @@ export async function fetchCloudBackup(
     console.error('[fetchCloudBackup] Firestore error:', error);
     handleFirestoreError(error, OperationType.GET, metaPath);
   }
+}
+
+// =============================================================================
+// Unified Workspace Transactions Path:
+// users/{uid}/workspaces/{workspaceId}/transactions/{txId}
+// =============================================================================
+
+export async function upsertWorkspaceTransactionCloud(
+  uid: string,
+  workspaceId: string,
+  tx: Transaction,
+  options?: { isNew?: boolean }
+): Promise<void> {
+  if (!uid || !auth.currentUser || auth.currentUser.uid !== uid) return;
+  const safeWs = normalizeWorkspaceId(workspaceId);
+  const { record } = buildWorkspaceTransactionRecord(uid, safeWs, tx);
+  const docPath = getWorkspaceTransactionDocPath(uid, safeWs, record.id);
+  const ref = doc(db, 'users', uid, 'workspaces', safeWs, 'transactions', record.id);
+
+  try {
+    await setDoc(
+      ref,
+      {
+        ...record,
+        ...(options?.isNew ? { createdAt: serverTimestamp() } : {}),
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, docPath);
+  }
+}
+
+export async function batchUpsertWorkspaceTransactionsCloud(
+  uid: string,
+  workspaceId: string,
+  txs: Transaction[]
+): Promise<number> {
+  if (!uid || !auth.currentUser || auth.currentUser.uid !== uid || txs.length === 0) return 0;
+  const safeWs = normalizeWorkspaceId(workspaceId);
+  const colPath = getWorkspaceTransactionsPath(uid, safeWs);
+
+  try {
+    let batch = writeBatch(db);
+    let ops = 0;
+    let written = 0;
+
+    for (const tx of txs) {
+      if (!tx || !tx.id) continue;
+      const { record } = buildWorkspaceTransactionRecord(uid, safeWs, tx);
+      const ref = doc(db, 'users', uid, 'workspaces', safeWs, 'transactions', record.id);
+      batch.set(
+        ref,
+        {
+          ...record,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+      ops += 1;
+      written += 1;
+      if (ops >= 400) {
+        await batch.commit();
+        batch = writeBatch(db);
+        ops = 0;
+      }
+    }
+
+    if (ops > 0) {
+      await batch.commit();
+    }
+    return written;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, colPath);
+  }
+}
+
+export async function deleteWorkspaceTransactionCloud(
+  uid: string,
+  workspaceId: string,
+  txId: string
+): Promise<void> {
+  if (!uid || !auth.currentUser || auth.currentUser.uid !== uid || !txId) return;
+  const safeWs = normalizeWorkspaceId(workspaceId);
+  const safeId = normalizeValidFirestoreId(txId, 'tx');
+  const docPath = getWorkspaceTransactionDocPath(uid, safeWs, safeId);
+  const ref = doc(db, 'users', uid, 'workspaces', safeWs, 'transactions', safeId);
+
+  try {
+    await deleteDoc(ref);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, docPath);
+  }
+}
+
+export async function batchDeleteWorkspaceTransactionsCloud(
+  uid: string,
+  workspaceId: string,
+  txIds: string[]
+): Promise<void> {
+  if (!uid || !auth.currentUser || auth.currentUser.uid !== uid || txIds.length === 0) return;
+  const safeWs = normalizeWorkspaceId(workspaceId);
+  const colPath = getWorkspaceTransactionsPath(uid, safeWs);
+
+  try {
+    let batch = writeBatch(db);
+    let ops = 0;
+
+    for (const rawId of txIds) {
+      if (!rawId) continue;
+      const safeId = normalizeValidFirestoreId(rawId, 'tx');
+      batch.delete(doc(db, 'users', uid, 'workspaces', safeWs, 'transactions', safeId));
+      ops += 1;
+      if (ops >= 400) {
+        await batch.commit();
+        batch = writeBatch(db);
+        ops = 0;
+      }
+    }
+
+    if (ops > 0) {
+      await batch.commit();
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, colPath);
+  }
+}
+
+export async function fetchWorkspaceTransactionsCloud(
+  uid: string,
+  workspaceId: string,
+  options?: { forceServer?: boolean }
+): Promise<Transaction[]> {
+  const safeWs = normalizeWorkspaceId(workspaceId);
+  const colPath = getWorkspaceTransactionsPath(uid, safeWs);
+  const forceServer = Boolean(options?.forceServer);
+
+  try {
+    // Un-ordered collection read + client-side descending sort prevents index errors
+    const snap = await getDocsServerFirst(
+      collection(db, 'users', uid, 'workspaces', safeWs, 'transactions'),
+      forceServer
+    );
+    const items: Transaction[] = [];
+    for (const d of snap.docs) {
+      const tx = extractTransactionFromWorkspaceDoc(d.data() as Record<string, unknown>, safeWs);
+      if (tx) items.push(tx);
+    }
+    return sortTransactionsDescending(items);
+  } catch (error) {
+    console.error(`[fetchWorkspaceTransactionsCloud] (${colPath}) error:`, error);
+    handleFirestoreError(error, OperationType.LIST, colPath);
+  }
+}
+
+export function subscribeWorkspaceTransactions(
+  uid: string,
+  workspaceId: string,
+  onData: (
+    transactions: Transaction[],
+    meta: { fromCache: boolean; hasPendingWrites: boolean; pendingIds: string[] }
+  ) => void,
+  onError?: (error: Error) => void
+): () => void {
+  const safeWs = normalizeWorkspaceId(workspaceId);
+  const colPath = getWorkspaceTransactionsPath(uid, safeWs);
+  const colRef = collection(db, 'users', uid, 'workspaces', safeWs, 'transactions');
+
+  return onSnapshot(
+    colRef,
+    { includeMetadataChanges: true },
+    (snap) => {
+      const items: Transaction[] = [];
+      const pendingIds: string[] = [];
+      for (const d of snap.docs) {
+        if (d.metadata.hasPendingWrites) {
+          pendingIds.push(d.id);
+        }
+        const tx = extractTransactionFromWorkspaceDoc(d.data() as Record<string, unknown>, safeWs);
+        if (tx) items.push(tx);
+      }
+      onData(sortTransactionsDescending(items), {
+        fromCache: snap.metadata.fromCache,
+        hasPendingWrites: snap.metadata.hasPendingWrites,
+        pendingIds,
+      });
+    },
+    (error) => {
+      console.error(`[subscribeWorkspaceTransactions] (${colPath}) error:`, error);
+      const errObj =
+        error instanceof Error ? error : new Error(String(error || 'Workspace sync failed'));
+      onError?.(errObj);
+    }
+  );
 }
 
 async function getRequiredIdToken(): Promise<string> {

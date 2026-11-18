@@ -474,6 +474,43 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "orgId", "action", "entityType", "entityId", "actorUid", "actorName", "summary", "timestamp", "createdAt"]
+    },
+    "WorkspaceContainer": {
+      "title": "WorkspaceContainer",
+      "description": "User-scoped workspace container ('personal' or local organization workspace)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "uid", "updatedAt"]
+    },
+    "WorkspaceTransactionRecord": {
+      "title": "WorkspaceTransactionRecord",
+      "description": "Unified real-time cloud transaction record scoped strictly to users/{userId}/workspaces/{workspaceId}/transactions/{txId}",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "date": { "type": "string", "maxLength": 16 },
+        "time": { "type": "string", "maxLength": 16 },
+        "type": { "type": "string", "enum": ["expense", "income", "transfer"] },
+        "amount": { "type": "number" },
+        "amountMinor": { "type": "number" },
+        "currency": { "type": "string", "maxLength": 8 },
+        "walletId": { "type": "string", "maxLength": 128 },
+        "toWalletId": { "type": "string", "maxLength": 128 },
+        "categoryId": { "type": "string", "maxLength": 128 },
+        "createdAtMs": { "type": "number" },
+        "updatedAtMs": { "type": "number" },
+        "deletedAt": { "type": "number" },
+        "payload": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "uid", "workspaceId", "date", "type", "amount", "currency", "walletId", "categoryId", "payload", "updatedAt"]
     }
   },
   "firestore": {
@@ -500,6 +537,14 @@
     "/users/{userId}/scanQuotas/{monthKey}": {
       "schema": { "$ref": "#/entities/ScanQuota" },
       "description": "Server-only monthly AI receipt scan quota counter for personal mode"
+    },
+    "/users/{userId}/workspaces/{workspaceId}": {
+      "schema": { "$ref": "#/entities/WorkspaceContainer" },
+      "description": "User workspace namespace ('personal' or user-owned workspaceId)"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/transactions/{txId}": {
+      "schema": { "$ref": "#/entities/WorkspaceTransactionRecord" },
+      "description": "Unified real-time cloud transactions for personal and user-owned workspaces"
     },
     "/activationCodes/{codeHash}": {
       "schema": { "$ref": "#/entities/ActivationCode" },
