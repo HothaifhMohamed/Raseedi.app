@@ -71,6 +71,12 @@ export function canPerformAutomaticCloudWrite(params: {
   );
 }
 
+export type WorkspaceSyncPriority =
+  | 'noop'
+  | 'pull_cloud_to_local'
+  | 'push_local_to_cloud'
+  | 'merge';
+
 export function shouldBlockEmptyCloudOverwrite(params: {
   localTransactionsCount: number;
   cloudBackupTransactionsCount?: number;
@@ -85,6 +91,57 @@ export function shouldBlockEmptyCloudOverwrite(params: {
     Number(params.unifiedCloudTransactionsCount || 0) > 0 ||
     Boolean(params.hasUnifiedCloudTransactions);
   return hasCloudData;
+}
+
+/**
+ * Bidirectional Zero-Data Overwrite Guard:
+ * Never allow an empty array (0 transactions) fetched from Cloud to wipe
+ * non-empty local transactions in the browser unless allowEmptyOverwrite is explicitly true.
+ */
+export function shouldBlockEmptyLocalOverwriteFromCloud(params: {
+  cloudTransactionsCount: number;
+  localActiveTransactionsCount: number;
+  allowEmptyOverwrite?: boolean;
+}): boolean {
+  if (params.allowEmptyOverwrite) return false;
+  return params.cloudTransactionsCount === 0 && params.localActiveTransactionsCount > 0;
+}
+
+/**
+ * Resolves sync direction between Cloud and Browser for a given workspace.
+ * If Cloud has 0 active transactions while Local has > 0, ALWAYS prioritizes uploading Local -> Cloud.
+ */
+export function resolveWorkspaceSyncPriority(params: {
+  cloudTransactions: Transaction[];
+  localTransactions: Transaction[];
+  activeWorkspaceId?: string | null;
+  locallyDeletedIds?: Iterable<string>;
+  allowEmptyOverwrite?: boolean;
+}): WorkspaceSyncPriority {
+  const activeWs = normalizeWorkspaceId(params.activeWorkspaceId);
+  const deletedIds = new Set(params.locallyDeletedIds || []);
+
+  const cloudActiveCount = params.cloudTransactions.filter(
+    (tx) => isActiveWorkspaceTransaction(tx, activeWs) && !deletedIds.has(tx.id)
+  ).length;
+  const localActiveCount = params.localTransactions.filter(
+    (tx) => isActiveWorkspaceTransaction(tx, activeWs) && !deletedIds.has(tx.id)
+  ).length;
+
+  if (cloudActiveCount === 0 && localActiveCount === 0) return 'noop';
+  if (
+    shouldBlockEmptyLocalOverwriteFromCloud({
+      cloudTransactionsCount: cloudActiveCount,
+      localActiveTransactionsCount: localActiveCount,
+      allowEmptyOverwrite: params.allowEmptyOverwrite,
+    })
+  ) {
+    return 'push_local_to_cloud';
+  }
+  if (localActiveCount === 0 && cloudActiveCount > 0) {
+    return 'pull_cloud_to_local';
+  }
+  return 'merge';
 }
 
 export function tagTransactionsWithWorkspace<T extends Partial<Transaction>>(
@@ -347,10 +404,12 @@ export function reconcileWorkspaceTransactions(
     hasServerSnapshot?: boolean;
     pendingLocalIds?: Iterable<string>;
     locallyDeletedIds?: Iterable<string>;
+    allowEmptyOverwrite?: boolean;
   }
 ): Transaction[] {
   const activeWs = normalizeWorkspaceId(options.activeWorkspaceId);
   const hasServerSnapshot = Boolean(options.hasServerSnapshot);
+  const allowEmptyOverwrite = Boolean(options.allowEmptyOverwrite);
   const pendingIds = new Set(options.pendingLocalIds || []);
   const deletedIds = new Set(options.locallyDeletedIds || []);
 
@@ -362,15 +421,25 @@ export function reconcileWorkspaceTransactions(
     byId.set(tx.id, { ...tx, workspaceId: activeWs });
   }
 
+  // Zero-Data Overwrite Guard:
+  // If Cloud returned 0 active transactions for this workspace, NEVER let an empty cloud array
+  // overwrite non-empty local transactions (e.g. right after Refresh or offline Excel import).
+  const cloudIsEmptyForWorkspace = byId.size === 0;
+
   for (const localTx of localCacheTxs) {
     if (!isActiveWorkspaceTransaction(localTx, activeWs)) continue;
     if (deletedIds.has(localTx.id)) continue;
 
-    // Cloud-First rule: once the server snapshot is authoritative, only retain local-only
+    // Cloud-First rule: once the non-empty server snapshot is authoritative, only retain local-only
     // transactions that are currently pending upload (created/modified while offline).
+    // When Cloud is empty (0 tx), ALWAYS preserve local active transactions unless allowEmptyOverwrite is true.
     const existingCloud = byId.get(localTx.id);
     if (!existingCloud) {
-      if (!hasServerSnapshot || pendingIds.has(localTx.id)) {
+      if (
+        !hasServerSnapshot ||
+        pendingIds.has(localTx.id) ||
+        (cloudIsEmptyForWorkspace && !allowEmptyOverwrite)
+      ) {
         byId.set(localTx.id, { ...localTx, workspaceId: activeWs });
       }
     } else if (

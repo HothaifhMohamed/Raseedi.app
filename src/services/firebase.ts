@@ -68,9 +68,13 @@ import {
   extractTransactionFromWorkspaceDoc,
   getWorkspaceTransactionDocPath,
   getWorkspaceTransactionsPath,
+  isActiveWorkspaceTransaction,
   normalizeValidFirestoreId,
   normalizeWorkspaceId,
+  reconcileWorkspaceTransactions,
+  resolveWorkspaceSyncPriority,
   shouldBlockEmptyCloudOverwrite,
+  WorkspaceSyncPriority,
 } from './workspaceSync';
 import { shouldFallbackAccountDeleteError } from './accountDeletion';
 import { resolveSafeCloudBackupWrite } from './backupMerge';
@@ -913,29 +917,37 @@ export async function saveCloudBackup(
     const cloudTotalTx = Number(existingMetaData?.totalTransactions || 0);
     const localTxCount = (effectiveData.transactions || []).length;
 
-    // Zero-Data Overwrite Protection: check both legacy meta AND unified workspace collections
-    // so an empty local cache can NEVER wipe non-empty cloud transactions.
+    // Zero-Data Overwrite Protection: check both legacy meta AND unified personal collection
+    // so an empty local personal cache can NEVER wipe non-empty personal cloud transactions.
     if (localTxCount === 0 && !options?.allowEmptyOverwrite) {
-      const activeWsToCheck = normalizeWorkspaceId(effectiveData.activeWorkspace || 'personal');
-      const [hasPersonalUnified, hasActiveUnified] = await Promise.all([
-        hasWorkspaceTransactionsInCloud(uid, 'personal').catch(() => false),
-        activeWsToCheck !== 'personal'
-          ? hasWorkspaceTransactionsInCloud(uid, activeWsToCheck).catch(() => false)
-          : Promise.resolve(false),
-      ]);
-      const hasAnyUnified = hasPersonalUnified || hasActiveUnified;
+      const hasPersonalUnified = await hasWorkspaceTransactionsInCloud(uid, 'personal').catch(
+        () => false
+      );
+      const localOrgTxCount = Object.values(effectiveData.orgWorkspaces || {}).reduce(
+        (sum, ws) => sum + (ws?.transactions || []).filter((tx) => !tx?.deletedAt).length,
+        0
+      );
 
-      if (
+      // Only treat personal localTxCount === 0 as blocking when we're not specifically syncing non-empty org data
+      // over an empty personal account that also has zero personal cloud transactions.
+      const shouldGuardPersonal =
         shouldBlockEmptyCloudOverwrite({
           localTransactionsCount: localTxCount,
           cloudBackupTransactionsCount: cloudTotalTx,
-          hasUnifiedCloudTransactions: hasAnyUnified,
+          hasUnifiedCloudTransactions: hasPersonalUnified,
           allowEmptyOverwrite: Boolean(options?.allowEmptyOverwrite),
-        })
-      ) {
+        }) ||
+        (localOrgTxCount === 0 &&
+          shouldBlockEmptyCloudOverwrite({
+            localTransactionsCount: localTxCount,
+            cloudBackupTransactionsCount: cloudTotalTx,
+            hasUnifiedCloudTransactions: hasPersonalUnified,
+          }));
+
+      if (shouldGuardPersonal) {
         const source = options?.source === 'manual' ? 'manual' : 'auto';
         const [existingCloudData, unifiedPersonalTxs] =
-          source === 'manual'
+          source === 'manual' || localOrgTxCount > 0
             ? await Promise.all([
                 fetchCloudBackup(uid).catch(() => null),
                 hasPersonalUnified
@@ -974,10 +986,10 @@ export async function saveCloudBackup(
         const decision = resolveSafeCloudBackupWrite({
           localData: effectiveData,
           existingCloud: {
-            totalTransactions: Math.max(cloudTotalTx, unifiedPersonalTxs.length, hasAnyUnified ? 1 : 0),
+            totalTransactions: Math.max(cloudTotalTx, unifiedPersonalTxs.length, hasPersonalUnified ? 1 : 0),
             data: preservedCloudPayload,
           },
-          source,
+          source: localOrgTxCount > 0 ? 'manual' : source,
           allowEmptyOverwrite: Boolean(options?.allowEmptyOverwrite),
         });
 
@@ -1096,50 +1108,53 @@ export async function saveCloudBackup(
 
     let batch = writeBatch(db);
     let ops = 0;
+    let batchBytes = 0;
     const flushBatch = async () => {
       if (ops > 0) {
         await batch.commit();
         batch = writeBatch(db);
         ops = 0;
+        batchBytes = 0;
       }
     };
 
-    batch.set(
-      metaRef,
-      {
-        ...metaFields,
-        ...(!metaExists ? { createdAt: serverTimestamp() } : {}),
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
+    const metaWritePayload = {
+      ...metaFields,
+      ...(!metaExists ? { createdAt: serverTimestamp() } : {}),
+      updatedAt: serverTimestamp(),
+    };
+    batch.set(metaRef, metaWritePayload, { merge: true });
     ops += 1;
+    batchBytes += getUtf8JsonByteLength(metaFields);
 
     for (let idx = 0; idx < chunks.length; idx++) {
+      const cleanedChunkTxs = stripUndefinedDeep(chunks[idx]);
+      const approxChunkBytes = getUtf8JsonByteLength(cleanedChunkTxs);
+      if (ops > 0 && (ops >= 10 || batchBytes + approxChunkBytes > 3_500_000)) {
+        await flushBatch();
+      }
       const chunkRef = doc(db, 'users', uid, 'backupChunks', `chunk_${idx}`);
       batch.set(
         chunkRef,
         {
           uid,
           chunkIndex: idx,
-          transactions: stripUndefinedDeep(chunks[idx]),
+          transactions: cleanedChunkTxs,
           updatedAt: serverTimestamp(),
         },
         { merge: true }
       );
       ops += 1;
-      if (ops >= 400) {
-        await flushBatch();
-      }
+      batchBytes += approxChunkBytes;
     }
 
     for (let idx = chunks.length; idx < previousChunkCount; idx++) {
+      if (ops >= 250) {
+        await flushBatch();
+      }
       const staleRef = doc(db, 'users', uid, 'backupChunks', `chunk_${idx}`);
       batch.delete(staleRef);
       ops += 1;
-      if (ops >= 400) {
-        await flushBatch();
-      }
     }
 
     await flushBatch();
@@ -1452,7 +1467,10 @@ export async function batchUpsertWorkspaceTransactionsCloud(
   workspaceId: string,
   txs: Transaction[]
 ): Promise<number> {
-  if (!uid || !auth.currentUser || auth.currentUser.uid !== uid || txs.length === 0) return 0;
+  if (txs.length === 0) return 0;
+  if (!uid || !auth.currentUser || auth.currentUser.uid !== uid) {
+    throw new Error('AUTH_REQUIRED_FOR_CLOUD_SYNC');
+  }
   const safeWs = normalizeWorkspaceId(workspaceId);
   const colPath = getWorkspaceTransactionsPath(uid, safeWs);
 
@@ -1475,7 +1493,7 @@ export async function batchUpsertWorkspaceTransactionsCloud(
       );
       ops += 1;
       written += 1;
-      if (ops >= 400) {
+      if (ops >= 250) {
         await batch.commit();
         batch = writeBatch(db);
         ops = 0;
@@ -1567,6 +1585,71 @@ export async function fetchWorkspaceTransactionsCloud(
     console.error(`[fetchWorkspaceTransactionsCloud] (${colPath}) error:`, error);
     handleFirestoreError(error, OperationType.LIST, colPath);
   }
+}
+
+/**
+ * Bidirectional Zero-Data Overwrite Guard coordinator:
+ * Never permits an empty cloud result (0 transactions) to wipe local transactions.
+ * When Cloud has 0 transactions while Browser has local transactions, prioritizes
+ * uploading Local -> Cloud immediately.
+ */
+export async function syncWorkspaceTransactionsWithZeroGuard(params: {
+  uid: string;
+  workspaceId: string;
+  cloudTransactions: Transaction[];
+  localTransactions: Transaction[];
+  locallyDeletedIds?: Iterable<string>;
+  allowEmptyOverwrite?: boolean;
+}): Promise<{
+  priority: WorkspaceSyncPriority;
+  transactions: Transaction[];
+  pushedCount: number;
+}> {
+  const safeWs = normalizeWorkspaceId(params.workspaceId);
+  const deletedSet = new Set(params.locallyDeletedIds || []);
+  const priority = resolveWorkspaceSyncPriority({
+    cloudTransactions: params.cloudTransactions,
+    localTransactions: params.localTransactions,
+    activeWorkspaceId: safeWs,
+    locallyDeletedIds: deletedSet,
+    allowEmptyOverwrite: params.allowEmptyOverwrite,
+  });
+
+  if (priority === 'push_local_to_cloud') {
+    const activeLocal = params.localTransactions.filter(
+      (tx) => isActiveWorkspaceTransaction(tx, safeWs) && !deletedSet.has(tx.id)
+    );
+    let pushedCount = 0;
+    if (
+      activeLocal.length > 0 &&
+      params.uid &&
+      auth.currentUser?.uid === params.uid &&
+      (typeof navigator === 'undefined' || navigator.onLine)
+    ) {
+      pushedCount = await batchUpsertWorkspaceTransactionsCloud(params.uid, safeWs, activeLocal);
+    }
+    return {
+      priority,
+      transactions: sortTransactionsDescending(activeLocal),
+      pushedCount,
+    };
+  }
+
+  const reconciled = reconcileWorkspaceTransactions(
+    params.cloudTransactions,
+    params.localTransactions,
+    {
+      activeWorkspaceId: safeWs,
+      hasServerSnapshot: true,
+      locallyDeletedIds: deletedSet,
+      allowEmptyOverwrite: params.allowEmptyOverwrite,
+    }
+  );
+  return {
+    priority,
+    transactions: reconciled,
+    pushedCount: 0,
+  };
 }
 
 export async function hasWorkspaceTransactionsInCloud(

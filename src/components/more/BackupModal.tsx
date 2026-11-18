@@ -35,7 +35,7 @@ import {
   parseImportFileBuffer,
   autoDetectCsvMapping,
   mapCsvRowsToTransactions,
-  buildImportedTransactionsPayload,
+  commitImportedTransactionsWithCloudSync,
   CsvColumnMapping,
 } from '../../services/csvImport';
 import { formatLocalDate } from '../../services/calculations';
@@ -80,13 +80,19 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     syncToCloudNow,
     restoreFromCloudNow,
     updateSettings,
-    importTransactionsBatch,
+    importSpreadsheetBatchLocally,
+    syncWorkspaceBackupNow,
     t,
     isRTL,
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<'json' | 'csv'>('json');
-  const [message, setMessage] = useState<{ text: string; error?: boolean } | null>(null);
+  const [message, setMessage] = useState<{
+    text: string;
+    error?: boolean;
+    localOnly?: boolean;
+    retryWorkspaceId?: string;
+  } | null>(null);
 
   // JSON encryption / decryption state
   const [useEncryption, setUseEncryption] = useState(false);
@@ -488,29 +494,39 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
   const handleConfirmCsvImport = async () => {
     if (rowsReadyToImport.length === 0 || isImportingCsv) return;
 
-    const { transactions: batch, taggedNewWallets } = buildImportedTransactionsPayload({
-      rows: rowsReadyToImport,
-      existingWallets: wallets,
-      newWallets: readyWalletsToCreate,
-      fallbackWalletId: targetWalletId,
-      defaultCurrency: importDefaultCurrency,
-      workspaceId: activeWorkspace,
-    });
-
     const skippedInvalid = csvPreviewResult.invalidCount;
     const skippedDup = skipDuplicates ? csvPreviewResult.duplicateCount : 0;
-    const createdWalletsCount = taggedNewWallets.length;
+    const createdWalletsCount = readyWalletsToCreate.length;
     const createdCatsCount = readyCategoriesToCreate.length;
 
     setIsImportingCsv(true);
     setMessage(null);
     try {
-      const imported = await importTransactionsBatch(batch, {
-        newWallets: taggedNewWallets,
+      const result = await commitImportedTransactionsWithCloudSync({
+        rows: rowsReadyToImport,
+        existingWallets: wallets,
+        newWallets: readyWalletsToCreate,
         newCategories: readyCategoriesToCreate,
+        fallbackWalletId: targetWalletId,
+        defaultCurrency: importDefaultCurrency,
+        workspaceId: activeWorkspace,
+        persistImportLocally: async ({ transactions: txs, newWallets, newCategories }) => {
+          const localRes = await importSpreadsheetBatchLocally(txs, {
+            newWallets,
+            newCategories,
+          });
+          return {
+            importedCount: localRes.importedCount,
+            createdTransactions: localRes.createdTransactions,
+          };
+        },
+        syncToCloud: user?.isLoggedIn
+          ? async ({ workspaceId: wsId, createdTransactions }) =>
+              syncWorkspaceBackupNow(wsId, createdTransactions)
+          : undefined,
       });
 
-      if (imported <= 0) {
+      if (result.importedCount <= 0) {
         setMessage({
           text: isRTL
             ? 'لم يتم استيراد أي معاملات جديدة (تحقق من الصلاحيات أو الفترة المحاسبية).'
@@ -519,8 +535,6 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
         });
         return;
       }
-
-      resetImportPreviewState();
 
       const extraPartsAr: string[] = [];
       const extraPartsEn: string[] = [];
@@ -536,26 +550,77 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
         extraPartsAr.push(`تخطي ${skippedInvalid} غير صالح و ${skippedDup} مكرر`);
         extraPartsEn.push(`skipped ${skippedInvalid} invalid, ${skippedDup} duplicate`);
       }
+      const extrasAr = extraPartsAr.length > 0 ? ` (${extraPartsAr.join(' • ')})` : '';
+      const extrasEn = extraPartsEn.length > 0 ? ` (${extraPartsEn.join(' • ')})` : '';
 
+      // Clear preview table once persisted locally so duplicate clicks can't re-insert the same file
+      resetImportPreviewState();
+
+      if (result.cloudSynced) {
+        setMessage({
+          text: isRTL
+            ? `تم استيراد ورفع ${result.importedCount} معاملة إلى السحابة بنجاح!${extrasAr}`
+            : `Successfully imported and synced ${result.importedCount} transactions to Cloud!${extrasEn}`,
+        });
+        return;
+      }
+
+      if (user?.isLoggedIn) {
+        setMessage({
+          text: isRTL
+            ? `تم حفظ ${result.importedCount} معاملة محلياً على هذا الجهاز فقط، لكن تعذر الرفع إلى السحابة (${
+                result.error || 'خطأ في الاتصال'
+              }).${extrasAr}`
+            : `Saved ${result.importedCount} transactions locally ONLY, but Cloud upload failed (${
+                result.error || 'connection error'
+              }).${extrasEn}`,
+          error: true,
+          localOnly: true,
+          retryWorkspaceId: result.workspaceId,
+        });
+        return;
+      }
+
+      // Guest mode: strictly report local-only save (never falsely claim Cloud backup)
       setMessage({
         text: isRTL
-          ? `تم استيراد وحفظ ${imported} معاملة بنجاح!${
-              extraPartsAr.length > 0 ? ` (${extraPartsAr.join(' • ')})` : ''
-            }`
-          : `Successfully imported and saved ${imported} transactions!${
-              extraPartsEn.length > 0 ? ` (${extraPartsEn.join(' • ')})` : ''
-            }`,
+          ? `تم حفظ ${result.importedCount} معاملة محلياً على المتصفح فقط (غير مرفوعة للسحابة لعدم تسجيل الدخول).${extrasAr}`
+          : `Saved ${result.importedCount} transactions locally only (not backed up to Cloud — sign in with Google to sync).${extrasEn}`,
+        localOnly: true,
       });
     } catch (err) {
       const errDetail = err instanceof Error ? err.message : '';
       setMessage({
         text: isRTL
-          ? `تعذر إتمام حفظ المعاملات المستوردة${errDetail ? `: ${errDetail}` : '. يرجى المحاولة مرة أخرى.'}`
-          : `Failed to save imported transactions${errDetail ? `: ${errDetail}` : '. Please try again.'}`,
+          ? `تعذر إتمام استيراد المعاملات${errDetail ? `: ${errDetail}` : '. يرجى المحاولة مرة أخرى.'}`
+          : `Failed to complete spreadsheet import${errDetail ? `: ${errDetail}` : '. Please try again.'}`,
         error: true,
       });
     } finally {
       setIsImportingCsv(false);
+    }
+  };
+
+  const handleRetryImportCloudSync = async () => {
+    if (!message?.retryWorkspaceId || isCloudSyncing) return;
+    const res = await syncWorkspaceBackupNow(message.retryWorkspaceId);
+    if (res.ok) {
+      setMessage({
+        text: isRTL
+          ? 'تم رفع جميع المعاملات المستوردة إلى السحابة وتأكيد الحفظ بنجاح!'
+          : 'All imported transactions have now been synced to Cloud successfully!',
+      });
+    } else {
+      setMessage((prev) =>
+        prev
+          ? {
+              ...prev,
+              text: isRTL
+                ? `ما زال الرفع السحابي متعذراً (${res.error || 'تحقق من الإنترنت'}). المعاملات محفوظة محلياً ولن تُحذف.`
+                : `Cloud upload still failed (${res.error || 'check internet'}). Local transactions remain safe.`,
+            }
+          : null
+      );
     }
   };
 
@@ -630,19 +695,43 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
         {message && (
           <div
             data-testid="backup-status-message"
-            data-status={message.error ? 'error' : 'success'}
-            className={`p-3 rounded-lg text-xs flex items-center gap-2 shrink-0 ${
+            data-status={message.error ? 'error' : message.localOnly ? 'local-only' : 'success'}
+            className={`p-3 rounded-lg text-xs flex flex-col gap-2 shrink-0 ${
               message.error
                 ? 'bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/20 text-[var(--color-expense)]'
+                : message.localOnly
+                ? 'bg-[var(--color-warning)]/12 border border-[var(--color-warning)]/30 text-[var(--color-warning-text)]'
                 : 'bg-[var(--color-income)]/10 border border-[var(--color-income)]/20 text-[var(--color-income)]'
             }`}
           >
-            {message.error ? (
-              <AlertCircle className="w-4 h-4 shrink-0" />
-            ) : (
-              <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <div className="flex items-start gap-2">
+              {message.error || message.localOnly ? (
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              ) : (
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+              )}
+              <span>{message.text}</span>
+            </div>
+            {message.retryWorkspaceId && (
+              <button
+                type="button"
+                data-testid="retry-cloud-sync-import"
+                disabled={isCloudSyncing}
+                onClick={handleRetryImportCloudSync}
+                className="self-start px-3 py-1.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-[11px] font-bold flex items-center gap-1.5 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isCloudSyncing ? 'animate-spin' : ''}`} />
+                <span>
+                  {isCloudSyncing
+                    ? isRTL
+                      ? 'جاري الرفع...'
+                      : 'Uploading...'
+                    : isRTL
+                    ? 'إعادة المحاولة لرفع السحابة الآن'
+                    : 'Retry Cloud Upload Now'}
+                </span>
+              </button>
             )}
-            <span>{message.text}</span>
           </div>
         )}
 

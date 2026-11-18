@@ -25,6 +25,7 @@ import {
   autoDetectCsvMapping,
   mapCsvRowsToTransactions,
   buildImportedTransactionsPayload,
+  commitImportedTransactionsWithCloudSync,
   normalizeCsvDate,
   parseArabicDate,
   parseImportAmount,
@@ -785,6 +786,122 @@ test('security hardening: escapeCsvCell blocks formula injection & rowsToRecordO
     'INVALID_TRANSACTION_ITEM'
   );
 });
+
+test('commitImportedTransactionsWithCloudSync: uploads 3,100 rows to cloud immediately and never reports cloudSynced on failure', async () => {
+  const wallet: Wallet = {
+    id: 'w-main',
+    name: 'الخزينة',
+    currency: 'EGP',
+    initialBalance: 0,
+    balance: 0,
+    color: '#0f172a',
+    icon: 'Wallet',
+    isArchived: false,
+    order: 0,
+    workspaceId: 'org-company-9',
+  };
+  const headers = ['التاريخ', 'المبلغ', 'المحفظة', 'الملاحظات'];
+  const mapping = autoDetectCsvMapping(headers);
+  const rows = Array.from({ length: 3100 }, (_, i) => [
+    '2026-11-12',
+    i % 2 === 0 ? '-125.5' : '400',
+    'الخزينة',
+    `بند ${i + 1}`,
+  ]);
+
+  const parsed = mapCsvRowsToTransactions({
+    rows,
+    mapping,
+    categories: DEFAULT_CATEGORIES,
+    existingTransactions: [],
+    wallets: [wallet],
+    defaultCurrency: 'EGP',
+    workspaceId: 'org-company-9',
+  });
+  assert.equal(parsed.validCount, 3100);
+
+  let syncedWorkspaceId = '';
+  let syncedCount = 0;
+  const okResult = await commitImportedTransactionsWithCloudSync({
+    rows: parsed.previewRows,
+    existingWallets: [wallet],
+    newWallets: [],
+    newCategories: [],
+    defaultCurrency: 'EGP',
+    workspaceId: 'org-company-9',
+    persistImportLocally: async ({ transactions, workspaceId }) => ({
+      importedCount: transactions.length,
+      createdTransactions: transactions.map((tx, idx) => ({
+        ...tx,
+        id: `tx-batch-${idx}`,
+        workspaceId,
+        createdAt: 1700000000000 + idx,
+        updatedAt: 1700000000000 + idx,
+      })),
+    }),
+    syncToCloud: async ({ workspaceId, createdTransactions }) => {
+      syncedWorkspaceId = workspaceId;
+      syncedCount = createdTransactions.length;
+      return { ok: true };
+    },
+  });
+
+  assert.equal(okResult.importedCount, 3100);
+  assert.equal(okResult.cloudSynced, true);
+  assert.equal(okResult.localOnly, false);
+  assert.equal(syncedWorkspaceId, 'org-company-9');
+  assert.equal(syncedCount, 3100);
+
+  // Cloud failure MUST NOT return cloudSynced: true
+  const failedCloud = await commitImportedTransactionsWithCloudSync({
+    rows: parsed.previewRows.slice(0, 5),
+    existingWallets: [wallet],
+    newWallets: [],
+    newCategories: [],
+    defaultCurrency: 'EGP',
+    workspaceId: 'personal',
+    persistImportLocally: async ({ transactions, workspaceId }) => ({
+      importedCount: transactions.length,
+      createdTransactions: transactions.map((tx, idx) => ({
+        ...tx,
+        id: `tx-fail-${idx}`,
+        workspaceId,
+        createdAt: 1,
+        updatedAt: 1,
+      })),
+    }),
+    syncToCloud: async () => ({ ok: false, error: 'Firestore unavailable' }),
+  });
+
+  assert.equal(failedCloud.importedCount, 5);
+  assert.equal(failedCloud.cloudSynced, false);
+  assert.equal(failedCloud.localOnly, true);
+  assert.equal(failedCloud.error, 'Firestore unavailable');
+
+  // Guest / unauthenticated (no syncToCloud) => strictly localOnly: true, cloudSynced: false
+  const guestResult = await commitImportedTransactionsWithCloudSync({
+    rows: parsed.previewRows.slice(0, 2),
+    existingWallets: [wallet],
+    newWallets: [],
+    newCategories: [],
+    defaultCurrency: 'EGP',
+    workspaceId: 'personal',
+    persistImportLocally: async ({ transactions, workspaceId }) => ({
+      importedCount: transactions.length,
+      createdTransactions: transactions.map((tx, idx) => ({
+        ...tx,
+        id: `tx-guest-${idx}`,
+        workspaceId,
+        createdAt: 1,
+        updatedAt: 1,
+      })),
+    }),
+  });
+  assert.equal(guestResult.importedCount, 2);
+  assert.equal(guestResult.cloudSynced, false);
+  assert.equal(guestResult.localOnly, true);
+});
+
 
 
 

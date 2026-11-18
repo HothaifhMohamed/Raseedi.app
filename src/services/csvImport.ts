@@ -1260,3 +1260,111 @@ export function buildImportedTransactionsPayload(params: {
     taggedNewWallets,
   };
 }
+
+export interface CommitSpreadsheetImportResult {
+  importedCount: number;
+  workspaceId: string;
+  cloudSynced: boolean;
+  localOnly: boolean;
+  error?: string;
+}
+
+/**
+ * Persists imported spreadsheet transactions locally tagged with the active workspaceId
+ * and immediately triggers Cloud Sync (Firestore unified path + backup) in the same flow.
+ * Never reports `cloudSynced: true` unless Firestore confirmation succeeds.
+ */
+export async function commitImportedTransactionsWithCloudSync(params: {
+  rows: CsvPreviewRow[];
+  existingWallets: Wallet[];
+  newWallets: Wallet[];
+  newCategories: Category[];
+  fallbackWalletId?: string;
+  defaultCurrency: string;
+  workspaceId?: string;
+  persistImportLocally: (payload: {
+    transactions: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>[];
+    newWallets: Wallet[];
+    newCategories: Category[];
+    workspaceId: string;
+  }) => Promise<{ importedCount: number; createdTransactions: Transaction[] }>;
+  syncToCloud?: (payload: {
+    workspaceId: string;
+    createdTransactions: Transaction[];
+  }) => Promise<{ ok: boolean; error?: string }>;
+}): Promise<CommitSpreadsheetImportResult> {
+  const safeWorkspaceId = normalizeWorkspaceId(params.workspaceId);
+  const { transactions, taggedNewWallets } = buildImportedTransactionsPayload({
+    rows: params.rows,
+    existingWallets: params.existingWallets,
+    newWallets: params.newWallets,
+    fallbackWalletId: params.fallbackWalletId,
+    defaultCurrency: params.defaultCurrency,
+    workspaceId: safeWorkspaceId,
+  });
+
+  if (transactions.length === 0) {
+    return {
+      importedCount: 0,
+      workspaceId: safeWorkspaceId,
+      cloudSynced: false,
+      localOnly: false,
+    };
+  }
+
+  const localRes = await params.persistImportLocally({
+    transactions,
+    newWallets: taggedNewWallets,
+    newCategories: params.newCategories,
+    workspaceId: safeWorkspaceId,
+  });
+
+  if (localRes.importedCount <= 0) {
+    return {
+      importedCount: 0,
+      workspaceId: safeWorkspaceId,
+      cloudSynced: false,
+      localOnly: false,
+    };
+  }
+
+  if (!params.syncToCloud) {
+    return {
+      importedCount: localRes.importedCount,
+      workspaceId: safeWorkspaceId,
+      cloudSynced: false,
+      localOnly: true,
+    };
+  }
+
+  try {
+    const cloudRes = await params.syncToCloud({
+      workspaceId: safeWorkspaceId,
+      createdTransactions: localRes.createdTransactions,
+    });
+    if (!cloudRes.ok) {
+      return {
+        importedCount: localRes.importedCount,
+        workspaceId: safeWorkspaceId,
+        cloudSynced: false,
+        localOnly: true,
+        error: cloudRes.error,
+      };
+    }
+    return {
+      importedCount: localRes.importedCount,
+      workspaceId: safeWorkspaceId,
+      cloudSynced: true,
+      localOnly: false,
+    };
+  } catch (err) {
+    return {
+      importedCount: localRes.importedCount,
+      workspaceId: safeWorkspaceId,
+      cloudSynced: false,
+      localOnly: true,
+      error: err instanceof Error ? err.message : String(err || 'Cloud sync failed'),
+    };
+  }
+}
+

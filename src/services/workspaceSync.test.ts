@@ -11,7 +11,9 @@ import {
   isTransactionInWorkspace,
   normalizeWorkspaceId,
   reconcileWorkspaceTransactions,
+  resolveWorkspaceSyncPriority,
   shouldBlockEmptyCloudOverwrite,
+  shouldBlockEmptyLocalOverwriteFromCloud,
   tagTransactionsWithWorkspace,
   tagWalletsWithWorkspace,
 } from './workspaceSync';
@@ -215,5 +217,80 @@ describe('workspaceSync unified path and workspace isolation', () => {
     ];
     const taggedWallets = tagWalletsWithWorkspace(wallets, '');
     assert.equal(taggedWallets[0].workspaceId, 'personal');
+  });
+
+  it('enforces bidirectional zero-data overwrite guard and preserves local data after refresh when cloud returns 0 transactions', () => {
+    assert.equal(
+      shouldBlockEmptyLocalOverwriteFromCloud({
+        cloudTransactionsCount: 0,
+        localActiveTransactionsCount: 3200,
+      }),
+      true
+    );
+    assert.equal(
+      shouldBlockEmptyLocalOverwriteFromCloud({
+        cloudTransactionsCount: 0,
+        localActiveTransactionsCount: 3200,
+        allowEmptyOverwrite: true,
+      }),
+      false
+    );
+
+    const localImported = [
+      makeTx({ id: 'tx-excel-1', workspaceId: 'personal', date: '2026-11-01' }),
+      makeTx({ id: 'tx-excel-2', workspaceId: 'personal', date: '2026-11-02' }),
+    ];
+
+    // Empty cloud + non-empty local => ALWAYS prioritize Local -> Cloud upload
+    assert.equal(
+      resolveWorkspaceSyncPriority({
+        cloudTransactions: [],
+        localTransactions: localImported,
+        activeWorkspaceId: 'personal',
+      }),
+      'push_local_to_cloud'
+    );
+
+    // Non-empty cloud + empty local => pull cloud to local
+    assert.equal(
+      resolveWorkspaceSyncPriority({
+        cloudTransactions: localImported,
+        localTransactions: [],
+        activeWorkspaceId: 'personal',
+      }),
+      'pull_cloud_to_local'
+    );
+
+    // Both empty => noop
+    assert.equal(
+      resolveWorkspaceSyncPriority({
+        cloudTransactions: [],
+        localTransactions: [],
+        activeWorkspaceId: 'personal',
+      }),
+      'noop'
+    );
+
+    // Both non-empty => merge
+    assert.equal(
+      resolveWorkspaceSyncPriority({
+        cloudTransactions: [localImported[0]],
+        localTransactions: [localImported[1]],
+        activeWorkspaceId: 'personal',
+      }),
+      'merge'
+    );
+
+    // Post-Refresh: pendingLocalIds is empty, server returns [] -> local Excel rows MUST NOT be wiped
+    const preserved = reconcileWorkspaceTransactions([], localImported, {
+      activeWorkspaceId: 'personal',
+      hasServerSnapshot: true,
+      pendingLocalIds: [],
+      locallyDeletedIds: ['tx-excel-1'],
+    });
+    assert.deepEqual(
+      preserved.map((t) => t.id),
+      ['tx-excel-2']
+    );
   });
 });
