@@ -193,7 +193,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
   const canWriteTx = !isOrgWorkspace || (!isOrgReadOnly && canOrgWrite);
 
   return (
-    <div className="px-4 pt-3 pb-28 space-y-4" dir={isRTL ? 'rtl' : 'ltr'} data-testid="home-smart-dashboard">
+    <div className="flex-1 min-h-0 overflow-y-auto px-4 pt-3 pb-28 space-y-4" dir={isRTL ? 'rtl' : 'ltr'} data-testid="home-smart-dashboard">
       {/* Contextual Backup Nudge */}
       {showBackupNudge && (
         <div className="p-3 rounded-2xl bg-[var(--color-gold-soft)] border border-[var(--color-gold)]/35 flex items-center justify-between gap-2 text-xs transition-all duration-300">

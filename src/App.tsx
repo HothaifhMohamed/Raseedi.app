@@ -8,6 +8,12 @@ import { ArrowLeft, ArrowRight } from 'lucide-react';
 import { AppProvider, useApp } from './context/AppContext';
 import { useModalBackHandler } from './hooks/useModalBackHandler';
 import { resetScrollToTop } from './hooks/useScrollToTop';
+import {
+  clearScrollPositionInStorage,
+  getBrowserSessionStorage,
+  TRANSACTIONS_LIMIT_STORAGE_KEY,
+  TRANSACTIONS_SCROLL_STORAGE_KEY,
+} from './services/scrollRestoration';
 import { Navbar } from './components/Navbar';
 import { BottomNav } from './components/BottomNav';
 import { SplashScreen } from './components/SplashScreen';
@@ -186,11 +192,11 @@ const MainLayout: React.FC = () => {
 
   return (
     <div
-      className="min-h-screen bg-[var(--color-bg)] text-[var(--color-ink)] flex flex-col font-sans transition-colors duration-300 overflow-x-clip"
+      className="h-dvh overflow-hidden bg-[var(--color-bg)] text-[var(--color-ink)] flex flex-col font-sans transition-colors duration-300"
       dir={isRTL ? 'rtl' : 'ltr'}
     >
       {/* Responsive container: mobile-first 375-430px, scales smoothly on tablet & desktop */}
-      <div className="w-full max-w-lg md:max-w-2xl lg:max-w-4xl mx-auto min-h-screen flex flex-col bg-[var(--color-bg)] md:border-x md:border-[var(--color-line)]/70 shadow-xs relative min-w-0 overflow-x-clip">
+      <div className="w-full max-w-lg md:max-w-2xl lg:max-w-4xl mx-auto h-full min-h-0 flex flex-col bg-[var(--color-bg)] md:border-x md:border-[var(--color-line)]/70 shadow-xs relative min-w-0 overflow-hidden">
         {/* Offline indicator banner */}
         <OfflineIndicator />
 
@@ -201,23 +207,31 @@ const MainLayout: React.FC = () => {
         <PWAInstallPrompt />
 
         {/* Dynamic View Router */}
-        <main className="flex-1 flex flex-col min-w-0">
+        <main className="flex-1 min-h-0 flex flex-col min-w-0 overflow-hidden">
           {/* HOME VIEW: Smart Dashboard by default, or clean sub-views without legacy tabs */}
           {activeNav === 'home' && (
-            <div className="flex flex-col flex-1">
+            <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
               {homeTab === 'transactions' && !showFullLedger ? (
                 <HomeDashboard
-                  onOpenFullLedger={() => setShowFullLedger(true)}
+                  onOpenFullLedger={() => {
+                    const storage = getBrowserSessionStorage();
+                    clearScrollPositionInStorage(storage, TRANSACTIONS_SCROLL_STORAGE_KEY);
+                    clearScrollPositionInStorage(storage, TRANSACTIONS_LIMIT_STORAGE_KEY);
+                    setShowFullLedger(true);
+                  }}
                   onOpenStatistics={() => setHomeTab('statistics')}
                   onOpenTemplates={() => setHomeTab('templates')}
                 />
               ) : (
                 <>
-                  <div className="px-4 pt-3 pb-1 flex items-center justify-between gap-2">
+                  <div className="px-4 pt-3 pb-1 flex items-center justify-between gap-2 shrink-0">
                     <button
                       type="button"
                       data-testid="home-subview-back-btn"
                       onClick={() => {
+                        const storage = getBrowserSessionStorage();
+                        clearScrollPositionInStorage(storage, TRANSACTIONS_SCROLL_STORAGE_KEY);
+                        clearScrollPositionInStorage(storage, TRANSACTIONS_LIMIT_STORAGE_KEY);
                         setShowFullLedger(false);
                         setHomeTab('transactions');
                       }}
@@ -263,7 +277,14 @@ const MainLayout: React.FC = () => {
         </main>
 
         {/* Global Floating Glassmorphic Bottom Navigation */}
-        <BottomNav onHomeReset={() => setShowFullLedger(false)} />
+        <BottomNav
+          onHomeReset={() => {
+            const storage = getBrowserSessionStorage();
+            clearScrollPositionInStorage(storage, TRANSACTIONS_SCROLL_STORAGE_KEY);
+            clearScrollPositionInStorage(storage, TRANSACTIONS_LIMIT_STORAGE_KEY);
+            setShowFullLedger(false);
+          }}
+        />
 
         {/* Add/Edit Transaction Modal */}
         <TransactionModal

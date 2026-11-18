@@ -192,7 +192,7 @@ export const StatisticsTab: React.FC = () => {
   }, [transactions, settings.mainCurrency, settings.customExchangeRates, settings.ratesUpdatedAtMs, settings.firstDayOfMonth]);
 
   return (
-    <div className="flex flex-col flex-1 px-4 py-3 pb-24 space-y-4">
+    <div className="flex flex-col flex-1 min-h-0 overflow-y-auto px-4 py-3 pb-24 space-y-4">
       {/* Date Range Selector Bar */}
       <div className="flex items-center justify-between p-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl">
         {[

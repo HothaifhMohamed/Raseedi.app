@@ -6,14 +6,13 @@ import {
   collection,
   doc,
   getDocs,
+  getDocsFromServer,
   limit,
   onSnapshot,
   orderBy,
   query,
   QueryDocumentSnapshot,
   serverTimestamp,
-  startAfter,
-  where,
   writeBatch,
   DocumentData,
   Timestamp,
@@ -586,24 +585,13 @@ export function subscribeActiveOrganization(
   };
 }
 
-export async function loadMoreOrgTransactions(
-  orgId: string,
-  cursor: QueryDocumentSnapshot<DocumentData>,
-  pageSize = 200
-): Promise<{
+export async function forceFetchOrgTransactionsFromServer(orgId: string): Promise<{
   active: Transaction[];
   trash: Transaction[];
-  hasMore: boolean;
-  lastCursor: QueryDocumentSnapshot<DocumentData> | null;
 }> {
   try {
-    const q = query(
-      collection(db, 'organizations', orgId, 'transactions'),
-      orderBy('date', 'desc'),
-      startAfter(cursor),
-      limit(pageSize)
-    );
-    const snap = await getDocs(q);
+    // Force direct Cloud Firestore fetch (ignoring local cache, no orderBy/limit)
+    const snap = await getDocsFromServer(collection(db, 'organizations', orgId, 'transactions'));
     const active: Transaction[] = [];
     const trash: Transaction[] = [];
     for (const d of snap.docs) {
@@ -615,31 +603,46 @@ export async function loadMoreOrgTransactions(
     return {
       active: sortTransactionsDescending(active),
       trash: sortTransactionsDescending(trash),
-      hasMore: snap.docs.length >= pageSize,
+    };
+  } catch (err) {
+    console.error('[Force Cloud Fetch Error] forceFetchOrgTransactionsFromServer failed:', err);
+    throw err;
+  }
+}
+
+export async function loadMoreOrgTransactions(
+  orgId: string,
+  _cursor: QueryDocumentSnapshot<DocumentData>,
+  _pageSize = 200
+): Promise<{
+  active: Transaction[];
+  trash: Transaction[];
+  hasMore: boolean;
+  lastCursor: QueryDocumentSnapshot<DocumentData> | null;
+}> {
+  try {
+    // Query without orderBy/limit to guarantee zero missing-index failures or omitted records
+    let snap;
+    try {
+      snap = await getDocsFromServer(collection(db, 'organizations', orgId, 'transactions'));
+    } catch {
+      snap = await getDocs(collection(db, 'organizations', orgId, 'transactions'));
+    }
+    const active: Transaction[] = [];
+    const trash: Transaction[] = [];
+    for (const d of snap.docs) {
+      const parsed = parseTransactionDoc(d.data() as Record<string, unknown>);
+      if (!parsed) continue;
+      if (parsed.deletedAt) trash.push(parsed);
+      else active.push(parsed);
+    }
+    return {
+      active: sortTransactionsDescending(active),
+      trash: sortTransactionsDescending(trash),
+      hasMore: false,
       lastCursor: snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null,
     };
   } catch (err) {
-    if (isFirestoreMissingIndexError(err)) {
-      console.error(
-        '[Firestore Missing Index Error] loadMoreOrgTransactions requires an index; falling back to full un-ordered fetch:',
-        err
-      );
-      const fallbackSnap = await getDocs(collection(db, 'organizations', orgId, 'transactions'));
-      const active: Transaction[] = [];
-      const trash: Transaction[] = [];
-      for (const d of fallbackSnap.docs) {
-        const parsed = parseTransactionDoc(d.data() as Record<string, unknown>);
-        if (!parsed) continue;
-        if (parsed.deletedAt) trash.push(parsed);
-        else active.push(parsed);
-      }
-      return {
-        active: sortTransactionsDescending(active),
-        trash: sortTransactionsDescending(trash),
-        hasMore: false,
-        lastCursor: fallbackSnap.docs.length > 0 ? fallbackSnap.docs[fallbackSnap.docs.length - 1] : null,
-      };
-    }
     console.error('[Firestore Query Error] loadMoreOrgTransactions failed:', err);
     throw err;
   }
@@ -651,33 +654,20 @@ export async function fetchOrgTransactionsInRange(
   endDate: string
 ): Promise<Transaction[]> {
   try {
-    const q = query(
-      collection(db, 'organizations', orgId, 'transactions'),
-      where('date', '>=', startDate),
-      where('date', '<=', endDate),
-      orderBy('date', 'desc')
-    );
-    const snap = await getDocs(q);
-    const out: Transaction[] = [];
+    // Fetch un-ordered collection from server (offline fallback to cache) and filter/sort client-side
+    let snap;
+    try {
+      snap = await getDocsFromServer(collection(db, 'organizations', orgId, 'transactions'));
+    } catch {
+      snap = await getDocs(collection(db, 'organizations', orgId, 'transactions'));
+    }
+    const allActive: Transaction[] = [];
     for (const d of snap.docs) {
       const parsed = parseTransactionDoc(d.data() as Record<string, unknown>);
-      if (parsed && !parsed.deletedAt) out.push(parsed);
+      if (parsed && !parsed.deletedAt) allActive.push(parsed);
     }
-    return sortTransactionsDescending(out);
+    return filterTransactionsByDateRange(allActive, startDate, endDate);
   } catch (err) {
-    if (isFirestoreMissingIndexError(err)) {
-      console.error(
-        '[Firestore Missing Index Error] fetchOrgTransactionsInRange requires an index; falling back to un-ordered fetch + local filter:',
-        err
-      );
-      const fallbackSnap = await getDocs(collection(db, 'organizations', orgId, 'transactions'));
-      const allActive: Transaction[] = [];
-      for (const d of fallbackSnap.docs) {
-        const parsed = parseTransactionDoc(d.data() as Record<string, unknown>);
-        if (parsed && !parsed.deletedAt) allActive.push(parsed);
-      }
-      return filterTransactionsByDateRange(allActive, startDate, endDate);
-    }
     console.error('[Firestore Query Error] fetchOrgTransactionsInRange failed:', err);
     throw err;
   }

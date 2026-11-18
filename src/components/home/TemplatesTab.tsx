@@ -116,7 +116,7 @@ export const TemplatesTab: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col flex-1 px-4 py-3 pb-24 space-y-3" dir={isRTL ? 'rtl' : 'ltr'}>
+    <div className="flex flex-col flex-1 min-h-0 overflow-y-auto px-4 py-3 pb-24 space-y-3" dir={isRTL ? 'rtl' : 'ltr'}>
       {/* 1-Tap Success Alert */}
       {appliedNotification && (
         <div className="p-3 bg-[var(--color-income)]/10 border border-[var(--color-income)]/30 text-[var(--color-income)] rounded-xl flex items-center gap-2 text-xs font-semibold animate-in fade-in duration-150">

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useRef } from 'react';
 import {
   Plus,
   EyeOff,
@@ -26,6 +26,8 @@ import { PinLockModal } from '../common/PinLockModal';
 import { hashPin } from '../../services/security';
 import { MoneyText } from '../common/MoneyText';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
+import { useScrollRestoration } from '../../hooks/useScrollRestoration';
+import { WALLETS_SCROLL_STORAGE_KEY } from '../../services/scrollRestoration';
 import { HairlineEmptyState } from '../common/HairlineVisuals';
 import { shouldShowPersonalUpgradeUi } from '../../services/subscriptionHelpers';
 import { WalletQuickActionsSheet } from './WalletQuickActionsSheet';
@@ -67,6 +69,13 @@ export const WalletsPage: React.FC = () => {
     t,
     isRTL,
   } = useApp();
+
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const { handleScroll, saveScrollNow } = useScrollRestoration(
+    containerRef,
+    WALLETS_SCROLL_STORAGE_KEY,
+    { restoreOnMount: true }
+  );
 
   const [hiddenBalances, setHiddenBalances] = useState<Record<string, boolean>>({});
   const [isReorderMode, setIsReorderMode] = useState(false);
@@ -223,16 +232,17 @@ export const WalletsPage: React.FC = () => {
     setIsEditModalOpen(false);
   };
 
-  // Tap wallet card logic: check if locked first, else open quick actions menu
+  // Tap wallet card logic: save scroll position, check if locked first, else open quick actions menu
   const handleCardClick = useCallback(
     (w: Wallet) => {
+      saveScrollNow();
       if (w.isLocked && w.pin && lockedWalletIds.includes(w.id)) {
         setPinModalTargetWallet(w);
       } else {
         setQuickActionWalletId(w.id);
       }
     },
-    [lockedWalletIds]
+    [lockedWalletIds, saveScrollNow]
   );
 
   const handleRequestDeleteWallet = (w: Wallet) => {
@@ -270,7 +280,13 @@ export const WalletsPage: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col flex-1 px-4 py-3 pb-24 space-y-4" dir={isRTL ? 'rtl' : 'ltr'}>
+    <div
+      ref={containerRef}
+      onScroll={handleScroll}
+      data-testid="wallets-page-scroll-container"
+      className="flex flex-col flex-1 min-h-0 overflow-y-auto px-4 py-3 pb-24 space-y-4"
+      dir={isRTL ? 'rtl' : 'ltr'}
+    >
       {/* Total Balance Header Card */}
       <div className="p-4 sm:p-5 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-line)] shadow-xs flex items-center justify-between gap-3 transition-all duration-300">
         <div>
@@ -399,7 +415,6 @@ export const WalletsPage: React.FC = () => {
       ) : (
       <div
         className="grid grid-cols-1 md:grid-cols-2 gap-3.5"
-        style={{ contentVisibility: 'auto' }}
         data-testid="wallets-card-list"
       >
         {sortedWallets.map((w, index) => {
@@ -750,6 +765,7 @@ export const WalletsPage: React.FC = () => {
           openTransactionWithPreset(preset);
         }}
         onViewTransactions={(w) => {
+          saveScrollNow();
           setQuickActionWalletId(null);
           setActiveWalletId(w.id);
         }}

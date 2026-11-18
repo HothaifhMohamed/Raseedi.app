@@ -152,7 +152,7 @@ export const BudgetPage: React.FC = () => {
   ]);
 
   return (
-    <div className="flex flex-col flex-1 px-4 py-3 pb-24 space-y-4" dir={isRTL ? 'rtl' : 'ltr'}>
+    <div className="flex flex-col flex-1 min-h-0 overflow-y-auto px-4 py-3 pb-24 space-y-4" dir={isRTL ? 'rtl' : 'ltr'}>
       {/* Header */}
       <div className="p-4 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] flex items-center justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">

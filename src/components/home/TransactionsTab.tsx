@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect, useRef } from 'react';
+import React, { useMemo, useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import {
   Search,
   CheckSquare,
@@ -25,7 +25,16 @@ import { ConfirmationModal } from '../common/ConfirmationModal';
 import { AdBanner } from '../common/AdBanner';
 import { MoneyText } from '../common/MoneyText';
 import { HairlineEmptyState } from '../common/HairlineVisuals';
-import { resetScrollToTop, useScrollToTop } from '../../hooks/useScrollToTop';
+import { resetScrollToTop } from '../../hooks/useScrollToTop';
+import { useScrollRestoration } from '../../hooks/useScrollRestoration';
+import {
+  getBrowserSessionStorage,
+  parseSavedVisibleLimit,
+  readScrollPositionFromStorage,
+  saveScrollPositionToStorage,
+  TRANSACTIONS_LIMIT_STORAGE_KEY,
+  TRANSACTIONS_SCROLL_STORAGE_KEY,
+} from '../../services/scrollRestoration';
 
 export const TransactionsTab: React.FC = () => {
   const {
@@ -54,6 +63,7 @@ export const TransactionsTab: React.FC = () => {
     deleteTransaction,
     duplicateTransaction,
     setEditingTransaction,
+    isAddModalOpen,
     setIsAddModalOpen,
     setIsFilterOpen,
     t,
@@ -64,25 +74,82 @@ export const TransactionsTab: React.FC = () => {
   const [confirmDeleteSelected, setConfirmDeleteSelected] = useState(false);
   const [moveModalOpen, setMoveModalOpen] = useState(false);
   const [showCategoryModal, setShowCategoryModal] = useState(false);
-  const [visibleTxLimit, setVisibleTxLimit] = useState(60);
+  const [visibleTxLimit, setVisibleTxLimit] = useState(() =>
+    parseSavedVisibleLimit(
+      getBrowserSessionStorage()?.getItem(TRANSACTIONS_LIMIT_STORAGE_KEY),
+      60
+    )
+  );
   const [isLoadingMoreCloud, setIsLoadingMoreCloud] = useState(false);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const topRef = useRef<HTMLDivElement>(null);
+  const wasAddModalOpenRef = useRef(false);
+  const shouldRestoreAfterEditRef = useRef(false);
 
-  useScrollToTop(containerRef, [transactions]);
+  const { handleScroll, saveScrollNow, restoreScrollNow } = useScrollRestoration(
+    containerRef,
+    TRANSACTIONS_SCROLL_STORAGE_KEY,
+    { restoreOnMount: true }
+  );
+
+  // Open cleanly at the top only when no saved transactions scroll position exists
+  useLayoutEffect(() => {
+    const saved = readScrollPositionFromStorage(
+      getBrowserSessionStorage(),
+      TRANSACTIONS_SCROLL_STORAGE_KEY
+    );
+    if (saved <= 0) {
+      resetScrollToTop(containerRef.current);
+    }
+  }, []);
+
+  // Restore saved scroll position immediately after closing/saving Edit Transaction modal
+  useLayoutEffect(() => {
+    if (isAddModalOpen) {
+      wasAddModalOpenRef.current = true;
+      return;
+    }
+    if (wasAddModalOpenRef.current || shouldRestoreAfterEditRef.current) {
+      wasAddModalOpenRef.current = false;
+      restoreScrollNow();
+    }
+  }, [isAddModalOpen, transactions, restoreScrollNow]);
 
   useEffect(() => {
-    resetScrollToTop(containerRef.current);
-    const timer = window.setTimeout(() => {
-      if (containerRef.current) {
-        containerRef.current.scrollTop = 0;
+    if (isAddModalOpen || !shouldRestoreAfterEditRef.current) return;
+    restoreScrollNow();
+    const rafId =
+      typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function'
+        ? window.requestAnimationFrame(() => {
+            restoreScrollNow();
+            shouldRestoreAfterEditRef.current = false;
+          })
+        : null;
+    if (rafId === null) {
+      shouldRestoreAfterEditRef.current = false;
+    }
+    return () => {
+      if (rafId !== null && typeof window !== 'undefined') {
+        window.cancelAnimationFrame(rafId);
       }
-      topRef.current?.scrollIntoView({ behavior: 'instant', block: 'start' });
-      resetScrollToTop(containerRef.current);
-    }, 100);
-    return () => window.clearTimeout(timer);
-  }, [transactions]);
+    };
+  }, [isAddModalOpen, transactions, restoreScrollNow]);
+
+  const handleOpenEditTransaction = useCallback(
+    (tx: Transaction) => {
+      saveScrollNow();
+      saveScrollPositionToStorage(
+        getBrowserSessionStorage(),
+        TRANSACTIONS_LIMIT_STORAGE_KEY,
+        visibleTxLimit
+      );
+      shouldRestoreAfterEditRef.current = true;
+      setEditingTransaction(tx);
+      setIsAddModalOpen(true);
+    },
+    [saveScrollNow, visibleTxLimit, setEditingTransaction, setIsAddModalOpen]
+  );
 
   useEffect(() => {
     if (!activeMenuTxId) return;
@@ -196,7 +263,7 @@ export const TransactionsTab: React.FC = () => {
           setVisibleTxLimit((prev) => prev + 80);
         }
       },
-      { rootMargin: '200px' }
+      { root: containerRef.current, rootMargin: '200px' }
     );
     observer.observe(el);
     return () => observer.disconnect();
@@ -223,8 +290,9 @@ export const TransactionsTab: React.FC = () => {
   return (
     <div
       ref={containerRef}
+      onScroll={isAddModalOpen ? undefined : handleScroll}
       data-testid="transactions-tab-root"
-      className="flex flex-col flex-1 pb-28"
+      className="flex flex-col flex-1 min-h-0 overflow-y-auto pb-28"
       dir={isRTL ? 'rtl' : 'ltr'}
     >
       <div
@@ -486,8 +554,7 @@ export const TransactionsTab: React.FC = () => {
                         if (isMultiSelectActive) {
                           toggleSelectTransaction(tx.id);
                         } else if (canMutateTx) {
-                          setEditingTransaction(tx);
-                          setIsAddModalOpen(true);
+                          handleOpenEditTransaction(tx);
                         }
                       }}
                       className={`p-3.5 flex items-center justify-between gap-3 ${
@@ -678,8 +745,7 @@ export const TransactionsTab: React.FC = () => {
                                 <button
                                   onClick={() => {
                                     setActiveMenuTxId(null);
-                                    setEditingTransaction(tx);
-                                    setIsAddModalOpen(true);
+                                    handleOpenEditTransaction(tx);
                                   }}
                                   className="w-full px-3 py-2 flex items-center gap-2 hover:bg-[var(--color-bg)] text-[var(--color-ink)] min-h-[36px]"
                                 >

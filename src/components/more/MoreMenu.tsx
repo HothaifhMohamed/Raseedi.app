@@ -29,6 +29,10 @@ import {
   UploadCloud,
   KeyRound,
   LogIn,
+  CloudDownload,
+  RefreshCw,
+  AlertTriangle,
+  CheckCircle2,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ReportsModal } from './ReportsModal';
@@ -75,6 +79,10 @@ export const MoreMenu: React.FC = () => {
     setIsUpgradeModalOpen,
     setIsBackupOpen,
     setIsSettingsOpen,
+    emergencyCloudRecovery,
+    isCloudSyncing,
+    cloudDiagnosticsError,
+    clearCloudDiagnosticsError,
     user,
     signInWithGoogleAccount,
     isAdminUser,
@@ -88,6 +96,10 @@ export const MoreMenu: React.FC = () => {
   const [moneyCirclesOpen, setMoneyCirclesOpen] = useState(false);
   const [supportLegalTab, setSupportLegalTab] = useState<'support' | 'legal' | null>(null);
   const [activeSubModal, setActiveSubModal] = useState<string | null>(null);
+  const [emergencyStatus, setEmergencyStatus] = useState<{
+    text: string;
+    isError?: boolean;
+  } | null>(null);
 
   useModalBackHandler(reportsOpen, () => setReportsOpen(false), 'more-reports');
   useModalBackHandler(categoriesOpen, () => setCategoriesOpen(false), 'more-categories');
@@ -138,7 +150,7 @@ export const MoreMenu: React.FC = () => {
   const ArrowIcon = isRTL ? ChevronLeft : ChevronRight;
 
   return (
-    <div className="flex flex-col flex-1 min-w-0 w-full px-4 py-3 pb-24 space-y-4" dir={isRTL ? 'rtl' : 'ltr'}>
+    <div className="flex flex-col flex-1 min-h-0 overflow-y-auto min-w-0 w-full px-4 py-3 pb-24 space-y-4" dir={isRTL ? 'rtl' : 'ltr'}>
       {/* 0. WORKSPACE SWITCHER TRIGGER CARD (Opens Standalone Workspace Modal) */}
       <div className="relative" data-testid="more-workspace-switcher">
         <button
@@ -661,7 +673,108 @@ export const MoreMenu: React.FC = () => {
             </div>
             <ArrowIcon className="w-4 h-4 text-[var(--color-muted)]" />
           </button>
+
+          {/* Safe Recovery Mode: Force Cloud Sync */}
+          <button
+            type="button"
+            data-testid="more-emergency-recovery-btn"
+            disabled={isCloudSyncing}
+            onClick={async () => {
+              setEmergencyStatus(null);
+              const res = await emergencyCloudRecovery();
+              if (res.ok) {
+                const totalRecovered = res.recoveredPersonalCount + res.recoveredOrgCount;
+                setEmergencyStatus({
+                  text: isRTL
+                    ? totalRecovered > 0
+                      ? `تمت المزامنة السحابية الإجبارية واسترجاع ${totalRecovered} معاملة بنجاح من الخادم.`
+                      : 'اكتمل الفحص المباشر من الخادم، ولا توجد معاملات إضافية غير متزامنة.'
+                    : totalRecovered > 0
+                    ? `Force cloud recovery succeeded: ${totalRecovered} transactions restored from server.`
+                    : 'Direct server fetch completed with no additional remote transactions.',
+                  isError: false,
+                });
+              } else {
+                setEmergencyStatus({
+                  text:
+                    res.errorMessage ||
+                    (isRTL
+                      ? 'تعذرت المزامنة السحابية الإجبارية.'
+                      : 'Force cloud sync failed.'),
+                  isError: true,
+                });
+              }
+            }}
+            className="w-full p-3.5 flex items-center justify-between text-xs bg-[var(--color-accent)]/5 hover:bg-[var(--color-accent)]/10 transition-colors text-start min-h-[48px] disabled:opacity-60"
+          >
+            <div className="flex items-center gap-3">
+              {isCloudSyncing ? (
+                <RefreshCw className="w-5 h-5 text-[var(--color-accent)] shrink-0 animate-spin" />
+              ) : (
+                <CloudDownload className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
+              )}
+              <div>
+                <div className="font-bold text-[var(--color-accent)]">
+                  {isRTL
+                    ? 'مزامنة سحابية إجبارية (استرجاع البيانات)'
+                    : 'Force Cloud Sync (Recover Data)'}
+                </div>
+                <div className="text-[11px] text-[var(--color-muted)]">
+                  {isRTL
+                    ? 'مسح الكاش المحلي للمعاملات وسحب البيانات مباشرة من الخادم السحابي'
+                    : 'Clear local transaction cache and fetch directly from Cloud Firestore'}
+                </div>
+              </div>
+            </div>
+            <ArrowIcon className="w-4 h-4 text-[var(--color-accent)] shrink-0" />
+          </button>
         </div>
+
+        {(emergencyStatus || cloudDiagnosticsError) && (
+          <div
+            data-testid="more-cloud-diagnostics-banner"
+            className={`p-3 rounded-xl border text-xs space-y-1.5 ${
+              emergencyStatus?.isError || cloudDiagnosticsError
+                ? 'bg-[var(--color-expense)]/10 border-[var(--color-expense)]/35 text-[var(--color-expense)]'
+                : 'bg-[var(--color-income)]/10 border-[var(--color-income)]/35 text-[var(--color-income)]'
+            }`}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-start gap-2 min-w-0">
+                {emergencyStatus?.isError || cloudDiagnosticsError ? (
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                )}
+                <div className="space-y-1 min-w-0">
+                  <div className="font-bold">
+                    {emergencyStatus?.isError || cloudDiagnosticsError
+                      ? isRTL
+                        ? 'تشخيص خطأ السحابة (Firestore / Console)'
+                        : 'Cloud Diagnostics Error (Firestore / Console)'
+                      : isRTL
+                      ? 'وضع الاسترجاع الآمن'
+                      : 'Safe Recovery Mode'}
+                  </div>
+                  <p className="text-[11px] leading-relaxed break-words select-text">
+                    {cloudDiagnosticsError || emergencyStatus?.text}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-label={isRTL ? 'إغلاق الرسالة' : 'Dismiss message'}
+                onClick={() => {
+                  setEmergencyStatus(null);
+                  clearCloudDiagnosticsError();
+                }}
+                className="p-1 rounded-md hover:bg-black/10 shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* SECTION 4: SETTINGS (الإعدادات والتطبيق) */}

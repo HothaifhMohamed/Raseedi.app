@@ -98,7 +98,7 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
       resetScrollToTop(scrollContainerRef.current);
     }, 100);
     return () => window.clearTimeout(timer);
-  }, [walletId, walletTransactions]);
+  }, [walletId]);
 
   // Filtered list based on search and type
   const filteredTransactions = useMemo(() => {
@@ -176,7 +176,7 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
     <div
       ref={scrollContainerRef}
       data-testid="wallet-detail-scroll-container"
-      className="flex-1 flex flex-col pb-24 overflow-y-auto"
+      className="flex-1 min-h-0 flex flex-col pb-24 overflow-y-auto"
       dir={isRTL ? 'rtl' : 'ltr'}
     >
       <div

@@ -14,6 +14,9 @@ import {
   RefreshCw,
   RotateCcw,
   LogOut,
+  CloudDownload,
+  AlertTriangle,
+  CheckCircle2,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
@@ -57,6 +60,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     isRefreshingRates,
     refreshExchangeRates,
     setIsLogoutModalOpen,
+    emergencyCloudRecovery,
+    isCloudSyncing,
+    cloudDiagnosticsError,
+    clearCloudDiagnosticsError,
     t,
     isRTL,
   } = useApp();
@@ -82,6 +89,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     text: string;
     isError?: boolean;
   } | null>(null);
+  const [emergencyFeedback, setEmergencyFeedback] = useState<{
+    text: string;
+    isError?: boolean;
+  } | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -90,6 +101,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setOrgThresholdDraft(String(activeOrganization?.approvalThreshold ?? 0));
     setRateDrafts({});
     setRateSyncFeedback(null);
+    setEmergencyFeedback(null);
   }, [
     isOpen,
     activeOrganization?.id,
@@ -889,11 +901,90 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          {/* 6. Danger Zone: Sign Out, Delete Data & Delete Account */}
+          {/* 6. Danger Zone: Safe Recovery, Sign Out, Delete Data & Delete Account */}
           <div className="p-4 bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/30 rounded-xl space-y-2.5">
             <h4 className="text-xs font-bold text-[var(--color-expense)]">
               {isRTL ? 'إدارة البيانات والحساب' : 'Data & Account Management'}
             </h4>
+
+            <button
+              type="button"
+              data-testid="settings-emergency-recovery-btn"
+              disabled={isCloudSyncing}
+              onClick={async () => {
+                setEmergencyFeedback(null);
+                const res = await emergencyCloudRecovery();
+                if (res.ok) {
+                  const totalRecovered = res.recoveredPersonalCount + res.recoveredOrgCount;
+                  setEmergencyFeedback({
+                    text: isRTL
+                      ? totalRecovered > 0
+                        ? `تم استرجاع ${totalRecovered} معاملة بنجاح مباشرة من الخادم السحابي (الشخصي: ${res.recoveredPersonalCount}، المؤسسة: ${res.recoveredOrgCount}).`
+                        : 'اكتمل الاتصال المباشر بالخادم السحابي ولا توجد معاملات إضافية للاسترجاع.'
+                      : totalRecovered > 0
+                      ? `Restored ${totalRecovered} transactions directly from server (Personal: ${res.recoveredPersonalCount}, Org: ${res.recoveredOrgCount}).`
+                      : 'Direct server sync finished; no additional remote transactions were found.',
+                    isError: false,
+                  });
+                } else {
+                  setEmergencyFeedback({
+                    text:
+                      res.errorMessage ||
+                      (isRTL
+                        ? 'فشلت المزامنة السحابية الإجبارية.'
+                        : 'Force cloud recovery failed.'),
+                    isError: true,
+                  });
+                }
+              }}
+              className="w-full py-2.5 px-3 bg-[var(--color-accent)] text-[var(--color-on-accent)] hover:opacity-95 font-bold rounded-lg text-xs flex items-center justify-center gap-2 transition-opacity min-h-[44px] disabled:opacity-60"
+            >
+              {isCloudSyncing ? (
+                <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
+              ) : (
+                <CloudDownload className="w-4 h-4 shrink-0" />
+              )}
+              <span>
+                {isRTL
+                  ? 'مزامنة سحابية إجبارية (استرجاع البيانات)'
+                  : 'Force Cloud Sync (Recover Data)'}
+              </span>
+            </button>
+
+            {(emergencyFeedback || cloudDiagnosticsError) && (
+              <div
+                data-testid="settings-cloud-diagnostics-banner"
+                className={`p-3 rounded-lg border text-[11px] space-y-1 ${
+                  emergencyFeedback?.isError || cloudDiagnosticsError
+                    ? 'bg-[var(--color-surface)] border-[var(--color-expense)]/45 text-[var(--color-expense)]'
+                    : 'bg-[var(--color-surface)] border-[var(--color-income)]/45 text-[var(--color-income)]'
+                }`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-2 min-w-0">
+                    {emergencyFeedback?.isError || cloudDiagnosticsError ? (
+                      <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                    ) : (
+                      <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                    )}
+                    <p className="font-medium leading-relaxed break-words select-text">
+                      {cloudDiagnosticsError || emergencyFeedback?.text}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label={isRTL ? 'إغلاق' : 'Dismiss'}
+                    onClick={() => {
+                      setEmergencyFeedback(null);
+                      clearCloudDiagnosticsError();
+                    }}
+                    className="p-0.5 rounded hover:bg-black/10 shrink-0"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
 
             <button
               type="button"

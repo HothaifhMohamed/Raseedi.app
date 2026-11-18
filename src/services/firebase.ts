@@ -20,6 +20,7 @@ import {
   getDoc,
   getDocFromServer,
   getDocs,
+  getDocsFromServer,
   onSnapshot,
   limit,
   orderBy,
@@ -30,6 +31,10 @@ import {
   writeBatch,
   serverTimestamp,
   Firestore,
+  DocumentReference,
+  DocumentSnapshot,
+  Query,
+  QuerySnapshot,
 } from 'firebase/firestore';
 import {
   getStorage,
@@ -59,6 +64,7 @@ import {
 } from '../types';
 import { shouldFallbackAccountDeleteError } from './accountDeletion';
 import { resolveSafeCloudBackupWrite } from './backupMerge';
+import { sortTransactionsDescending } from './orgTransactionQuery';
 import {
   AdminCouponCycle,
   AdminCouponTier,
@@ -668,26 +674,74 @@ export async function signOutGoogle(): Promise<void> {
   await signOut(auth);
 }
 
-export async function fetchCloudBackupMeta(
-  uid: string
-): Promise<{ updatedAtMs: number; chunkCount: number; source: 'chunked' | 'legacy' } | null> {
+function isOfflineFirestoreError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const code = String((err as { code?: unknown }).code || '').toLowerCase();
+  const msg = String((err as { message?: unknown }).message || '').toLowerCase();
+  return (
+    code === 'unavailable' ||
+    msg.includes('client is offline') ||
+    msg.includes('offline') ||
+    msg.includes('failed to get document because the client is offline')
+  );
+}
+
+async function getDocServerFirst<T>(
+  ref: DocumentReference<T>,
+  forceServer = false
+): Promise<DocumentSnapshot<T>> {
   try {
-    const userSnap = await getDoc(doc(db, 'users', uid));
+    return await getDocFromServer(ref);
+  } catch (err) {
+    if (forceServer || !isOfflineFirestoreError(err)) {
+      throw err;
+    }
+    return getDoc(ref);
+  }
+}
+
+async function getDocsServerFirst<T>(
+  q: Query<T>,
+  forceServer = false
+): Promise<QuerySnapshot<T>> {
+  try {
+    return await getDocsFromServer(q);
+  } catch (err) {
+    if (forceServer || !isOfflineFirestoreError(err)) {
+      throw err;
+    }
+    return getDocs(q);
+  }
+}
+
+export async function fetchCloudBackupMeta(
+  uid: string,
+  options?: { forceServer?: boolean }
+): Promise<{
+  updatedAtMs: number;
+  chunkCount: number;
+  source: 'chunked' | 'legacy';
+  totalTransactions?: number;
+} | null> {
+  const forceServer = Boolean(options?.forceServer);
+  try {
+    const userSnap = await getDocServerFirst(doc(db, 'users', uid), forceServer);
     if (!userSnap.exists()) {
       return null;
     }
 
-    const metaSnap = await getDoc(doc(db, 'users', uid, 'backup', 'meta'));
+    const metaSnap = await getDocServerFirst(doc(db, 'users', uid, 'backup', 'meta'), forceServer);
     if (metaSnap.exists()) {
       const data = metaSnap.data() as Partial<CloudBackupMeta>;
       return {
         updatedAtMs: Number(data.updatedAtMs || 0),
         chunkCount: Number(data.chunkCount || 0),
+        totalTransactions: Number(data.totalTransactions || 0),
         source: 'chunked',
       };
     }
 
-    const legacySnap = await getDoc(doc(db, 'users', uid, 'backups', 'latest'));
+    const legacySnap = await getDocServerFirst(doc(db, 'users', uid, 'backups', 'latest'), forceServer);
     if (legacySnap.exists()) {
       const data = legacySnap.data() as { updatedAtMs?: number; updatedAt?: { toMillis?: () => number } };
       const ms =
@@ -700,6 +754,7 @@ export async function fetchCloudBackupMeta(
     }
     return null;
   } catch (error) {
+    console.error('[fetchCloudBackupMeta] Firestore error:', error);
     handleFirestoreError(error, OperationType.GET, `users/${uid}/backup/meta`);
   }
 }
@@ -748,11 +803,11 @@ export async function saveCloudBackup(
 
   let existingMetaSnap: Awaited<ReturnType<typeof getDoc>> | null = null;
   try {
-    const userSnap = await getDoc(userRef);
+    const userSnap = await getDocServerFirst(userRef, false);
     if (!userSnap.exists() && auth.currentUser?.uid === uid) {
       await ensureUserProfile(auth.currentUser);
     }
-    existingMetaSnap = await getDoc(metaRef);
+    existingMetaSnap = await getDocServerFirst(metaRef, false);
 
     if (existingMetaSnap.exists()) {
       const existingMetaData = existingMetaSnap.data() as Partial<CloudBackupMeta>;
@@ -1017,30 +1072,49 @@ export async function syncUserCurrencyRatesToCloud(
   }
 }
 
-export async function fetchCloudBackupHistory(uid: string): Promise<BackupHistorySummary[]> {
+export async function fetchCloudBackupHistory(
+  uid: string,
+  options?: { forceServer?: boolean }
+): Promise<BackupHistorySummary[]> {
   const historyPath = `users/${uid}/backupHistory`;
+  const forceServer = Boolean(options?.forceServer);
   try {
-    const q = query(
+    // Query collection without orderBy to avoid index requirements; sort client-side
+    const snap = await getDocsServerFirst(
       collection(db, 'users', uid, 'backupHistory'),
-      orderBy('createdAtMs', 'desc'),
-      limit(MAX_AUTO_CLOUD_BACKUPS)
+      forceServer
     );
-    const snap = await getDocs(q);
-    return snap.docs.map((d) => {
-      const data = d.data() as Partial<BackupHistoryRecord>;
-      return {
-        id: d.id,
-        uid,
-        source: data.source === 'manual' ? 'manual' : 'auto',
-        createdAtMs: Number(data.createdAtMs || 0),
-        totalTransactions: Number(data.totalTransactions || 0),
-        storedTransactionsCount: Number(data.storedTransactionsCount || 0),
-        walletsCount: Number(data.walletsCount || 0),
-      };
-    });
+    return snap.docs
+      .map((d) => {
+        const data = d.data() as Partial<BackupHistoryRecord>;
+        return {
+          id: d.id,
+          uid,
+          source: (data.source === 'manual' ? 'manual' : 'auto') as 'manual' | 'auto',
+          createdAtMs: Number(data.createdAtMs || 0),
+          totalTransactions: Number(data.totalTransactions || 0),
+          storedTransactionsCount: Number(data.storedTransactionsCount || 0),
+          walletsCount: Number(data.walletsCount || 0),
+        };
+      })
+      .sort((a, b) => b.createdAtMs - a.createdAtMs)
+      .slice(0, MAX_AUTO_CLOUD_BACKUPS);
   } catch (error) {
+    console.error('[fetchCloudBackupHistory] Firestore error:', error);
     handleFirestoreError(error, OperationType.LIST, historyPath);
   }
+}
+
+export async function fetchLatestCloudBackupFromHistory(
+  uid: string,
+  options?: { forceServer?: boolean }
+): Promise<CloudBackupPayload | null> {
+  const historyList = await fetchCloudBackupHistory(uid, options).catch(() => []);
+  const richest = [...historyList]
+    .filter((entry) => entry.totalTransactions > 0 || entry.storedTransactionsCount > 0)
+    .sort((a, b) => b.createdAtMs - a.createdAtMs)[0];
+  if (!richest) return null;
+  return fetchCloudBackupFromHistory(uid, richest.id);
 }
 
 export async function fetchCloudBackupFromHistory(
@@ -1100,37 +1174,46 @@ export async function syncOrganizationMetaToCloud(
   }
 }
 
-export async function fetchCloudBackup(uid: string): Promise<CloudBackupPayload | null> {
+export async function fetchCloudBackup(
+  uid: string,
+  options?: { forceServer?: boolean }
+): Promise<CloudBackupPayload | null> {
   const metaPath = `users/${uid}/backup/meta`;
+  const forceServer = Boolean(options?.forceServer);
   try {
-    const userSnap = await getDoc(doc(db, 'users', uid));
+    const userSnap = await getDocServerFirst(doc(db, 'users', uid), forceServer);
     if (!userSnap.exists()) {
       return null;
     }
 
-    const metaSnap = await getDoc(doc(db, 'users', uid, 'backup', 'meta'));
+    const metaSnap = await getDocServerFirst(doc(db, 'users', uid, 'backup', 'meta'), forceServer);
     if (metaSnap.exists()) {
       const meta = metaSnap.data() as CloudBackupMeta;
-      const chunkCount = Math.max(0, Number(meta.chunkCount || 0));
-      const chunkPromises = Array.from({ length: chunkCount }, (_, idx) =>
-        getDoc(doc(db, 'users', uid, 'backupChunks', `chunk_${idx}`))
+      // Fetch all backupChunks without orderBy so all stored chunks are recovered reliably from server
+      const allChunksSnap = await getDocsServerFirst(
+        collection(db, 'users', uid, 'backupChunks'),
+        forceServer
       );
-      const chunkSnaps = await Promise.all(chunkPromises);
+      const sortedChunkDocs = [...allChunksSnap.docs].sort((a, b) => {
+        const idxA = Number((a.data() as { chunkIndex?: number })?.chunkIndex ?? 0);
+        const idxB = Number((b.data() as { chunkIndex?: number })?.chunkIndex ?? 0);
+        return idxA - idxB;
+      });
       const transactions: AppDatabaseData['transactions'] = [];
-      for (const snap of chunkSnaps) {
-        if (snap.exists()) {
-          const chunkData = snap.data() as { transactions?: AppDatabaseData['transactions'] };
-          if (Array.isArray(chunkData.transactions)) {
-            transactions.push(...chunkData.transactions);
-          }
+      for (const snap of sortedChunkDocs) {
+        const chunkData = snap.data() as { transactions?: AppDatabaseData['transactions'] };
+        if (Array.isArray(chunkData.transactions)) {
+          transactions.push(...chunkData.transactions);
         }
       }
+
+      const sortedTransactions = sortTransactionsDescending(transactions);
 
       return {
         uid: meta.uid,
         schemaVersion: meta.schemaVersion,
         updatedAtMs: Number(meta.updatedAtMs || 0),
-        transactions,
+        transactions: sortedTransactions,
         wallets: meta.wallets || [],
         categories: meta.categories || [],
         budgets: meta.budgets || [],
@@ -1145,10 +1228,15 @@ export async function fetchCloudBackup(uid: string): Promise<CloudBackupPayload 
       };
     }
 
-    const legacySnap = await getDoc(doc(db, 'users', uid, 'backups', 'latest'));
+    const legacySnap = await getDocServerFirst(doc(db, 'users', uid, 'backups', 'latest'), forceServer);
     if (!legacySnap.exists()) return null;
-    return legacySnap.data() as CloudBackupPayload;
+    const legacy = legacySnap.data() as CloudBackupPayload;
+    return {
+      ...legacy,
+      transactions: sortTransactionsDescending(legacy.transactions || []),
+    };
   } catch (error) {
+    console.error('[fetchCloudBackup] Firestore error:', error);
     handleFirestoreError(error, OperationType.GET, metaPath);
   }
 }

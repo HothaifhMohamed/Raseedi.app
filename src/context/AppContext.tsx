@@ -120,6 +120,7 @@ import {
   fetchCloudBackup,
   fetchCloudBackupHistory,
   fetchCloudBackupFromHistory,
+  fetchLatestCloudBackupFromHistory,
   claimIssuedCodeInDb,
   redeemCouponInFirestore,
   redeemProCodeWithServer,
@@ -143,6 +144,11 @@ import {
   ScanQuotaInfo,
 } from '../services/firebase';
 import { isFirestoreMissingIndexError } from '../services/orgTransactionQuery';
+import {
+  formatFirestoreErrorForDisplay,
+  mergeCloudAndLocalState,
+  shouldRestoreCloudOnStartup,
+} from '../services/safeRecovery';
 import type { BackupHistorySummary } from '../services/backupHistory';
 import { isAuthorizedAdminUser, verifySignedLicenseCode } from '../services/licenseCodes';
 import {
@@ -157,6 +163,7 @@ import { OrgProvider, OrgContextValue, useOrg } from './OrgContext';
 import {
   subscribeUserOrgRefs,
   subscribeActiveOrganization,
+  forceFetchOrgTransactionsFromServer,
   loadMoreOrgTransactions as fetchMoreOrgTransactionsCloud,
   createOrgTransactionCloud,
   updateOrgTransactionCloud,
@@ -450,6 +457,8 @@ interface AppContextType {
   isCloudSyncing: boolean;
   cloudSyncStatus: 'idle' | 'syncing' | 'synced' | 'error';
   cloudSyncError: string | null;
+  cloudDiagnosticsError: string | null;
+  clearCloudDiagnosticsError: () => void;
   cloudSkippedAttachmentsWarning: number;
   cloudConflict: { cloudUpdatedAtMs: number } | null;
   lastCloudBackupExists: boolean;
@@ -460,6 +469,12 @@ interface AppContextType {
   signOutGoogleAccount: () => Promise<void>;
   syncToCloudNow: (forceOverwrite?: boolean) => Promise<boolean>;
   restoreFromCloudNow: () => Promise<boolean>;
+  emergencyCloudRecovery: () => Promise<{
+    ok: boolean;
+    recoveredPersonalCount: number;
+    recoveredOrgCount: number;
+    errorMessage?: string;
+  }>;
   resolveCloudConflictOverwrite: () => Promise<boolean>;
   clearCloudConflict: () => void;
   reauthenticateGoogleAccount: () => Promise<boolean>;
@@ -649,12 +664,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [isCloudSyncing, setIsCloudSyncing] = useState(false);
   const [cloudSyncStatus, setCloudSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
   const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
+  const [cloudDiagnosticsError, setCloudDiagnosticsError] = useState<string | null>(null);
+  const clearCloudDiagnosticsError = useCallback(() => setCloudDiagnosticsError(null), []);
   const [cloudSkippedAttachmentsWarning, setCloudSkippedAttachmentsWarning] = useState(0);
   const [cloudConflict, setCloudConflict] = useState<{ cloudUpdatedAtMs: number } | null>(null);
   const [lastCloudBackupExists, setLastCloudBackupExists] = useState(false);
   const [cloudBackupHistory, setCloudBackupHistory] = useState<BackupHistorySummary[]>([]);
   const [preRestoreSnapshotDate, setPreRestoreSnapshotDate] = useState<number | null>(null);
   const skipNextAutoSyncRef = React.useRef(false);
+  const hasCompletedInitialCloudSyncRef = React.useRef(false);
 
   // Verified server PRO entitlement
   const [verifiedPro, setVerifiedPro] = useState<VerifiedProEntitlement | null>(null);
@@ -2260,6 +2278,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (!firebaseUser) {
+        hasCompletedInitialCloudSyncRef.current = false;
         setFirebaseAuthUser(null);
         setLastCloudBackupExists(false);
         setScanQuota(null);
@@ -2273,6 +2292,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return;
       }
 
+      hasCompletedInitialCloudSyncRef.current = false;
       const nextUser: UserAccount = {
         id: firebaseUser.uid,
         name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Raseedi User',
@@ -2289,7 +2309,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       try {
         const [profile, cloudMeta] = await Promise.all([
           ensureUserProfile(firebaseUser),
-          fetchCloudBackupMeta(firebaseUser.uid).catch(() => null),
+          fetchCloudBackupMeta(firebaseUser.uid, { forceServer: false }).catch((metaErr) => {
+            console.error('[Cloud Startup] fetchCloudBackupMeta failed:', metaErr);
+            return null;
+          }),
         ]);
 
         const active = isEntitlementActive(profile);
@@ -2367,10 +2390,54 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         saveGuestModePref(false);
         setIsGuestMode(false);
 
-        if (postAction === 'restore_cloud_and_enter') {
-          const cloudBackup = await fetchCloudBackup(firebaseUser.uid);
+        // Cloud-First hydration: restore & merge cloud data when postAction requests it OR whenever local is empty/behind cloud
+        const needsCloudFirstHydration =
+          postAction === 'restore_cloud_and_enter' ||
+          shouldRestoreCloudOnStartup({
+            localTransactionsCount: snap.transactions.length,
+            hasCloudBackup: Boolean(cloudMeta),
+            cloudUpdatedAtMs: cloudMeta?.updatedAtMs || 0,
+            localLastKnownCloudUpdatedAtMs: snap.settings.lastKnownCloudUpdatedAtMs,
+          });
+
+        if (needsCloudFirstHydration) {
+          let cloudBackup = await fetchCloudBackup(firebaseUser.uid, { forceServer: false }).catch(
+            (err) => {
+              console.error('[Cloud Startup] fetchCloudBackup failed:', err);
+              setCloudDiagnosticsError(
+                formatFirestoreErrorForDisplay(err, snap.settings.language === 'ar')
+              );
+              return null;
+            }
+          );
+          if (!cloudBackup || (cloudBackup.transactions || []).length === 0) {
+            const historyFallback = await fetchLatestCloudBackupFromHistory(firebaseUser.uid, {
+              forceServer: false,
+            }).catch(() => null);
+            if (historyFallback && (historyFallback.transactions || []).length > 0) {
+              cloudBackup = historyFallback;
+            }
+          }
+
           if (cloudBackup) {
-            applyCloudBackupLocally(cloudBackup, nextUser);
+            if (snap.transactions.length > 0 && postAction !== 'restore_cloud_and_enter') {
+              const merged = mergeCloudAndLocalState({
+                localData: snap,
+                cloudData: cloudBackup,
+                preferCloud: true,
+              });
+              applyCloudBackupLocally(
+                {
+                  uid: firebaseUser.uid,
+                  schemaVersion: cloudBackup.schemaVersion || 2,
+                  updatedAtMs: Math.max(cloudBackup.updatedAtMs || 0, Date.now()),
+                  ...merged,
+                },
+                nextUser
+              );
+            } else {
+              applyCloudBackupLocally(cloudBackup, nextUser);
+            }
           } else {
             savePersonalState({ user: nextUser }, { skipDirty: true });
           }
@@ -2383,12 +2450,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           savePersonalState({ user: nextUser }, { skipDirty: true });
         }
       } catch (err) {
-        console.warn('Cloud auth sync warning:', err);
+        console.error('Cloud auth sync error:', err);
+        setCloudDiagnosticsError(
+          formatFirestoreErrorForDisplay(err, latestPersonalRef.current.settings.language === 'ar')
+        );
+      } finally {
+        hasCompletedInitialCloudSyncRef.current = true;
       }
     });
 
     return () => unsubscribe();
-  }, [applyCloudBackupLocally, applyVerifiedProState, refreshScanQuota]);
+  }, [applyCloudBackupLocally, applyVerifiedProState, refreshScanQuota, savePersonalState]);
 
   // Real-time subscription sync from Firestore /users/{uid} (reflects Admin edits/cancellations immediately)
   useEffect(() => {
@@ -2527,6 +2599,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         onError: (scope, err) => {
           if (scope === 'transactions' || isFirestoreMissingIndexError(err)) {
             console.error(`Org ${scope} query/index error:`, err);
+            setCloudDiagnosticsError(
+              formatFirestoreErrorForDisplay(
+                err,
+                latestPersonalRef.current.settings.language === 'ar'
+              )
+            );
           } else {
             console.warn(`Org listener error (${scope}):`, err);
           }
@@ -2965,14 +3043,141 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setCloudSyncStatus('idle');
       return active;
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Cloud restore failed';
+      const msg = formatFirestoreErrorForDisplay(
+        err,
+        latestPersonalRef.current.settings.language === 'ar'
+      );
+      console.error('[restoreFromCloudNow] failed:', err);
       setCloudSyncStatus('error');
       setCloudSyncError(msg);
+      setCloudDiagnosticsError(msg);
       return false;
     } finally {
       setIsCloudSyncing(false);
     }
   }, [applyCloudBackupLocally, applyVerifiedProState, createPreRestoreSnapshot, refreshScanQuota]);
+
+  const emergencyCloudRecovery = useCallback(async (): Promise<{
+    ok: boolean;
+    recoveredPersonalCount: number;
+    recoveredOrgCount: number;
+    errorMessage?: string;
+  }> => {
+    const isAr = latestPersonalRef.current.settings.language === 'ar';
+    if (!auth.currentUser) {
+      const msg = isAr
+        ? 'يرجى تسجيل الدخول بحساب جوجل أولاً لاسترجاع بياناتك من السحابة.'
+        : 'Please sign in with Google first to recover your data from the cloud.';
+      setCloudDiagnosticsError(msg);
+      return { ok: false, recoveredPersonalCount: 0, recoveredOrgCount: 0, errorMessage: msg };
+    }
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      const msg = isAr
+        ? 'الجهاز غير متصل بالإنترنت. يرجى الاتصال بالإنترنت وإعادة المحاولة.'
+        : 'Device is offline. Connect to the internet and try again.';
+      setCloudDiagnosticsError(msg);
+      return { ok: false, recoveredPersonalCount: 0, recoveredOrgCount: 0, errorMessage: msg };
+    }
+
+    setIsCloudSyncing(true);
+    setCloudSyncStatus('syncing');
+    setCloudSyncError(null);
+    setCloudDiagnosticsError(null);
+
+    try {
+      const uid = auth.currentUser.uid;
+      await createPreRestoreSnapshot().catch(() => {});
+
+      // 1. Clear local transactions cache before forced cloud fetch
+      skipNextAutoSyncRef.current = true;
+      setPersonalTransactions([]);
+      if (typeof window !== 'undefined') {
+        try {
+          const raw = localStorage.getItem('raseedi_data_v1');
+          if (raw) {
+            const parsed = JSON.parse(raw) as Record<string, unknown>;
+            localStorage.setItem(
+              'raseedi_data_v1',
+              JSON.stringify({ ...parsed, transactions: [] })
+            );
+          }
+        } catch {
+          // ignore localStorage cache parse failures
+        }
+      }
+
+      // 2. Force server-direct personal backup fetch (ignoring Firestore local cache)
+      let recoveredPersonalCount = 0;
+      let cloudBackup = await fetchCloudBackup(uid, { forceServer: true });
+      if (!cloudBackup || (cloudBackup.transactions || []).length === 0) {
+        const historyFallback = await fetchLatestCloudBackupFromHistory(uid, {
+          forceServer: true,
+        }).catch(() => null);
+        if (historyFallback && (historyFallback.transactions || []).length > 0) {
+          cloudBackup = cloudBackup
+            ? {
+                ...cloudBackup,
+                ...historyFallback,
+                transactions: historyFallback.transactions,
+                wallets:
+                  (cloudBackup.wallets || []).length > 0
+                    ? cloudBackup.wallets
+                    : historyFallback.wallets,
+              }
+            : historyFallback;
+        }
+      }
+
+      if (cloudBackup) {
+        recoveredPersonalCount = (cloudBackup.transactions || []).length;
+        applyCloudBackupLocally(cloudBackup, latestPersonalRef.current.user);
+        setLastCloudBackupExists(true);
+      }
+
+      // 3. If an organization workspace is active, also force server-direct fetch of all org transactions (no orderBy)
+      let recoveredOrgCount = 0;
+      const currentOrgId =
+        activeWorkspaceRef.current && activeWorkspaceRef.current !== 'personal'
+          ? activeWorkspaceRef.current
+          : null;
+      if (currentOrgId && !latestLocalOrgWorkspacesRef.current[currentOrgId]) {
+        setActiveCloudTransactions([]);
+        setActiveCloudTrashTransactions([]);
+        setExtraOrgTransactions([]);
+        setExtraOrgTrashTransactions([]);
+        const orgRes = await forceFetchOrgTransactionsFromServer(currentOrgId);
+        setActiveCloudTransactions(orgRes.active);
+        setActiveCloudTrashTransactions(orgRes.trash);
+        setOrgHasMoreTx(false);
+        recoveredOrgCount = orgRes.active.length;
+      }
+
+      await fetchCloudBackupHistory(uid, { forceServer: true })
+        .then((list) => setCloudBackupHistory(list))
+        .catch(() => {});
+
+      setCloudSyncStatus('synced');
+      return {
+        ok: true,
+        recoveredPersonalCount,
+        recoveredOrgCount,
+      };
+    } catch (err) {
+      console.error('[Emergency Cloud Recovery Error]', err);
+      const formatted = formatFirestoreErrorForDisplay(err, isAr);
+      setCloudSyncStatus('error');
+      setCloudSyncError(formatted);
+      setCloudDiagnosticsError(formatted);
+      return {
+        ok: false,
+        recoveredPersonalCount: 0,
+        recoveredOrgCount: 0,
+        errorMessage: formatted,
+      };
+    } finally {
+      setIsCloudSyncing(false);
+    }
+  }, [applyCloudBackupLocally, createPreRestoreSnapshot]);
 
   const restoreFromBackupHistoryEntry = useCallback(
     async (backupId: string): Promise<boolean> => {
@@ -3081,6 +3286,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Silent Auto Cloud Sync (personal & local-first org state, keeping last 7 auto backups)
   useEffect(() => {
     if (!user?.isLoggedIn || !auth.currentUser || !hasCompletedOnboarding) return;
+    if (!hasCompletedInitialCloudSyncRef.current) return;
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
     if (skipNextAutoSyncRef.current) {
       skipNextAutoSyncRef.current = false;
@@ -7011,6 +7217,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         isCloudSyncing,
         cloudSyncStatus,
         cloudSyncError,
+        cloudDiagnosticsError,
+        clearCloudDiagnosticsError,
         cloudSkippedAttachmentsWarning,
         cloudConflict,
         lastCloudBackupExists,
@@ -7021,6 +7229,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         signOutGoogleAccount,
         syncToCloudNow,
         restoreFromCloudNow,
+        emergencyCloudRecovery,
         resolveCloudConflictOverwrite,
         clearCloudConflict,
         reauthenticateGoogleAccount,
