@@ -6,11 +6,11 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import helmet from 'helmet';
 import { GoogleGenAI, Type } from '@google/genai';
 import { initializeApp, getApps, cert, App as FirebaseAdminApp } from 'firebase-admin/app';
 import { getAuth, DecodedIdToken } from 'firebase-admin/auth';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
-import scanInvoiceHandler from './api/scan-invoice';
 import { PRICING_CONFIG } from './src/config/pricing';
 import {
   DAY_MS,
@@ -32,9 +32,21 @@ import {
   isFirestorePermissionDeniedError,
 } from './src/services/firestoreRest';
 import {
-  isAuthorizedAdminUser,
-  verifySignedLicenseCode,
-} from './src/services/licenseCodes';
+  generateRandomLicenseCodeServer,
+  getLocalTodayDateString,
+  hashLicenseCodeServer,
+  isAllowedCorsOrigin,
+  isServerAdminUser,
+  normalizeScannedReceiptResult,
+  parseAdminEmailsEnv,
+  resolveActivationPlanDetails,
+  ServerActivationPlan,
+  ServerSupportedBillingCycle,
+  ServerSupportedPlanTier,
+  validateScanReceiptPayload,
+  validateWebhookOrgPlanMatch,
+  verifyTimingSafePasscode,
+} from './src/services/serverSecurity';
 
 dotenv.config();
 
@@ -42,8 +54,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
-const ALLOWED_SCAN_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
-const MAX_SCAN_DECODED_BYTES = 2_200_000; // ~2.2MB decoded image
+const GEMINI_SCAN_MODEL = process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash';
+const ADMIN_SESSION_SECRET = crypto.randomBytes(32);
+const ADMIN_SESSION_TTL_MS = 30 * 60 * 1000;
 const VALID_ORG_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
 const VALID_INDUSTRIES = new Set<OrganizationIndustry>([
   'retail',
@@ -66,15 +79,9 @@ const MANAGEABLE_ROLES = new Set<Exclude<OrganizationRole, 'owner'>>([
   'viewer',
 ]);
 
-type SupportedPlanTier = 'free' | 'personal_pro' | 'business_pro';
-type SupportedBillingCycle = 'free' | 'monthly' | 'yearly' | 'lifetime' | 'trial' | 'code';
-type SupportedActivationPlan =
-  | 'monthly'
-  | 'yearly'
-  | 'lifetime'
-  | 'business_monthly'
-  | 'business_yearly'
-  | 'code';
+type SupportedPlanTier = ServerSupportedPlanTier;
+type SupportedBillingCycle = ServerSupportedBillingCycle;
+type SupportedActivationPlan = ServerActivationPlan;
 
 interface FirebaseAppletConfig {
   projectId: string;
@@ -159,49 +166,88 @@ function respondCloudAdminUnavailable(res: Response, fallbackMessage?: string): 
   });
 }
 
-interface CategorySummary {
-  id: string;
-  nameAr: string;
-  nameEn: string;
-  type: string;
+function isAdminRequestUser(authUser?: DecodedIdToken): boolean {
+  return isServerAdminUser(authUser, process.env.ADMIN_EMAILS);
 }
 
-// Per-UID brute-force lock for /api/org/join (5 failures -> 15 min block)
-const joinFailedAttempts = new Map<string, { count: number; lockedUntil: number }>();
-
-function checkJoinLock(uid: string): number {
-  const entry = joinFailedAttempts.get(uid);
-  if (!entry) return 0;
-  if (entry.lockedUntil > Date.now()) {
-    return Math.ceil((entry.lockedUntil - Date.now()) / 1000);
-  }
-  if (entry.lockedUntil > 0) {
-    joinFailedAttempts.delete(uid);
-  }
-  return 0;
+function issueAdminSessionToken(uid: string): { token: string; expiresAt: number } {
+  const expiresAt = Date.now() + ADMIN_SESSION_TTL_MS;
+  const payload = `${uid}.${expiresAt}`;
+  const sig = crypto
+    .createHmac('sha256', ADMIN_SESSION_SECRET)
+    .update(payload)
+    .digest('hex');
+  return { token: `${payload}.${sig}`, expiresAt };
 }
 
-function recordJoinFailure(uid: string): void {
-  const current = joinFailedAttempts.get(uid) || { count: 0, lockedUntil: 0 };
-  const nextCount = current.count + 1;
-  if (nextCount >= 5) {
-    joinFailedAttempts.set(uid, {
-      count: 0,
-      lockedUntil: Date.now() + 15 * 60 * 1000,
+function verifyAdminSessionToken(token: unknown, expectedUid: string): boolean {
+  if (typeof token !== 'string' || !token.trim()) return false;
+  const parts = token.trim().split('.');
+  if (parts.length !== 3) return false;
+  const [uid, expStr, sig] = parts;
+  if (!uid || uid !== expectedUid) return false;
+  const exp = Number(expStr);
+  if (!Number.isFinite(exp) || exp <= Date.now()) return false;
+  const expectedSig = crypto
+    .createHmac('sha256', ADMIN_SESSION_SECRET)
+    .update(`${uid}.${expStr}`)
+    .digest('hex');
+  if (sig.length !== expectedSig.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig));
+}
+
+// Persistent per-UID brute-force lock for /api/org/join (5 failures -> 15 min block)
+async function checkJoinLockInDb(uid: string): Promise<number> {
+  if (!adminDbReady) return 0;
+  try {
+    const ref = adminDb.collection('joinRateLimits').doc(uid);
+    const snap = await ref.get();
+    if (!snap.exists) return 0;
+    const lockedUntil = Number(snap.data()?.lockedUntil || 0);
+    if (lockedUntil > Date.now()) {
+      return Math.ceil((lockedUntil - Date.now()) / 1000);
+    }
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function recordJoinFailureInDb(uid: string): Promise<void> {
+  if (!adminDbReady) return;
+  try {
+    const ref = adminDb.collection('joinRateLimits').doc(uid);
+    await adminDb.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const current = snap.exists ? Number(snap.data()?.failedCount || 0) : 0;
+      const nextCount = current + 1;
+      const now = Date.now();
+      if (nextCount >= 5) {
+        tx.set(ref, {
+          failedCount: 0,
+          lockedUntil: now + 15 * 60 * 1000,
+          updatedAt: now,
+        });
+      } else {
+        tx.set(ref, {
+          failedCount: nextCount,
+          lockedUntil: 0,
+          updatedAt: now,
+        });
+      }
     });
-  } else {
-    joinFailedAttempts.set(uid, { count: nextCount, lockedUntil: 0 });
+  } catch {
+    // Best-effort rate limit persistence
   }
 }
 
-function clearJoinFailures(uid: string): void {
-  joinFailedAttempts.delete(uid);
-}
-
-function getLocalTodayString(): string {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+async function clearJoinFailuresInDb(uid: string): Promise<void> {
+  if (!adminDbReady) return;
+  try {
+    await adminDb.collection('joinRateLimits').doc(uid).delete();
+  } catch {
+    // Ignore cleanup errors
+  }
 }
 
 function getUtcMonthKey(): string {
@@ -209,11 +255,7 @@ function getUtcMonthKey(): string {
 }
 
 function hashActivationCodeServer(rawCode: string): string {
-  const normalized = rawCode.trim().toUpperCase();
-  return crypto
-    .createHash('sha256')
-    .update(`raseedi-license:${normalized}`)
-    .digest('hex');
+  return hashLicenseCodeServer(rawCode);
 }
 
 function hashInviteCodeServer(rawCode: string): string {
@@ -298,81 +340,6 @@ function resolveUserEntitlement(userData?: Record<string, unknown>): {
   };
 }
 
-function resolveActivationPlanDetails(
-  plan?: string,
-  options?: { tier?: string; cycle?: string; baseMs?: number }
-): {
-  proPlan: SupportedActivationPlan;
-  planTier: Exclude<SupportedPlanTier, 'free'>;
-  billingCycle: Exclude<SupportedBillingCycle, 'free' | 'trial' | 'code'>;
-  expiresAt: number | null;
-} {
-  const now = Date.now();
-  const base = options?.baseMs && options.baseMs > now ? options.baseMs : now;
-
-  const rawTier = (options?.tier || '').toLowerCase();
-  const rawCycle = (options?.cycle || '').toLowerCase();
-  if ((rawTier === 'business' || rawTier === 'business_pro') && rawCycle === 'lifetime') {
-    return {
-      proPlan: 'code',
-      planTier: 'business_pro',
-      billingCycle: 'lifetime',
-      expiresAt: null,
-    };
-  }
-
-  let canonicalPlan = plan;
-  if (!canonicalPlan && options?.tier) {
-    const t = rawTier;
-    const c = rawCycle;
-    if (t === 'business' || t === 'business_pro') {
-      canonicalPlan = c === 'yearly' ? 'business_yearly' : 'business_monthly';
-    } else if (t === 'personal' || t === 'personal_pro') {
-      canonicalPlan = c === 'monthly' ? 'monthly' : c === 'yearly' ? 'yearly' : 'lifetime';
-    }
-  }
-
-  switch (canonicalPlan) {
-    case 'monthly':
-      return {
-        proPlan: 'monthly',
-        planTier: 'personal_pro',
-        billingCycle: 'monthly',
-        expiresAt: base + 30 * DAY_MS,
-      };
-    case 'yearly':
-      return {
-        proPlan: 'yearly',
-        planTier: 'personal_pro',
-        billingCycle: 'yearly',
-        expiresAt: base + 365 * DAY_MS,
-      };
-    case 'business_monthly':
-      return {
-        proPlan: 'business_monthly',
-        planTier: 'business_pro',
-        billingCycle: 'monthly',
-        expiresAt: base + 30 * DAY_MS,
-      };
-    case 'business_yearly':
-      return {
-        proPlan: 'business_yearly',
-        planTier: 'business_pro',
-        billingCycle: 'yearly',
-        expiresAt: base + 365 * DAY_MS,
-      };
-    case 'lifetime':
-    case 'code':
-    default:
-      return {
-        proPlan: canonicalPlan === 'lifetime' ? 'lifetime' : 'code',
-        planTier: 'personal_pro',
-        billingCycle: 'lifetime',
-        expiresAt: null,
-      };
-  }
-}
-
 async function requireFirebaseAuth(
   req: AuthenticatedRequest,
   res: Response,
@@ -413,6 +380,52 @@ async function createApp() {
   await probeAdminDbAccess();
   const app = express();
   app.set('trust proxy', 1);
+
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+      crossOriginEmbedderPolicy: false,
+    })
+  );
+
+  app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+    const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
+    const host = req.get('host') || undefined;
+    const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http')
+      .split(',')[0]
+      .trim();
+
+    if (
+      !isAllowedCorsOrigin(origin, host, proto, {
+        appUrl: process.env.APP_URL,
+        allowedOrigins: process.env.ALLOWED_ORIGINS,
+      })
+    ) {
+      res.status(403).json({
+        error: 'CORS_FORBIDDEN',
+        message: 'Origin not allowed',
+      });
+      return;
+    }
+
+    if (origin) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, X-Admin-Session'
+      );
+    }
+
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+
+    next();
+  });
 
   const scanIpLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -475,10 +488,6 @@ async function createApp() {
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, service: 'raseedi-server', cloudAdminReady: adminDbReady });
-  });
-
-  app.all('/api/scan-invoice', scanIpLimiter, express.json({ limit: '3mb' }), (req, res) => {
-    void scanInvoiceHandler(req, res);
   });
 
   const resolveScanQuotaViaUserToken = async (
@@ -662,6 +671,7 @@ async function createApp() {
       const monthKey = getUtcMonthKey();
       let activeQuotaRef = adminDb.collection('users').doc(uid).collection('scanQuotas').doc(monthKey);
       let quotaIncremented = false;
+      let targetOrgId = '';
 
       try {
         const apiKey = process.env.GEMINI_API_KEY;
@@ -673,52 +683,23 @@ async function createApp() {
           return;
         }
 
-        const { imageBase64, mimeType, categories, orgId } = req.body as {
-          imageBase64?: string;
-          mimeType?: string;
-          categories?: CategorySummary[];
-          orgId?: string;
-        };
-
-        const targetOrgId = typeof orgId === 'string' ? orgId.trim() : '';
+        const rawOrgId = (req.body as { orgId?: unknown } | undefined)?.orgId;
+        targetOrgId = typeof rawOrgId === 'string' ? rawOrgId.trim() : '';
         if (targetOrgId && !VALID_ORG_ID_REGEX.test(targetOrgId)) {
           res.status(400).json({ error: 'INVALID_ORG_ID', message: 'معرف المؤسسة غير صالح.' });
           return;
         }
 
-        if (typeof mimeType !== 'string' || !ALLOWED_SCAN_MIME_TYPES.has(mimeType)) {
-          res.status(400).json({
-            error: 'INVALID_MIME_TYPE',
-            message: 'صيغة الصورة غير مدعومة. استخدم JPEG أو PNG أو WebP.',
+        const validated = validateScanReceiptPayload(req.body);
+        if (validated.ok === false) {
+          res.status(validated.status).json({
+            error: validated.error,
+            message: validated.message,
           });
           return;
         }
 
-        if (!imageBase64 || typeof imageBase64 !== 'string') {
-          res.status(400).json({
-            error: 'INVALID_IMAGE',
-            message: 'صورة الفاتورة مطلوبة للتحليل.',
-          });
-          return;
-        }
-
-        const cleanBase64 = imageBase64.includes(',') ? imageBase64.split(',')[1] : imageBase64;
-        if (!cleanBase64 || !/^[A-Za-z0-9+/=]+$/.test(cleanBase64.replace(/\s+/g, ''))) {
-          res.status(400).json({
-            error: 'INVALID_IMAGE',
-            message: 'بيانات الصورة غير صالحة.',
-          });
-          return;
-        }
-
-        const decodedBytes = Buffer.from(cleanBase64, 'base64').byteLength;
-        if (decodedBytes <= 0 || decodedBytes > MAX_SCAN_DECODED_BYTES) {
-          res.status(413).json({
-            error: 'IMAGE_TOO_LARGE',
-            message: 'حجم صورة الفاتورة كبير جداً (الحد الأقصى 2 ميجابايت).',
-          });
-          return;
-        }
+        const { cleanBase64, mimeType, categories: expenseCategories } = validated;
 
         if (targetOrgId) {
           activeQuotaRef = adminDb
@@ -852,15 +833,11 @@ async function createApp() {
         }
         quotaIncremented = true;
 
-        const expenseCategories = Array.isArray(categories)
-          ? categories.filter((c) => c.type === 'expense' || c.type === 'both')
-          : [];
-
         const categoriesGuide = expenseCategories.length
           ? expenseCategories.map((c) => `- "${c.id}": ${c.nameAr} (${c.nameEn})`).join('\n')
           : '- "cat-restaurants": مطاعم\n- "cat-groceries": سوبرماركت\n- "cat-cafes": كافيهات\n- "cat-bills": فواتير\n- "cat-pharmacy": صيدلية\n- "cat-other": أخرى';
 
-        const fallbackDate = getLocalTodayString();
+        const fallbackDate = getLocalTodayDateString();
 
         const ai = new GoogleGenAI({
           apiKey,
@@ -868,7 +845,7 @@ async function createApp() {
         });
 
         const response = await ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
+          model: GEMINI_SCAN_MODEL,
           contents: [
             {
               role: 'user',
@@ -914,33 +891,10 @@ Return JSON matching the schema with:
           throw new Error('EMPTY_AI_RESPONSE');
         }
 
-        const parsed = JSON.parse(rawText) as {
-          amount?: number;
-          date?: string;
-          categoryId?: string;
-          merchant?: string;
-          notes?: string;
-          type?: string;
-        };
-
-        const validCategoryIds = new Set(expenseCategories.map((c) => c.id));
-        const resolvedCategoryId =
-          parsed.categoryId && (validCategoryIds.size === 0 || validCategoryIds.has(parsed.categoryId))
-            ? parsed.categoryId
-            : expenseCategories.find((c) => c.id === 'cat-other')?.id || expenseCategories[0]?.id || 'cat-other';
-
-        const dateMatch = typeof parsed.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.date.trim());
+        const normalized = normalizeScannedReceiptResult(rawText, expenseCategories, fallbackDate);
 
         res.json({
-          amount:
-            typeof parsed.amount === 'number' && isFinite(parsed.amount) && parsed.amount > 0
-              ? Math.round(parsed.amount * 1000) / 1000
-              : 0,
-          date: dateMatch ? parsed.date!.trim() : fallbackDate,
-          categoryId: resolvedCategoryId,
-          merchant: typeof parsed.merchant === 'string' ? parsed.merchant.trim().slice(0, 60) : '',
-          notes: typeof parsed.notes === 'string' ? parsed.notes.trim().slice(0, 120) : '',
-          type: 'expense',
+          ...normalized,
           quota: {
             used: quotaState.used,
             limit: quotaState.limit,
@@ -950,14 +904,32 @@ Return JSON matching the schema with:
         });
       } catch (error) {
         if (quotaIncremented) {
-          await activeQuotaRef
-            .set(
-              {
-                count: FieldValue.increment(-1),
-                updatedAt: FieldValue.serverTimestamp(),
-              },
-              { merge: true }
-            )
+          await adminDb
+            .runTransaction(async (tx) => {
+              const quotaSnap = await tx.get(activeQuotaRef);
+              const currentQuota = Math.max(0, Number(quotaSnap.data()?.count || 0));
+              const rolledBackQuota = Math.max(0, currentQuota - 1);
+              tx.set(
+                activeQuotaRef,
+                {
+                  month: monthKey,
+                  count: rolledBackQuota,
+                  updatedAt: FieldValue.serverTimestamp(),
+                },
+                { merge: true }
+              );
+              if (targetOrgId) {
+                const orgRef = adminDb.collection('organizations').doc(targetOrgId);
+                const orgSnap = await tx.get(orgRef);
+                if (orgSnap.exists) {
+                  const prevOrgUsed = Math.max(0, Number(orgSnap.data()?.aiScansUsed || 0));
+                  tx.update(orgRef, {
+                    aiScansUsed: Math.max(0, prevOrgUsed - 1),
+                    aiScansMonth: monthKey,
+                  });
+                }
+              }
+            })
             .catch(() => {});
         }
         if (isFirestorePermissionDeniedError(error)) {
@@ -995,22 +967,46 @@ Return JSON matching the schema with:
       return;
     }
 
+    let event: {
+      eventId?: string;
+      uid?: string;
+      orgId?: string;
+      plan?: string;
+      extraSeats?: number;
+      status?: string;
+    };
     try {
-      const event = JSON.parse(rawBody) as {
-        eventId?: string;
-        uid?: string;
-        orgId?: string;
-        plan?: SupportedActivationPlan;
-        extraSeats?: number;
-        status?: string;
-      };
+      event = JSON.parse(rawBody) as typeof event;
+    } catch {
+      res.status(400).json({ error: 'INVALID_WEBHOOK_PAYLOAD' });
+      return;
+    }
 
-      if (!event.eventId || (!event.uid && !event.orgId) || event.status !== 'paid') {
-        res.status(400).json({ error: 'INVALID_WEBHOOK_PAYLOAD' });
-        return;
-      }
+    if (!event || typeof event !== 'object' || !event.eventId || (!event.uid && !event.orgId) || event.status !== 'paid') {
+      res.status(400).json({ error: 'INVALID_WEBHOOK_PAYLOAD' });
+      return;
+    }
 
-      const planInfo = resolveActivationPlanDetails(event.plan);
+    const orgId = typeof event.orgId === 'string' ? event.orgId.trim() : '';
+    if (orgId && !VALID_ORG_ID_REGEX.test(orgId)) {
+      res.status(400).json({ error: 'INVALID_WEBHOOK_PAYLOAD' });
+      return;
+    }
+
+    let planInfo: ReturnType<typeof resolveActivationPlanDetails>;
+    try {
+      planInfo = resolveActivationPlanDetails(event.plan);
+    } catch {
+      res.status(400).json({ error: 'INVALID_PLAN' });
+      return;
+    }
+
+    if (!validateWebhookOrgPlanMatch(planInfo.planTier, orgId)) {
+      res.status(400).json({ error: 'PLAN_ORG_MISMATCH' });
+      return;
+    }
+
+    try {
       const extraSeats = Math.max(0, Math.floor(Number(event.extraSeats || 0)));
       const eventRef = adminDb.collection('paymentWebhooks').doc(event.eventId.slice(0, 120));
 
@@ -1020,7 +1016,6 @@ Return JSON matching the schema with:
           return { duplicate: true };
         }
 
-        const orgId = typeof event.orgId === 'string' && VALID_ORG_ID_REGEX.test(event.orgId) ? event.orgId : '';
         const orgRef = orgId ? adminDb.collection('organizations').doc(orgId) : null;
         const orgSnap = orgRef ? await tx.get(orgRef) : null;
 
@@ -1079,66 +1074,209 @@ Return JSON matching the schema with:
   // Small JSON parser for non-scan API routes
   app.use('/api', express.json({ limit: '64kb' }));
 
-  app.post(
-    '/api/admin/register-code',
+  app.get(
+    '/api/admin/status',
     redeemIpLimiter,
     requireFirebaseAuth,
-    async (req: AuthenticatedRequest, res: Response) => {
+    (req: AuthenticatedRequest, res: Response) => {
       const authUser = req.authUser!;
-      if (
-        !isAuthorizedAdminUser({
-          email: authUser.email,
-          isLoggedIn: true,
-          emailVerified: authUser.email_verified,
-        })
-      ) {
+      res.json({
+        ok: true,
+        isAdmin: isAdminRequestUser(authUser),
+      });
+    }
+  );
+
+  app.post(
+    '/api/admin/verify-passcode',
+    redeemIpLimiter,
+    requireFirebaseAuth,
+    (req: AuthenticatedRequest, res: Response) => {
+      const authUser = req.authUser!;
+      if (!isAdminRequestUser(authUser)) {
         res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات المدير مطلوبة.' });
         return;
       }
 
-      const rawCode = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
-      const targetEmail =
-        typeof req.body?.targetEmail === 'string' && req.body.targetEmail.trim()
-          ? req.body.targetEmail.trim().toLowerCase().slice(0, 254)
-          : null;
-
-      const verified = verifySignedLicenseCode(rawCode);
-      if (!verified.valid) {
-        res.status(400).json({ error: 'INVALID_CODE', message: 'كود التفعيل غير صالح.' });
+      const configuredPasscode =
+        process.env.ADMIN_PASSCODE || process.env.ADMIN_PANEL_PASSCODE || '';
+      if (!configuredPasscode.trim()) {
+        res.status(503).json({
+          error: 'ADMIN_PASSCODE_NOT_CONFIGURED',
+          message: 'رمز مرور لوحة الإدارة غير مضبوط على الخادم (ADMIN_PASSCODE).',
+        });
         return;
       }
 
+      const supplied = typeof req.body?.passcode === 'string' ? req.body.passcode : '';
+      if (!verifyTimingSafePasscode(supplied, configuredPasscode)) {
+        res.status(403).json({
+          error: 'INVALID_PASSCODE',
+          message: 'كلمة مرور الإدارة غير صحيحة.',
+        });
+        return;
+      }
+
+      const session = issueAdminSessionToken(authUser.uid);
+      res.json({
+        ok: true,
+        adminSessionToken: session.token,
+        expiresAt: session.expiresAt,
+      });
+    }
+  );
+
+  app.get(
+    '/api/admin/license-codes',
+    redeemIpLimiter,
+    requireFirebaseAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const authUser = req.authUser!;
+      if (!isAdminRequestUser(authUser)) {
+        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات المدير مطلوبة.' });
+        return;
+      }
+      if (!verifyAdminSessionToken(req.headers['x-admin-session'], authUser.uid)) {
+        res.status(403).json({
+          error: 'ADMIN_SESSION_REQUIRED',
+          message: 'يتطلب التحقق من رمز مرور الإدارة أولاً.',
+        });
+        return;
+      }
       if (!adminDbReady) {
         respondCloudAdminUnavailable(res);
         return;
       }
 
-      const codeHash = hashActivationCodeServer(verified.code);
       try {
-        const codeRef = adminDb.collection('activationCodes').doc(codeHash);
-        const snap = await codeRef.get();
-        if (!snap.exists) {
-          await codeRef.set({
-            plan: verified.proPlan,
-            tier: verified.planTier,
-            cycle: verified.billingCycle,
-            targetEmail,
-            issuedByUid: authUser.uid,
-            issuedByEmail: (authUser.email || '').toLowerCase(),
-            usedBy: null,
-            usedOrgId: null,
-            createdAt: FieldValue.serverTimestamp(),
-          });
-        }
-        res.json({ ok: true, codeHash });
+        const snap = await adminDb
+          .collection('licenseCodes')
+          .orderBy('createdAtMs', 'desc')
+          .limit(50)
+          .get();
+        const codes = snap.docs.map((d) => {
+          const raw = d.data() as Record<string, unknown>;
+          const isUsed = Boolean(raw.used === true || raw.status === 'used' || raw.usedBy);
+          return {
+            codeHash: String(raw.codeHash || d.id),
+            codePreview: String(raw.codePreview || 'RSD-****'),
+            tier: raw.tier === 'business' ? 'business' : 'pro',
+            planTier: raw.planTier === 'business_pro' ? 'business_pro' : 'personal_pro',
+            cycle:
+              raw.cycle === 'monthly' || raw.cycle === 'yearly' || raw.cycle === 'lifetime'
+                ? raw.cycle
+                : 'yearly',
+            status: isUsed ? 'used' : 'unused',
+            used: isUsed,
+            usedBy: typeof raw.usedBy === 'string' ? raw.usedBy : null,
+            usedOrgId: typeof raw.usedOrgId === 'string' ? raw.usedOrgId : null,
+            usedAt: typeof raw.usedAt === 'number' ? raw.usedAt : null,
+            createdByUid: String(raw.createdByUid || ''),
+            createdByEmail: String(raw.createdByEmail || ''),
+            createdAtMs: typeof raw.createdAtMs === 'number' ? raw.createdAtMs : Date.now(),
+          };
+        });
+        res.json({ ok: true, codes });
       } catch (err) {
         if (isFirestorePermissionDeniedError(err)) {
           adminDbReady = false;
           respondCloudAdminUnavailable(res);
           return;
         }
-        console.error('Admin register code error:', err);
-        res.status(500).json({ error: 'REGISTER_CODE_FAILED' });
+        console.error('Admin list license codes error:', err);
+        res.status(500).json({ error: 'LIST_LICENSE_CODES_FAILED' });
+      }
+    }
+  );
+
+  app.post(
+    '/api/admin/license-codes',
+    redeemIpLimiter,
+    requireFirebaseAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const authUser = req.authUser!;
+      if (!isAdminRequestUser(authUser)) {
+        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات المدير مطلوبة.' });
+        return;
+      }
+      if (!verifyAdminSessionToken(req.headers['x-admin-session'], authUser.uid)) {
+        res.status(403).json({
+          error: 'ADMIN_SESSION_REQUIRED',
+          message: 'يتطلب التحقق من رمز مرور الإدارة أولاً.',
+        });
+        return;
+      }
+      if (!adminDbReady) {
+        respondCloudAdminUnavailable(res);
+        return;
+      }
+
+      const rawTier = req.body?.tier === 'business' ? 'business' : 'pro';
+      const rawCycle =
+        req.body?.cycle === 'monthly' || req.body?.cycle === 'yearly' || req.body?.cycle === 'lifetime'
+          ? req.body.cycle
+          : 'yearly';
+      const targetEmail =
+        typeof req.body?.targetEmail === 'string' && req.body.targetEmail.trim()
+          ? req.body.targetEmail.trim().toLowerCase().slice(0, 254)
+          : null;
+
+      try {
+        const generated = generateRandomLicenseCodeServer({
+          tier: rawTier,
+          cycle: rawCycle,
+        });
+        const now = Date.now();
+        const createdByEmail = String(authUser.email || '').trim().toLowerCase().slice(0, 254);
+
+        const docData = {
+          codeHash: generated.codeHash,
+          codePreview: generated.codePreview,
+          plan: generated.proPlan,
+          tier: generated.tier,
+          planTier: generated.planTier,
+          cycle: generated.cycle,
+          targetEmail,
+          status: 'unused' as const,
+          used: false,
+          usedBy: null,
+          usedOrgId: null,
+          usedAt: null,
+          createdByUid: authUser.uid,
+          createdByEmail,
+          createdAtMs: now,
+          createdAt: FieldValue.serverTimestamp(),
+        };
+
+        await adminDb.collection('licenseCodes').doc(generated.codeHash).set(docData);
+
+        res.json({
+          ok: true,
+          code: generated.code,
+          record: {
+            codeHash: generated.codeHash,
+            codePreview: generated.codePreview,
+            tier: generated.tier,
+            planTier: generated.planTier,
+            cycle: generated.cycle,
+            status: 'unused' as const,
+            used: false,
+            usedBy: null,
+            usedOrgId: null,
+            usedAt: null,
+            createdByUid: authUser.uid,
+            createdByEmail,
+            createdAtMs: now,
+          },
+        });
+      } catch (err) {
+        if (isFirestorePermissionDeniedError(err)) {
+          adminDbReady = false;
+          respondCloudAdminUnavailable(res);
+          return;
+        }
+        console.error('Admin create license code error:', err);
+        res.status(500).json({ error: 'CREATE_LICENSE_CODE_FAILED' });
       }
     }
   );
@@ -1149,14 +1287,15 @@ Return JSON matching the schema with:
     requireFirebaseAuth,
     async (req: AuthenticatedRequest, res: Response) => {
       const authUser = req.authUser!;
-      if (
-        !isAuthorizedAdminUser({
-          email: authUser.email,
-          isLoggedIn: true,
-          emailVerified: authUser.email_verified,
-        })
-      ) {
+      if (!isAdminRequestUser(authUser)) {
         res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات المدير مطلوبة.' });
+        return;
+      }
+      if (!verifyAdminSessionToken(req.headers['x-admin-session'], authUser.uid)) {
+        res.status(403).json({
+          error: 'ADMIN_SESSION_REQUIRED',
+          message: 'يتطلب التحقق من رمز مرور الإدارة أولاً.',
+        });
         return;
       }
 
@@ -1166,14 +1305,21 @@ Return JSON matching the schema with:
       }
 
       try {
+        const allowlistedAdmins = parseAdminEmailsEnv(process.env.ADMIN_EMAILS);
         const snap = await adminDb.collection('users').limit(200).get();
         const users = snap.docs.map((d) => {
           const data = d.data() as Record<string, unknown>;
           const ent = resolveUserEntitlement(data);
+          const rowUid = String(data.uid || d.id);
+          const rowEmail = String(data.email || '');
+          const isRowAdmin =
+            rowUid === authUser.uid ||
+            (rowEmail.trim() ? allowlistedAdmins.has(rowEmail.trim().toLowerCase()) : false);
           return {
-            uid: String(data.uid || d.id),
-            email: String(data.email || ''),
+            uid: rowUid,
+            email: rowEmail,
             displayName: typeof data.displayName === 'string' ? data.displayName : undefined,
+            isAdmin: isRowAdmin,
             isPro: ent.isPro,
             proActive: ent.isPro,
             planTier: ent.planTier,
@@ -1183,6 +1329,13 @@ Return JSON matching the schema with:
             proExpiresAt: ent.expiresAt,
             lastSyncedAt: typeof data.lastSyncedAt === 'number' ? data.lastSyncedAt : undefined,
           };
+        });
+        users.sort((a, b) => {
+          if (a.isPro !== b.isPro) return a.isPro ? -1 : 1;
+          const aTime = a.lastSyncedAt || a.startedAt || 0;
+          const bTime = b.lastSyncedAt || b.startedAt || 0;
+          if (aTime !== bTime) return bTime - aTime;
+          return (a.email || '').localeCompare(b.email || '');
         });
         res.json({ ok: true, users });
       } catch (err) {
@@ -1203,14 +1356,15 @@ Return JSON matching the schema with:
     requireFirebaseAuth,
     async (req: AuthenticatedRequest, res: Response) => {
       const authUser = req.authUser!;
-      if (
-        !isAuthorizedAdminUser({
-          email: authUser.email,
-          isLoggedIn: true,
-          emailVerified: authUser.email_verified,
-        })
-      ) {
+      if (!isAdminRequestUser(authUser)) {
         res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات المدير مطلوبة.' });
+        return;
+      }
+      if (!verifyAdminSessionToken(req.headers['x-admin-session'], authUser.uid)) {
+        res.status(403).json({
+          error: 'ADMIN_SESSION_REQUIRED',
+          message: 'يتطلب التحقق من رمز مرور الإدارة أولاً.',
+        });
         return;
       }
 
@@ -1235,10 +1389,10 @@ Return JSON matching the schema with:
       const planTier: SupportedPlanTier =
         rawTier === 'business_pro' ? 'business_pro' : rawTier === 'personal_pro' ? 'personal_pro' : 'free';
       const now = Date.now();
-      let updatePayload: Record<string, unknown>;
+      let jsonFields: Record<string, unknown>;
 
       if (planTier === 'free' || rawCycle === 'free') {
-        updatePayload = {
+        jsonFields = {
           isPro: false,
           proActive: false,
           planTier: 'free',
@@ -1248,7 +1402,6 @@ Return JSON matching the schema with:
           expiresAt: null,
           proExpiresAt: null,
           redeemedCouponCode: null,
-          updatedAt: FieldValue.serverTimestamp(),
         };
       } else {
         const cycle = rawCycle === 'monthly' || rawCycle === 'yearly' ? rawCycle : 'lifetime';
@@ -1262,7 +1415,7 @@ Return JSON matching the schema with:
               ? 'business_yearly'
               : 'code'
             : cycle;
-        updatePayload = {
+        jsonFields = {
           isPro: true,
           proActive: true,
           planTier,
@@ -1272,13 +1425,23 @@ Return JSON matching the schema with:
           expiresAt,
           proExpiresAt: expiresAt,
           redeemedCouponCode: null,
-          updatedAt: FieldValue.serverTimestamp(),
         };
       }
 
       try {
-        await adminDb.collection('users').doc(targetUid).update(updatePayload);
-        res.json({ ok: true, uid: targetUid, ...updatePayload });
+        await adminDb
+          .collection('users')
+          .doc(targetUid)
+          .update({
+            ...jsonFields,
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+        res.json({
+          ok: true,
+          uid: targetUid,
+          ...jsonFields,
+          updatedAt: new Date(now).toISOString(),
+        });
       } catch (err) {
         if (isFirestorePermissionDeniedError(err)) {
           adminDbReady = false;
@@ -1300,6 +1463,7 @@ Return JSON matching the schema with:
       const email = req.authUser!.email || '';
       const rawCode = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
       const targetOrgId = typeof req.body?.orgId === 'string' ? req.body.orgId.trim() : '';
+      const isPreview = req.body?.preview === true;
 
       if (!rawCode || rawCode.length > 64) {
         res.status(400).json({
@@ -1314,77 +1478,68 @@ Return JSON matching the schema with:
         return;
       }
 
+      if (!adminDbReady) {
+        respondCloudAdminUnavailable(res);
+        return;
+      }
+
       const codeHash = hashActivationCodeServer(rawCode);
-      const signedCheck = verifySignedLicenseCode(rawCode);
 
       try {
         const result = await adminDb.runTransaction(async (tx) => {
-          const codeRef = adminDb.collection('activationCodes').doc(codeHash);
+          const licenseRef = adminDb.collection('licenseCodes').doc(codeHash);
+          const activationRef = adminDb.collection('activationCodes').doc(codeHash);
           const adminIssuedRef = adminDb.collection('adminIssuedCodes').doc(codeHash);
           const userRef = adminDb.collection('users').doc(uid);
           const orgRef = targetOrgId ? adminDb.collection('organizations').doc(targetOrgId) : null;
           const memberRef = orgRef ? orgRef.collection('members').doc(uid) : null;
 
-          const [codeSnap, adminIssuedSnap, userSnap, orgSnap, memberSnap] = await Promise.all([
-            tx.get(codeRef),
-            tx.get(adminIssuedRef),
-            tx.get(userRef),
-            orgRef ? tx.get(orgRef) : Promise.resolve(null),
-            memberRef ? tx.get(memberRef) : Promise.resolve(null),
-          ]);
+          const [licenseSnap, activationSnap, adminIssuedSnap, userSnap, orgSnap, memberSnap] =
+            await Promise.all([
+              tx.get(licenseRef),
+              tx.get(activationRef),
+              tx.get(adminIssuedRef),
+              tx.get(userRef),
+              orgRef ? tx.get(orgRef) : Promise.resolve(null),
+              memberRef ? tx.get(memberRef) : Promise.resolve(null),
+            ]);
 
-          const adminIssuedData = adminIssuedSnap.exists
-            ? (adminIssuedSnap.data() as {
-                usedBy?: string | null;
-                targetEmail?: string | null;
-              })
+          const activeCodeRef = licenseSnap.exists
+            ? licenseRef
+            : activationSnap.exists
+            ? activationRef
+            : adminIssuedSnap.exists
+            ? adminIssuedRef
+            : null;
+          const activeCodeSnap = licenseSnap.exists
+            ? licenseSnap
+            : activationSnap.exists
+            ? activationSnap
+            : adminIssuedSnap.exists
+            ? adminIssuedSnap
             : null;
 
-          if (adminIssuedData?.usedBy && adminIssuedData.usedBy !== uid) {
+          if (!activeCodeRef || !activeCodeSnap || !activeCodeSnap.exists) {
             return {
-              status: 409 as const,
-              error: 'CODE_ALREADY_USED',
-              message: 'تم استخدام هذا الكود مسبقاً بحساب آخر.',
+              status: 404 as const,
+              error: 'INVALID_CODE',
+              message: 'كود التفعيل غير صحيح أو غير مسجل.',
             };
           }
 
-          if (
-            adminIssuedData?.targetEmail &&
-            adminIssuedData.targetEmail.trim().toLowerCase() !== email.trim().toLowerCase()
-          ) {
-            return {
-              status: 403 as const,
-              error: 'TARGET_EMAIL_MISMATCH',
-              message: 'هذا الكود مخصص لبريد إلكتروني آخر.',
-            };
-          }
-
-          let codeData: {
+          const codeData = activeCodeSnap.data() as {
             plan?: string;
             tier?: string;
+            planTier?: string;
             cycle?: string;
             seats?: number;
             extraSeats?: number;
             targetEmail?: string | null;
+            used?: boolean;
+            status?: string;
             usedBy?: string | null;
             usedOrgId?: string | null;
           };
-          let isFreshSignedCode = false;
-
-          if (!codeSnap.exists) {
-            if (!signedCheck.valid) {
-              return { status: 404 as const, error: 'INVALID_CODE', message: 'كود التفعيل غير صحيح.' };
-            }
-            codeData = {
-              plan: signedCheck.proPlan,
-              tier: signedCheck.planTier,
-              cycle: signedCheck.billingCycle,
-              usedBy: null,
-            };
-            isFreshSignedCode = true;
-          } else {
-            codeData = codeSnap.data() as typeof codeData;
-          }
 
           if (
             codeData.targetEmail &&
@@ -1397,7 +1552,10 @@ Return JSON matching the schema with:
             };
           }
 
-          if (codeData.usedBy && codeData.usedBy !== uid) {
+          const isAlreadyClaimedOther =
+            (codeData.usedBy && codeData.usedBy !== uid) ||
+            ((codeData.used === true || codeData.status === 'used') && !codeData.usedBy);
+          if (isAlreadyClaimedOther) {
             return {
               status: 409 as const,
               error: 'CODE_ALREADY_USED',
@@ -1406,6 +1564,13 @@ Return JSON matching the schema with:
           }
 
           if (codeData.usedBy === uid) {
+            if (isPreview) {
+              return {
+                status: 409 as const,
+                error: 'CODE_ALREADY_USED',
+                message: 'تم تفعيل هذا الكود مسبقاً على حسابك.',
+              };
+            }
             if (targetOrgId && codeData.usedOrgId && codeData.usedOrgId !== targetOrgId) {
               return {
                 status: 409 as const,
@@ -1420,17 +1585,44 @@ Return JSON matching the schema with:
                 isPro: true,
                 proPlan: String(userSnap.data()?.proPlan || 'code') as SupportedActivationPlan,
                 planTier: currentEntitlement.planTier as Exclude<SupportedPlanTier, 'free'>,
-                billingCycle: currentEntitlement.billingCycle as Exclude<SupportedBillingCycle, 'free' | 'trial' | 'code'>,
+                billingCycle: currentEntitlement.billingCycle as Exclude<
+                  SupportedBillingCycle,
+                  'free' | 'trial' | 'code'
+                >,
                 expiresAt: currentEntitlement.expiresAt,
-                seatLimit: orgSnap?.exists ? Number(orgSnap.data()?.seatLimit || computeOrgSeatLimit(0)) : undefined,
+                seatLimit: orgSnap?.exists
+                  ? Number(orgSnap.data()?.seatLimit || computeOrgSeatLimit(0))
+                  : undefined,
               };
             }
           }
 
           const previewResolved = resolveActivationPlanDetails(codeData.plan, {
-            tier: codeData.tier,
+            tier: codeData.planTier || codeData.tier,
             cycle: codeData.cycle,
           });
+
+          if (orgRef && previewResolved.planTier !== 'business_pro') {
+            return {
+              status: 400 as const,
+              error: 'PERSONAL_CODE_FOR_ORG',
+              message:
+                'هذا الكود مخصص لباقة الأفراد ولا يصلح لترقية مؤسسة. أدخل كود باقة الأعمال أو فعّل بدون تحديد مؤسسة.',
+            };
+          }
+
+          if (isPreview) {
+            return {
+              status: 200 as const,
+              preview: true as const,
+              tier: previewResolved.planTier === 'business_pro' ? ('business' as const) : ('pro' as const),
+              planTier: previewResolved.planTier,
+              proPlan: previewResolved.proPlan,
+              billingCycle: previewResolved.billingCycle,
+              expiresAt: previewResolved.expiresAt,
+            };
+          }
+
           const existingEntitlement = resolveUserEntitlement(userSnap.data());
           const existingOrgExpiresAt =
             orgSnap?.exists &&
@@ -1448,19 +1640,10 @@ Return JSON matching the schema with:
               : undefined;
 
           const resolved = resolveActivationPlanDetails(codeData.plan, {
-            tier: codeData.tier,
+            tier: codeData.planTier || codeData.tier,
             cycle: codeData.cycle,
             baseMs: targetOrgId ? existingOrgExpiresAt : existingUserExpiresAt,
           });
-
-          if (orgRef && resolved.planTier !== 'business_pro') {
-            return {
-              status: 400 as const,
-              error: 'PERSONAL_CODE_FOR_ORG',
-              message:
-                'هذا الكود مخصص لباقة الأفراد ولا يصلح لترقية مؤسسة. أدخل كود باقة الأعمال أو فعّل بدون تحديد مؤسسة.',
-            };
-          }
 
           let appliedSeatLimit: number | undefined;
 
@@ -1498,31 +1681,18 @@ Return JSON matching the schema with:
             });
           }
 
-          if (isFreshSignedCode) {
-            tx.set(codeRef, {
-              plan: resolved.proPlan,
-              tier: resolved.planTier,
-              cycle: resolved.billingCycle,
+          if (!codeData.usedBy) {
+            tx.update(activeCodeRef, {
+              status: 'used',
+              used: true,
               usedBy: uid,
               usedOrgId: targetOrgId || null,
-              usedAt: FieldValue.serverTimestamp(),
-              createdAt: FieldValue.serverTimestamp(),
-            });
-          } else if (!codeData.usedBy) {
-            tx.update(codeRef, {
-              usedBy: uid,
-              usedOrgId: targetOrgId || null,
-              usedAt: FieldValue.serverTimestamp(),
+              usedAt: Date.now(),
+              usedAtServer: FieldValue.serverTimestamp(),
             });
           }
 
-          if (adminIssuedSnap.exists && !adminIssuedData?.usedBy) {
-            tx.update(adminIssuedRef, {
-              usedBy: uid,
-              usedAt: FieldValue.serverTimestamp(),
-            });
-          }
-
+          const nowMs = Date.now();
           const userUpdates: Record<string, unknown> = {
             uid,
             isPro: true,
@@ -1530,7 +1700,7 @@ Return JSON matching the schema with:
             proPlan: resolved.proPlan,
             planTier: resolved.planTier,
             billingCycle: resolved.billingCycle,
-            startedAt: Date.now(),
+            startedAt: nowMs,
             expiresAt: resolved.expiresAt,
             proExpiresAt: resolved.expiresAt,
             activationCodeHash: codeHash,
@@ -1550,17 +1720,33 @@ Return JSON matching the schema with:
 
           return {
             status: 200 as const,
+            preview: false as const,
             isPro: true,
             proPlan: resolved.proPlan,
             planTier: resolved.planTier,
             billingCycle: resolved.billingCycle,
             expiresAt: resolved.expiresAt,
+            isCumulativeRenewal: Boolean(targetOrgId ? existingOrgExpiresAt : existingUserExpiresAt),
             seatLimit: appliedSeatLimit,
           };
         });
 
         if (result.status !== 200) {
           res.status(result.status).json({ error: result.error, message: result.message });
+          return;
+        }
+
+        if ('preview' in result && result.preview) {
+          res.json({
+            ok: true,
+            preview: true,
+            valid: true,
+            tier: result.tier,
+            planTier: result.planTier,
+            proPlan: result.proPlan,
+            billingCycle: result.billingCycle,
+            expiresAt: result.expiresAt,
+          });
           return;
         }
 
@@ -1572,9 +1758,17 @@ Return JSON matching the schema with:
           billingCycle: result.billingCycle,
           expiresAt: result.expiresAt,
           proExpiresAt: result.expiresAt,
+          isCumulativeRenewal: Boolean(result.isCumulativeRenewal),
           ...(result.seatLimit !== undefined ? { seatLimit: result.seatLimit } : {}),
         });
       } catch (err) {
+        if (err instanceof Error && err.message === 'INVALID_PLAN') {
+          res.status(400).json({
+            error: 'INVALID_PLAN',
+            message: 'بيانات الخطة المرتبطة بهذا الكود غير صالحة.',
+          });
+          return;
+        }
         if (isFirestorePermissionDeniedError(err)) {
           adminDbReady = false;
           respondCloudAdminUnavailable(res);
@@ -2216,7 +2410,7 @@ Return JSON matching the schema with:
       const email = (req.authUser!.email || `${uid}@firebase.local`).slice(0, 254);
       const displayName = (req.authUser!.name || email.split('@')[0] || 'Member').slice(0, 120);
 
-      const remainingLockSec = checkJoinLock(uid);
+      const remainingLockSec = await checkJoinLockInDb(uid);
       if (remainingLockSec > 0) {
         res.status(429).json({
           error: 'JOIN_LOCKED',
@@ -2241,7 +2435,7 @@ Return JSON matching the schema with:
           .get();
 
         if (inviteQuery.empty) {
-          recordJoinFailure(uid);
+          await recordJoinFailureInDb(uid);
           res.status(404).json({
             error: 'INVITE_NOT_FOUND',
             message: 'رمز الدعوة غير صحيح أو منتهي الصلاحية.',
@@ -2372,12 +2566,12 @@ Return JSON matching the schema with:
         });
 
         if (outcome.status !== 200) {
-          recordJoinFailure(uid);
+          await recordJoinFailureInDb(uid);
           res.status(outcome.status).json({ error: outcome.error, message: outcome.message });
           return;
         }
 
-        clearJoinFailures(uid);
+        await clearJoinFailuresInDb(uid);
         res.json({
           ok: true,
           orgId: outcome.orgId,

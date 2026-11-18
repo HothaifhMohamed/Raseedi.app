@@ -852,7 +852,7 @@ export const MoreMenu: React.FC = () => {
             <ArrowIcon className="w-4 h-4 text-[var(--color-muted)]" />
           </button>
 
-          {isAdminUser && user?.email?.trim().toLowerCase() === 'hapaypal2003@gmail.com' && (
+          {isAdminUser && (
             <button
               type="button"
               data-testid="more-admin-panel-btn"

@@ -9,9 +9,9 @@ import {
 } from './localOrgHelpers';
 import {
   getLocalTodayDateString,
-  normalizeScannedInvoiceResult,
-  validateScanInvoicePayload,
-} from '../../api/scan-invoice';
+  normalizeScannedReceiptResult,
+  validateScanReceiptPayload,
+} from './serverSecurity';
 import { Transaction } from '../types';
 
 test('buildLocalOrgWorkspace initializes localFirstMode org with wallets, minor units, and owner member', () => {
@@ -189,8 +189,8 @@ test('recalculateLocalOrgWallets recomputes from initialBalance and ignores pend
   assert.equal(logs[0].summary, 'اختبار السجل');
 });
 
-test('api/scan-invoice validation and normalization helpers work reliably', () => {
-  const badMime = validateScanInvoicePayload({
+test('serverSecurity receipt scan validation and normalization helpers work reliably', () => {
+  const badMime = validateScanReceiptPayload({
     imageBase64: 'YWJj',
     mimeType: 'application/pdf',
   });
@@ -200,13 +200,13 @@ test('api/scan-invoice validation and normalization helpers work reliably', () =
     assert.equal(badMime.error, 'INVALID_MIME_TYPE');
   }
 
-  const badImg = validateScanInvoicePayload({
+  const badImg = validateScanReceiptPayload({
     imageBase64: '',
     mimeType: 'image/jpeg',
   });
   assert.equal(badImg.ok, false);
 
-  const valid = validateScanInvoicePayload({
+  const valid = validateScanReceiptPayload({
     imageBase64: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB',
     mimeType: 'image/png',
     categories: [
@@ -223,7 +223,7 @@ test('api/scan-invoice validation and normalization helpers work reliably', () =
   const today = getLocalTodayDateString(new Date('2026-06-15T12:00:00Z'));
   assert.match(today, /^\d{4}-\d{2}-\d{2}$/);
 
-  const normalized = normalizeScannedInvoiceResult(
+  const normalized = normalizeScannedReceiptResult(
     JSON.stringify({
       amount: 145.6789,
       date: 'not-a-date',

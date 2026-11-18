@@ -8,6 +8,7 @@ import {
   calculateMonthlySummary,
   getCustomMonthDateRange,
   getTransactionsInDateRange,
+  roundMoney,
 } from './calculations.js';
 
 function makeWallet(id: string, name: string, balance: number, currency = 'EGP', balanceMinor?: number): Wallet {
@@ -177,5 +178,32 @@ describe('computeTransactionUpdate delta accounting & monthly statistics parity'
     const res = computeTransactionUpdate(tx, { type: 'income', amount: 300 }, [cash]);
     // Reversing -200 gives +200 (1000), applying +300 income gives 1300 (+500 net)
     assert.equal(res.updatedWallets[0].balance, 1300);
+  });
+
+  it('rounds transaction amounts and handles self-transfers cleanly via Map aggregation', () => {
+    assert.equal(roundMoney(10.129, 'EGP'), 10.13);
+    assert.equal(roundMoney(10.129, 'KWD'), 10.129);
+
+    const cash = makeWallet('w-cash', 'Cash', 1000, 'EGP', 100000);
+    const selfTransfer = makeTx({
+      id: 'tx-self',
+      type: 'transfer',
+      amount: 100,
+      convertedAmount: 100,
+      transferFee: 5.556,
+      walletId: 'w-cash',
+      toWalletId: 'w-cash',
+    });
+
+    const res = computeTransactionUpdate(
+      selfTransfer,
+      { amount: 200.129, transferFee: 2.345 },
+      [cash]
+    );
+    assert.equal(res.mergedTx.amount, 200.13);
+    assert.equal(res.mergedTx.transferFee, 2.35);
+    // Reversing old self-transfer (+100 + 5.56 - 100 = +5.56) then applying new (-200.13 - 2.35 + 200.13 = -2.35) -> net +3.21
+    assert.equal(res.updatedWallets[0].balance, 1003.21);
+    assert.equal(res.updatedWallets[0].balanceMinor, 100321);
   });
 });

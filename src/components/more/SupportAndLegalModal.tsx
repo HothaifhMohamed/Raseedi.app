@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { SUPPORT_CONFIG } from '../../constants/support';
-import { isEeaOrUkUser, resetAdConsentChoice } from '../common/AdConsentBanner';
+import { resetAdConsentChoice } from '../common/AdConsentBanner';
 import { BrandLogo } from '../common/BrandLogo';
 
 export interface SupportAndLegalModalProps {
@@ -333,7 +333,7 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
                     </p>
                   </div>
                 )}
-                {isEeaOrUkUser() && !isPro && (
+                {!isPro && Boolean(import.meta.env.VITE_ADSENSE_CLIENT_ID?.trim()) && (
                   <button
                     type="button"
                     onClick={() => {

@@ -29,6 +29,10 @@ import { normalizeArabicPersianNumerals } from './numbers';
 
 export { roundCurrency, fromMinor, toMinor, normalizeArabicPersianNumerals };
 
+export function roundMoney(val: number, currencyCode = 'EGP'): number {
+  return roundCurrency(val, currencyCode);
+}
+
 /**
  * Convert numbers to Eastern Arabic numerals (١٢٣)
  */

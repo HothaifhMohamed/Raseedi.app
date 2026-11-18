@@ -327,12 +327,36 @@ export async function loadPreRestoreSnapshot(): Promise<{ data: AppDatabaseData;
   });
 }
 
+const UNSAFE_BACKUP_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function hasUnsafePrototypeKey(node: unknown, depth = 0): boolean {
+  if (!node || typeof node !== 'object' || depth > 25) return false;
+  if (Array.isArray(node)) {
+    for (let i = 0; i < node.length; i++) {
+      if (hasUnsafePrototypeKey(node[i], depth + 1)) return true;
+    }
+    return false;
+  }
+  const ownKeys = Object.getOwnPropertyNames(node);
+  for (const key of ownKeys) {
+    if (UNSAFE_BACKUP_KEYS.has(key)) return true;
+    const val = (node as Record<string, unknown>)[key];
+    if (val && typeof val === 'object' && hasUnsafePrototypeKey(val, depth + 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function validateBackupSchema(raw: unknown): {
   valid: boolean;
   reason?: string;
 } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return { valid: false, reason: 'ROOT_NOT_OBJECT' };
+  }
+  if (hasUnsafePrototypeKey(raw)) {
+    return { valid: false, reason: 'UNSAFE_PROTOTYPE_KEY' };
   }
   const obj = raw as Record<string, unknown>;
   const hasArrayField =
@@ -352,10 +376,11 @@ export function validateBackupSchema(raw: unknown): {
     return { valid: false, reason: 'INVALID_CATEGORIES_FIELD' };
   }
   if (Array.isArray(obj.transactions)) {
-    for (const tx of obj.transactions.slice(0, 25)) {
+    for (const tx of obj.transactions) {
       if (
         !tx ||
         typeof tx !== 'object' ||
+        Array.isArray(tx) ||
         typeof (tx as Transaction).id !== 'string' ||
         typeof (tx as Transaction).amount !== 'number' ||
         !Number.isFinite((tx as Transaction).amount)
@@ -365,8 +390,16 @@ export function validateBackupSchema(raw: unknown): {
     }
   }
   if (Array.isArray(obj.wallets)) {
-    for (const w of obj.wallets.slice(0, 25)) {
-      if (!w || typeof w !== 'object' || typeof (w as Wallet).id !== 'string' || typeof (w as Wallet).name !== 'string') {
+    for (const w of obj.wallets) {
+      if (
+        !w ||
+        typeof w !== 'object' ||
+        Array.isArray(w) ||
+        typeof (w as Wallet).id !== 'string' ||
+        typeof (w as Wallet).name !== 'string' ||
+        ((w as Wallet).balance !== undefined &&
+          (typeof (w as Wallet).balance !== 'number' || !Number.isFinite((w as Wallet).balance)))
+      ) {
         return { valid: false, reason: 'INVALID_WALLET_ITEM' };
       }
     }

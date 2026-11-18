@@ -72,7 +72,7 @@ export async function prepareReceiptImageDataUrl(file: File): Promise<{
 }
 
 /**
- * Scan receipt image via Vercel Serverless /api/scan-invoice endpoint
+ * Scan receipt image via authenticated /api/scan-receipt endpoint
  */
 export async function scanReceiptWithAI(
   imageBase64: string,
@@ -90,25 +90,39 @@ export async function scanReceiptWithAI(
     );
   }
 
+  if (!auth.currentUser) {
+    throw new ReceiptScanError(
+      'AUTH_REQUIRED',
+      isRTL
+        ? 'سجّل الدخول بحساب جوجل لاستخدام مسح الفواتير.'
+        : 'Sign in with Google to use AI receipt scanning.'
+    );
+  }
+
   let idToken: string | null = null;
-  if (auth.currentUser) {
-    try {
-      idToken = await auth.currentUser.getIdToken();
-    } catch {
-      idToken = null;
-    }
+  try {
+    idToken = await auth.currentUser.getIdToken();
+  } catch {
+    idToken = null;
+  }
+
+  if (!idToken) {
+    throw new ReceiptScanError(
+      'AUTH_REQUIRED',
+      isRTL
+        ? 'سجّل الدخول بحساب جوجل لاستخدام مسح الفواتير.'
+        : 'Sign in with Google to use AI receipt scanning.'
+    );
   }
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    Authorization: `Bearer ${idToken}`,
   };
-  if (idToken) {
-    headers.Authorization = `Bearer ${idToken}`;
-  }
 
   let response: Response;
   try {
-    response = await fetch('/api/scan-invoice', {
+    response = await fetch('/api/scan-receipt', {
       method: 'POST',
       headers,
       body: JSON.stringify({

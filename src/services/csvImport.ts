@@ -90,6 +90,24 @@ function formatUtcYmd(dt: Date): string | null {
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
+const UNSAFE_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * Escapes any spreadsheet/CSV cell and neutralizes formula injection payloads (=, +, -, @, \t, \r).
+ */
+export function escapeCsvCell(val: unknown): string {
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'number') {
+    return Number.isFinite(val) ? String(val) : '';
+  }
+  const raw = String(val);
+  const safe =
+    /^[=+\-@\t\r]/.test(raw) || /^[=+\-@\t\r]/.test(raw.trimStart())
+      ? `'${raw}`
+      : raw;
+  return `"${safe.replace(/"/g, '""')}"`;
+}
+
 /**
  * Converts headers + rows into a normalized Array of Objects (JSON records).
  */
@@ -100,14 +118,17 @@ export function rowsToRecordObjects(
   const seenKeys = new Map<string, number>();
   const uniqueHeaders = headers.map((h, idx) => {
     const base = (h || '').trim() || `column_${idx + 1}`;
+    if (UNSAFE_OBJECT_KEYS.has(base)) return null;
     const count = seenKeys.get(base) || 0;
     seenKeys.set(base, count + 1);
-    return count === 0 ? base : `${base}_${count + 1}`;
+    const candidate = count === 0 ? base : `${base}_${count + 1}`;
+    return UNSAFE_OBJECT_KEYS.has(candidate) ? null : candidate;
   });
 
   return rows.map((row) => {
     const obj: Record<string, string> = {};
     uniqueHeaders.forEach((key, idx) => {
+      if (!key) return;
       obj[key] = row[idx] !== undefined ? String(row[idx]).trim() : '';
     });
     return obj;

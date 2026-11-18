@@ -981,6 +981,22 @@ export async function updateOrgTxAttachmentPathsCloud(
   await batch.commit();
 }
 
+async function commitChunkedOperations(
+  ops: Array<(batch: ReturnType<typeof writeBatch>) => void>,
+  maxOpsPerBatch = 380
+): Promise<void> {
+  if (ops.length === 0) return;
+  const chunkSize = Math.max(1, Math.min(450, maxOpsPerBatch));
+  for (let i = 0; i < ops.length; i += chunkSize) {
+    const batch = writeBatch(db);
+    const slice = ops.slice(i, i + chunkSize);
+    for (const op of slice) {
+      op(batch);
+    }
+    await batch.commit();
+  }
+}
+
 export async function moveOrgTransactionsCloud(
   orgId: string,
   txsToMove: Transaction[],
@@ -993,9 +1009,9 @@ export async function moveOrgTransactionsCloud(
   if (txsToMove.length === 0) return;
 
   const totalDeltas = new Map<string, number>();
-  const batch = writeBatch(db);
+  const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
 
-  for (const oldTx of txsToMove.slice(0, 350)) {
+  for (const oldTx of txsToMove) {
     const newTx: Transaction = {
       ...oldTx,
       walletId: oldTx.walletId === fromWalletId ? toWalletId : oldTx.walletId,
@@ -1003,9 +1019,11 @@ export async function moveOrgTransactionsCloud(
       updatedAt: Date.now(),
     };
     const cloudDoc = buildOrgTxPayloadForCloud(orgId, newTx);
-    batch.update(doc(db, 'organizations', orgId, 'transactions', oldTx.id), {
-      payload: cloudDoc.payload,
-      updatedAt: serverTimestamp(),
+    ops.push((batch) => {
+      batch.update(doc(db, 'organizations', orgId, 'transactions', oldTx.id), {
+        payload: cloudDoc.payload,
+        updatedAt: serverTimestamp(),
+      });
     });
     const rev = computeWalletBalanceDeltas(oldTx, wallets, customRates, -1);
     const add = computeWalletBalanceDeltas(newTx, wallets, customRates, 1);
@@ -1013,7 +1031,27 @@ export async function moveOrgTransactionsCloud(
     for (const [k, v] of add.entries()) totalDeltas.set(k, (totalDeltas.get(k) || 0) + v);
   }
 
-  applyWalletDeltasToBatch(batch, orgId, wallets, totalDeltas);
+  for (const [walletId, deltaMinor] of totalDeltas.entries()) {
+    if (deltaMinor === 0) continue;
+    const w = wallets.find((item) => item.id === walletId);
+    if (!w) continue;
+    const currentMinor =
+      typeof w.balanceMinor === 'number' ? w.balanceMinor : toMinor(w.balance, w.currency);
+    const nextMinor = currentMinor + deltaMinor;
+    const nextWallet: Wallet = stripUndefinedDeep({
+      ...w,
+      balanceMinor: nextMinor,
+      balance: fromMinor(nextMinor, w.currency),
+    });
+    ops.push((batch) => {
+      batch.update(doc(db, 'organizations', orgId, 'wallets', walletId), {
+        balanceMinor: nextMinor,
+        payload: nextWallet,
+        updatedAt: serverTimestamp(),
+      });
+    });
+  }
+
   const audit = makeAuditDocPayload(
     orgId,
     'update',
@@ -1022,8 +1060,10 @@ export async function moveOrgTransactionsCloud(
     actor,
     `نقل ${txsToMove.length} معاملة من المحفظة ${fromWalletId} إلى ${toWalletId}`
   );
-  batch.set(doc(db, 'organizations', orgId, 'auditLogs', audit.id), audit.data);
-  await batch.commit();
+  ops.push((batch) => {
+    batch.set(doc(db, 'organizations', orgId, 'auditLogs', audit.id), audit.data);
+  });
+  await commitChunkedOperations(ops, 380);
 }
 
 export async function batchUpdateOrgTransactionsCategoryCloud(
@@ -1033,13 +1073,15 @@ export async function batchUpdateOrgTransactionsCategoryCloud(
   actor: OrgActorInfo
 ): Promise<void> {
   if (txsToMove.length === 0) return;
-  const batch = writeBatch(db);
-  for (const tx of txsToMove.slice(0, 380)) {
+  const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
+  for (const tx of txsToMove) {
     const nextTx: Transaction = { ...tx, categoryId: targetCategoryId, updatedAt: Date.now() };
     const cloudDoc = buildOrgTxPayloadForCloud(orgId, nextTx);
-    batch.update(doc(db, 'organizations', orgId, 'transactions', tx.id), {
-      payload: cloudDoc.payload,
-      updatedAt: serverTimestamp(),
+    ops.push((batch) => {
+      batch.update(doc(db, 'organizations', orgId, 'transactions', tx.id), {
+        payload: cloudDoc.payload,
+        updatedAt: serverTimestamp(),
+      });
     });
   }
   const audit = makeAuditDocPayload(
@@ -1050,8 +1092,10 @@ export async function batchUpdateOrgTransactionsCategoryCloud(
     actor,
     `ترحيل تصنيف ${txsToMove.length} معاملة`
   );
-  batch.set(doc(db, 'organizations', orgId, 'auditLogs', audit.id), audit.data);
-  await batch.commit();
+  ops.push((batch) => {
+    batch.set(doc(db, 'organizations', orgId, 'auditLogs', audit.id), audit.data);
+  });
+  await commitChunkedOperations(ops, 380);
 }
 
 export async function importOrgTransactionsBatchCloud(
@@ -1122,7 +1166,7 @@ export async function recalculateOrgBalancesFromApproved(
     }
   }
 
-  const batch = writeBatch(db);
+  const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
   for (const w of wallets) {
     const nextMinor = walletMinorTotals.get(w.id) ?? 0;
     const updatedWallet: Wallet = stripUndefinedDeep({
@@ -1130,10 +1174,12 @@ export async function recalculateOrgBalancesFromApproved(
       balanceMinor: nextMinor,
       balance: fromMinor(nextMinor, w.currency),
     });
-    batch.update(doc(db, 'organizations', orgId, 'wallets', w.id), {
-      balanceMinor: nextMinor,
-      payload: updatedWallet,
-      updatedAt: serverTimestamp(),
+    ops.push((batch) => {
+      batch.update(doc(db, 'organizations', orgId, 'wallets', w.id), {
+        balanceMinor: nextMinor,
+        payload: updatedWallet,
+        updatedAt: serverTimestamp(),
+      });
     });
   }
 
@@ -1145,8 +1191,10 @@ export async function recalculateOrgBalancesFromApproved(
     actor,
     'إعادة احتساب أرصدة جميع المحافظ من المعاملات المعتمدة'
   );
-  batch.set(doc(db, 'organizations', orgId, 'auditLogs', audit.id), audit.data);
-  await batch.commit();
+  ops.push((batch) => {
+    batch.set(doc(db, 'organizations', orgId, 'auditLogs', audit.id), audit.data);
+  });
+  await commitChunkedOperations(ops, 380);
 }
 
 // ---------------------------------------------------------------------------

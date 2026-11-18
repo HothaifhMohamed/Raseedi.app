@@ -261,58 +261,33 @@ test('Expired Business subscription past 7-day grace puts org in read-only mode'
   );
 });
 
-test('Coupons collection restricts creation/listing to Hapaypal2003@gmail.com and enforces atomic redemption', async () => {
+test('Server-only collections lock out all client reads/writes and isAdmin requires verified custom claim', async () => {
   const superAdminDb = testEnv
     .authenticatedContext('admin_uid_1', {
-      email: 'Hapaypal2003@gmail.com',
+      email: 'admin@raseedi.test',
       email_verified: true,
+      admin: true,
     })
     .firestore();
   const spoofedAdminDb = testEnv
     .authenticatedContext('spoof_admin_uid', {
-      email: 'Hapaypal2003@gmail.com',
+      email: 'admin@raseedi.test',
       email_verified: false,
+      admin: true,
     })
     .firestore();
   const userDb = authContext(OWNER_UID).firestore();
 
   const code = 'RSD-BIZ-BYTEST01-ABCDEFGH';
 
-  // Non-admin and unverified email-spoofed user cannot create or list coupons
-  await assertFails(
-    setDoc(doc(userDb, 'coupons', code), {
-      code,
-      tier: 'business',
-      planTier: 'business_pro',
-      cycle: 'yearly',
-      status: 'unused',
-      used: false,
-      usedBy: null,
-      usedAt: null,
-      createdByUid: OWNER_UID,
-      createdByEmail: `${OWNER_UID}@raseedi.test`,
-      createdAt: serverTimestamp(),
-    })
-  );
-  await assertFails(
-    setDoc(doc(spoofedAdminDb, 'coupons', code), {
-      code,
-      tier: 'business',
-      planTier: 'business_pro',
-      cycle: 'yearly',
-      status: 'unused',
-      used: false,
-      usedBy: null,
-      usedAt: null,
-      createdByUid: 'spoof_admin_uid',
-      createdByEmail: 'hapaypal2003@gmail.com',
-      createdAt: serverTimestamp(),
-    })
-  );
+  // Client cannot create, update, read, or list licenseCodes, coupons, adminIssuedCodes, activationCodes, or joinRateLimits
   await assertFails(getDocs(collection(userDb, 'coupons')));
-
-  // Verified admin creates unused coupon
-  await assertSucceeds(
+  await assertFails(getDocs(collection(superAdminDb, 'coupons')));
+  await assertFails(getDoc(doc(userDb, 'licenseCodes', 'hash_1')));
+  await assertFails(setDoc(doc(superAdminDb, 'licenseCodes', 'hash_1'), { codeHash: 'hash_1' }));
+  await assertFails(getDoc(doc(userDb, 'adminIssuedCodes', 'hash_1')));
+  await assertFails(getDoc(doc(userDb, 'joinRateLimits', OWNER_UID)));
+  await assertFails(
     setDoc(doc(superAdminDb, 'coupons', code), {
       code,
       tier: 'business',
@@ -320,10 +295,8 @@ test('Coupons collection restricts creation/listing to Hapaypal2003@gmail.com an
       cycle: 'yearly',
       status: 'unused',
       used: false,
-      usedBy: null,
-      usedAt: null,
       createdByUid: 'admin_uid_1',
-      createdByEmail: 'hapaypal2003@gmail.com',
+      createdByEmail: 'admin@raseedi.test',
       createdAt: serverTimestamp(),
     })
   );
@@ -346,96 +319,42 @@ test('Coupons collection restricts creation/listing to Hapaypal2003@gmail.com an
     })
   );
 
-  // Non-atomic coupon update (without upgrading user) fails
+  // User cannot self-promote via redeemedCouponCode from client SDK
   await assertFails(
-    updateDoc(doc(userDb, 'coupons', code), {
-      used: true,
-      status: 'used',
-      usedBy: OWNER_UID,
-      usedAt: serverTimestamp(),
-    })
-  );
-
-  // Forging lifetime expiration on a yearly coupon fails
-  const badBatch = writeBatch(userDb);
-  badBatch.update(doc(userDb, 'coupons', code), {
-    used: true,
-    status: 'used',
-    usedBy: OWNER_UID,
-    usedAt: serverTimestamp(),
-  });
-  badBatch.update(doc(userDb, 'users', OWNER_UID), {
-    isPro: true,
-    proActive: true,
-    planTier: 'business_pro',
-    proPlan: 'business_yearly',
-    billingCycle: 'yearly',
-    expiresAt: null,
-    proExpiresAt: null,
-    redeemedCouponCode: code,
-    updatedAt: serverTimestamp(),
-  });
-  await assertFails(badBatch.commit());
-
-  // Valid atomic batch redemption succeeds
-  const expiry = Date.now() + 365 * 86400000;
-  const goodBatch = writeBatch(userDb);
-  goodBatch.update(doc(userDb, 'coupons', code), {
-    used: true,
-    status: 'used',
-    usedBy: OWNER_UID,
-    usedAt: serverTimestamp(),
-  });
-  goodBatch.update(doc(userDb, 'users', OWNER_UID), {
-    isPro: true,
-    proActive: true,
-    planTier: 'business_pro',
-    proPlan: 'business_yearly',
-    billingCycle: 'yearly',
-    expiresAt: expiry,
-    proExpiresAt: expiry,
-    redeemedCouponCode: code,
-    updatedAt: serverTimestamp(),
-  });
-  await assertSucceeds(goodBatch.commit());
-
-  // Reusing already-used coupon fails even for another user
-  const outsiderDb = authContext(OUTSIDER_UID).firestore();
-  await assertSucceeds(
-    setDoc(doc(outsiderDb, 'users', OUTSIDER_UID), {
-      uid: OUTSIDER_UID,
-      email: `${OUTSIDER_UID}@raseedi.test`,
-      isPro: false,
-      proActive: false,
-      proPlan: 'free',
-      planTier: 'free',
-      billingCycle: 'free',
-      expiresAt: null,
-      proExpiresAt: null,
-      hasUsedBusinessTrial: false,
-      createdAt: serverTimestamp(),
+    updateDoc(doc(userDb, 'users', OWNER_UID), {
+      isPro: true,
+      proActive: true,
+      planTier: 'business_pro',
+      proPlan: 'business_yearly',
+      billingCycle: 'yearly',
+      redeemedCouponCode: code,
       updatedAt: serverTimestamp(),
     })
   );
-  const replayBatch = writeBatch(outsiderDb);
-  replayBatch.update(doc(outsiderDb, 'coupons', code), {
-    used: true,
-    status: 'used',
-    usedBy: OUTSIDER_UID,
-    usedAt: serverTimestamp(),
-  });
-  replayBatch.update(doc(outsiderDb, 'users', OUTSIDER_UID), {
-    isPro: true,
-    proActive: true,
-    planTier: 'business_pro',
-    proPlan: 'business_yearly',
-    billingCycle: 'yearly',
-    expiresAt: expiry,
-    proExpiresAt: expiry,
-    redeemedCouponCode: code,
-    updatedAt: serverTimestamp(),
-  });
-  await assertFails(replayBatch.commit());
+
+  // Unverified admin token cannot read/update another user's profile
+  await assertFails(getDoc(doc(spoofedAdminDb, 'users', OWNER_UID)));
+  await assertFails(
+    updateDoc(doc(spoofedAdminDb, 'users', OWNER_UID), {
+      isPro: true,
+      proActive: true,
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Verified admin with admin:true claim can manage user subscription fields
+  await assertSucceeds(
+    updateDoc(doc(superAdminDb, 'users', OWNER_UID), {
+      isPro: true,
+      proActive: true,
+      planTier: 'business_pro',
+      proPlan: 'business_yearly',
+      billingCycle: 'yearly',
+      expiresAt: Date.now() + 365 * 86400000,
+      proExpiresAt: Date.now() + 365 * 86400000,
+      updatedAt: serverTimestamp(),
+    })
+  );
 });
 
 test('Personal cloud backup, chunks, and history allow owner access and block outsiders', async () => {

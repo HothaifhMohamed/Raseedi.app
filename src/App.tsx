@@ -110,8 +110,7 @@ const MainLayout: React.FC = () => {
   }, []);
 
   React.useEffect(() => {
-    const adSenseClient =
-      import.meta.env.VITE_ADSENSE_CLIENT_ID?.trim() || 'ca-pub-7802456807447662';
+    const adSenseClient = import.meta.env.VITE_ADSENSE_CLIENT_ID?.trim() || '';
     const scriptId = 'raseedi-adsense-script';
     const existingScript =
       document.getElementById(scriptId) ||

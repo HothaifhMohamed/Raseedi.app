@@ -39,6 +39,10 @@ import {
   CsvColumnMapping,
 } from '../../services/csvImport';
 import { formatLocalDate } from '../../services/calculations';
+import {
+  tagTransactionsWithWorkspace,
+  tagWalletsWithWorkspace,
+} from '../../services/workspaceSync';
 
 interface BackupModalProps {
   isOpen: boolean;
@@ -272,8 +276,8 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     await createPreRestoreSnapshot();
 
     await persistData({
-      transactions: parsed.transactions || [],
-      wallets: parsed.wallets || [],
+      transactions: tagTransactionsWithWorkspace(parsed.transactions || [], 'personal'),
+      wallets: tagWalletsWithWorkspace(parsed.wallets || [], 'personal'),
       categories: parsed.categories || categories,
       budgets: parsed.budgets || [],
       debts: parsed.debts || [],

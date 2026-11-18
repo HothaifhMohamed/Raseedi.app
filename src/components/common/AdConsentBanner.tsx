@@ -7,60 +7,6 @@ const AD_CONSENT_EVENT = 'raseedi-ad-consent-changed';
 
 export type AdConsentChoice = 'granted' | 'denied' | null;
 
-const EEA_UK_TIMEZONES = new Set<string>([
-  'Atlantic/Azores',
-  'Atlantic/Canary',
-  'Atlantic/Madeira',
-  'Atlantic/Reykjavik',
-  'Europe/Amsterdam',
-  'Europe/Athens',
-  'Europe/Belfast',
-  'Europe/Berlin',
-  'Europe/Bratislava',
-  'Europe/Brussels',
-  'Europe/Bucharest',
-  'Europe/Budapest',
-  'Europe/Busingen',
-  'Europe/Copenhagen',
-  'Europe/Dublin',
-  'Europe/Gibraltar',
-  'Europe/Guernsey',
-  'Europe/Helsinki',
-  'Europe/Isle_of_Man',
-  'Europe/Jersey',
-  'Europe/Lisbon',
-  'Europe/Ljubljana',
-  'Europe/London',
-  'Europe/Luxembourg',
-  'Europe/Madrid',
-  'Europe/Malta',
-  'Europe/Mariehamn',
-  'Europe/Nicosia',
-  'Europe/Oslo',
-  'Europe/Paris',
-  'Europe/Prague',
-  'Europe/Riga',
-  'Europe/Rome',
-  'Europe/Sofia',
-  'Europe/Stockholm',
-  'Europe/Tallinn',
-  'Europe/Vaduz',
-  'Europe/Vienna',
-  'Europe/Vilnius',
-  'Europe/Warsaw',
-  'Europe/Zagreb',
-  'Asia/Nicosia',
-]);
-
-export function isEeaOrUkUser(): boolean {
-  try {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
-    return EEA_UK_TIMEZONES.has(tz);
-  } catch {
-    return false;
-  }
-}
-
 export function getAdConsentChoice(): AdConsentChoice {
   try {
     if (typeof window === 'undefined' || !window.localStorage) return null;
@@ -95,7 +41,6 @@ export function resetAdConsentChoice(): void {
 }
 
 export function hasAdSenseConsent(): boolean {
-  if (!isEeaOrUkUser()) return true;
   return getAdConsentChoice() === 'granted';
 }
 
@@ -108,9 +53,7 @@ export function subscribeAdConsentChanges(callback: () => void): () => void {
 export const AdConsentBanner: React.FC = () => {
   const { isPro, isRTL } = useApp();
   const [choice, setChoice] = useState<AdConsentChoice>(() => getAdConsentChoice());
-  const adSenseClient =
-    import.meta.env.VITE_ADSENSE_CLIENT_ID?.trim() || 'ca-pub-7802456807447662';
-  const isEea = isEeaOrUkUser();
+  const adSenseClient = import.meta.env.VITE_ADSENSE_CLIENT_ID?.trim() || '';
 
   useEffect(() => {
     return subscribeAdConsentChanges(() => {
@@ -118,7 +61,7 @@ export const AdConsentBanner: React.FC = () => {
     });
   }, []);
 
-  if (isPro || !adSenseClient || !isEea || choice !== null) {
+  if (isPro || !adSenseClient || choice !== null) {
     return null;
   }
 

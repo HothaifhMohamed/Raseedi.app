@@ -26,8 +26,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { SUPPORT_CONFIG } from '../../constants/support';
 import { formatPricingMoney, PRICING_CONFIG, PricingCurrency } from '../../config/pricing';
-import { peekCouponInFirestore } from '../../services/firebase';
-import { verifySignedLicenseCode } from '../../services/licenseCodes';
+import { previewProCodeWithServer } from '../../services/firebase';
 import {
   calculateSubscriptionDatesUpdate,
   shouldShowUpgradeActionButtons,
@@ -316,16 +315,10 @@ export const UpgradeModal: React.FC = () => {
       let targetTier: 'personal_pro' | 'business_pro' | null = null;
       let targetCycle: 'monthly' | 'yearly' | 'lifetime' | null = null;
 
-      const signedCheck = verifySignedLicenseCode(trimmed);
-      if (signedCheck.valid) {
-        targetTier = signedCheck.planTier === 'business_pro' ? 'business_pro' : 'personal_pro';
-        targetCycle = signedCheck.cycle;
-      } else {
-        const peek = await peekCouponInFirestore(trimmed);
-        if (peek.exists && !peek.used && peek.planTier && peek.cycle) {
-          targetTier = peek.planTier === 'business_pro' ? 'business_pro' : 'personal_pro';
-          targetCycle = peek.cycle;
-        }
+      const preview = await previewProCodeWithServer(trimmed, targetBusinessOrgId);
+      if (preview.valid && preview.planTier && preview.billingCycle) {
+        targetTier = preview.planTier === 'business_pro' ? 'business_pro' : 'personal_pro';
+        targetCycle = preview.billingCycle;
       }
 
       if (targetTier && targetCycle) {

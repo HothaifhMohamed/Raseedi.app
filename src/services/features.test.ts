@@ -28,6 +28,8 @@ import {
   normalizeCsvDate,
   parseArabicDate,
   parseImportAmount,
+  escapeCsvCell,
+  rowsToRecordObjects,
 } from './csvImport';
 import { DEFAULT_CATEGORIES, validateBackupSchema } from './db';
 import { Budget, Debt, Transaction, Wallet } from '../types';
@@ -749,6 +751,39 @@ test('csvImport workspace tagging: tags imported transactions and auto-created w
   assert.equal(built.transactions[0].workspaceId, 'org-company-1');
   assert.equal(built.transactions[1].workspaceId, 'org-company-1');
   assert.equal(built.transactions[0].deletedAt, null);
+});
+
+test('security hardening: escapeCsvCell blocks formula injection & rowsToRecordObjects/validateBackupSchema block prototype pollution and full-array bad items', () => {
+  assert.equal(escapeCsvCell('=CMD("calc")'), '"\'=CMD(""calc"")"');
+  assert.equal(escapeCsvCell('+SUM(A1:A2)'), '"\'+SUM(A1:A2)"');
+  assert.equal(escapeCsvCell('-1+1'), '"\'-1+1"');
+  assert.equal(escapeCsvCell('@HYPERLINK("x")'), '"\'@HYPERLINK(""x"")"');
+  assert.equal(escapeCsvCell('  =1+1'), '"\'  =1+1"');
+  assert.equal(escapeCsvCell(125.5), '125.5');
+  assert.equal(escapeCsvCell('عادي'), '"عادي"');
+
+  const records = rowsToRecordObjects(['__proto__', 'constructor', 'prototype', 'Notes'], [
+    ['polluted', 'polluted', 'polluted', 'ok'],
+  ]);
+  assert.equal(({} as Record<string, unknown>).polluted, undefined);
+  assert.equal(Object.prototype.hasOwnProperty.call(records[0], '__proto__'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(records[0], 'constructor'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(records[0], 'prototype'), false);
+  assert.equal(records[0].Notes, 'ok');
+
+  const pollutedBackup = JSON.parse('{"transactions":[],"__proto__":{"isAdmin":true}}');
+  assert.equal(validateBackupSchema(pollutedBackup).reason, 'UNSAFE_PROTOTYPE_KEY');
+
+  const nestedPolluted = JSON.parse('{"transactions":[{"id":"t1","amount":10,"extra":{"constructor":{"x":1}}}]}');
+  assert.equal(validateBackupSchema(nestedPolluted).reason, 'UNSAFE_PROTOTYPE_KEY');
+
+  const largeTxs = Array.from({ length: 30 }, (_, idx) =>
+    idx === 29 ? { id: idx, amount: 'bad' } : { id: `tx-${idx}`, amount: 10 }
+  );
+  assert.equal(
+    validateBackupSchema({ transactions: largeTxs, wallets: [] }).reason,
+    'INVALID_TRANSACTION_ITEM'
+  );
 });
 
 

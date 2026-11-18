@@ -121,8 +121,7 @@ import {
   fetchCloudBackupHistory,
   fetchCloudBackupFromHistory,
   fetchLatestCloudBackupFromHistory,
-  claimIssuedCodeInDb,
-  redeemCouponInFirestore,
+  fetchAdminStatusFromServer,
   redeemProCodeWithServer,
   startBusinessTrialWithServer,
   fetchScanQuotaFromServer,
@@ -165,10 +164,8 @@ import {
   tagWalletsWithWorkspace,
 } from '../services/workspaceSync';
 import type { BackupHistorySummary } from '../services/backupHistory';
-import { isAuthorizedAdminUser, verifySignedLicenseCode } from '../services/licenseCodes';
 import {
   UserSubscriptionSummary,
-  calculateSubscriptionDatesUpdate,
   computeUserSubscriptionSummary,
   resolvePostGoogleSignInAction,
 } from '../services/subscriptionHelpers';
@@ -692,6 +689,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const hasCompletedInitialCloudSyncRef = React.useRef(false);
   const isCloudLoadedRef = React.useRef(false);
   const workspaceSyncEpochRef = React.useRef(0);
+  const syncRequestIdRef = React.useRef<number>(0);
   const pendingLocalTxIdsRef = React.useRef<Set<string>>(new Set());
   const locallyDeletedTxIdsRef = React.useRef<Set<string>>(new Set());
   const isEmergencyRecoveryActiveRef = React.useRef(false);
@@ -882,14 +880,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Notifications Read State
   const [readNotificationIds, setReadNotificationIds] = useState<Set<string>>(new Set());
 
-  const isAdminUser = useMemo(() => {
-    if (!user?.isLoggedIn || !firebaseAuthUser) return false;
-    return isAuthorizedAdminUser({
-      email: firebaseAuthUser.email,
-      isLoggedIn: true,
-      emailVerified: firebaseAuthUser.emailVerified,
-    });
-  }, [user?.isLoggedIn, firebaseAuthUser]);
+  const [isAdminUser, setIsAdminUser] = useState(false);
 
   const isAdminUserRef = React.useRef<boolean>(isAdminUser);
   isAdminUserRef.current = isAdminUser;
@@ -1784,148 +1775,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
       };
 
-      // 1. Primary path: verify and atomically redeem from Firestore `coupons` collection
-      if (auth.currentUser) {
-        try {
-          const couponRes = await redeemCouponInFirestore(code);
-          if (couponRes.status === 'already_used') {
-            return {
-              ok: false,
-              error: isEn
-                ? 'This activation code has already been redeemed.'
-                : 'تم استخدام كود التفعيل هذا مسبقاً.',
-            };
-          }
-          if (couponRes.status === 'invalid_format') {
-            return {
-              ok: false,
-              error: isEn
-                ? 'Invalid activation code format.'
-                : 'صيغة كود التفعيل غير صالحة.',
-            };
-          }
-          if (
-            couponRes.status === 'redeemed' &&
-            couponRes.planTier &&
-            couponRes.proPlan &&
-            couponRes.billingCycle
-          ) {
-            await applyRedeemedEntitlement({
-              uid: auth.currentUser.uid,
-              codePreview: couponRes.code,
-              proPlan: couponRes.proPlan,
-              planTier: couponRes.planTier,
-              billingCycle: couponRes.billingCycle,
-              startedAt: couponRes.startedAt ?? Date.now(),
-              expiresAt: couponRes.expiresAt ?? null,
-            });
-            return {
-              ok: true,
-              planTier: couponRes.planTier,
-              billingCycle: couponRes.billingCycle,
-              expiresAt: couponRes.expiresAt ?? null,
-              isCumulativeRenewal: couponRes.isCumulativeRenewal,
-            };
-          }
-        } catch (err) {
-          const signedFallback = verifySignedLicenseCode(code);
-          if (!signedFallback.valid) {
-            let readable = err instanceof Error ? err.message : '';
-            try {
-              const parsed = JSON.parse(readable) as { error?: string };
-              if (parsed?.error) readable = parsed.error;
-            } catch {
-              // Keep raw error string
-            }
-            return {
-              ok: false,
-              error:
-                readable ||
-                (isEn
-                  ? 'Could not verify activation code in database.'
-                  : 'تعذر التحقق من كود التفعيل في قاعدة البيانات.'),
-            };
-          }
-        }
-      }
-
-      // 2. Cryptographic offline/signed fallback (RSD-PRO-* / RSD-BIZ-*)
-      const signedResult = verifySignedLicenseCode(code);
-      if (signedResult.valid) {
-        if (auth.currentUser) {
-          const claimRes = await claimIssuedCodeInDb(signedResult.code, orgId);
-          if (!claimRes.ok) {
-            if (claimRes.conflict === 'CODE_ALREADY_USED') {
-              return {
-                ok: false,
-                error: isEn
-                  ? 'This activation code has already been redeemed by another account.'
-                  : 'تم استخدام كود التفعيل هذا مسبقاً بحساب آخر.',
-              };
-            }
-            if (claimRes.conflict === 'TARGET_EMAIL_MISMATCH') {
-              return {
-                ok: false,
-                error: isEn
-                  ? 'This activation code is assigned to a different email address.'
-                  : 'هذا الكود مخصص لحساب بريد إلكتروني آخر.',
-              };
-            }
-            if (claimRes.conflict === 'CODE_ALREADY_USED_OTHER_ORG') {
-              return {
-                ok: false,
-                error: isEn
-                  ? 'This activation code has already been redeemed for another organization.'
-                  : 'تم استخدام هذا الكود مسبقاً لمؤسسة أخرى.',
-              };
-            }
-          }
-        }
-
-        const currentEnt = latestVerifiedProRef.current;
-        const currentSummary = computeUserSubscriptionSummary({
-          verifiedPro: currentEnt,
-          isAdminUser: isAdminUserRef.current,
-        });
-        const targetTier = signedResult.planTier === 'business_pro' ? 'business_pro' : 'personal_pro';
-        const dateCalc = calculateSubscriptionDatesUpdate({
-          currentTier: currentSummary.planTier,
-          currentExpiresAt: currentSummary.expiresAt,
-          currentBillingCycle: currentSummary.billingCycle,
-          currentIsPro: currentSummary.isPro,
-          newTier: targetTier,
-          newCycle: signedResult.cycle,
-          nowMs: Date.now(),
-        });
-
-        const uid = auth.currentUser?.uid || latestPersonalRef.current.user?.id || 'local';
-        await applyRedeemedEntitlement({
-          uid,
-          codePreview: signedResult.code,
-          proPlan: signedResult.proPlan,
-          planTier: signedResult.planTier,
-          billingCycle: signedResult.billingCycle,
-          startedAt: dateCalc.startedAt,
-          expiresAt: dateCalc.expiresAt,
-        });
-        return {
-          ok: true,
-          planTier: signedResult.planTier,
-          billingCycle: signedResult.billingCycle,
-          expiresAt: dateCalc.expiresAt,
-          isCumulativeRenewal: dateCalc.isCumulativeRenewal,
-        };
-      }
-
-      if (!signedResult.valid && signedResult.isSignedFormat) {
-        return {
-          ok: false,
-          error: isEn
-            ? 'Invalid or corrupted activation code. Please check the code and try again.'
-            : 'كود التفعيل غير صالح أو تالف. تأكد من كتابة الكود بشكل صحيح.',
-        };
-      }
-
       if (!auth.currentUser) {
         return {
           ok: false,
@@ -1949,6 +1798,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           planTier: res.planTier,
           billingCycle: res.billingCycle,
           expiresAt: res.expiresAt,
+          isCumulativeRenewal: res.isCumulativeRenewal,
         };
       } catch (err) {
         const msg =
@@ -2469,10 +2319,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Firebase Auth listener
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      const reqId = ++syncRequestIdRef.current;
       if (!firebaseUser) {
         hasCompletedInitialCloudSyncRef.current = false;
         isCloudLoadedRef.current = false;
         setIsCloudLoaded(false);
+        setIsAdminUser(false);
         setFirebaseAuthUser(null);
         setLastCloudBackupExists(false);
         setScanQuota(null);
@@ -2502,6 +2354,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       });
       setUser(nextUser);
 
+      void (async () => {
+        try {
+          const [tokenResult, serverAdmin] = await Promise.all([
+            firebaseUser.getIdTokenResult().catch(() => null),
+            fetchAdminStatusFromServer().catch(() => ({ isAdmin: false })),
+          ]);
+          if (reqId !== syncRequestIdRef.current) return;
+          setIsAdminUser(
+            Boolean(
+              firebaseUser.emailVerified &&
+                (tokenResult?.claims?.admin === true || serverAdmin.isAdmin)
+            )
+          );
+        } catch {
+          if (reqId === syncRequestIdRef.current) {
+            setIsAdminUser(false);
+          }
+        }
+      })();
+
       try {
         const isOnline = typeof navigator === 'undefined' || navigator.onLine;
         const [profile, cloudMeta, unifiedPersonalTxs] = await Promise.all([
@@ -2518,9 +2390,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }).catch(() => [])
           ),
         ]);
+        if (reqId !== syncRequestIdRef.current) return;
 
         const active = isEntitlementActive(profile);
         const cachedEntitlement = await loadVerifiedProCache();
+        if (reqId !== syncRequestIdRef.current) return;
         const hasValidLocalCode =
           !active &&
           cachedEntitlement &&
@@ -2547,6 +2421,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               verifiedAt: Date.now(),
             };
         await applyVerifiedProState(entitlement);
+        if (reqId !== syncRequestIdRef.current) return;
 
         // Hydrate newer cloud-synced currency exchange rates from Firestore users/{uid}
         const cloudRates = profile.currencyRates;
@@ -2580,7 +2455,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const hasCloudData = Boolean(cloudMeta) || unifiedPersonalTxs.length > 0;
         setLastCloudBackupExists(hasCloudData);
         void fetchCloudBackupHistory(firebaseUser.uid)
-          .then((list) => setCloudBackupHistory(list))
+          .then((list) => {
+            if (reqId === syncRequestIdRef.current) {
+              setCloudBackupHistory(list);
+            }
+          })
           .catch(() => {});
         void refreshScanQuota();
 
@@ -2616,6 +2495,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               return null;
             }
           );
+          if (reqId !== syncRequestIdRef.current) return;
           if (
             unifiedPersonalTxs.length === 0 &&
             (!cloudBackup || (cloudBackup.transactions || []).length === 0)
@@ -2623,10 +2503,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             const historyFallback = await fetchLatestCloudBackupFromHistory(firebaseUser.uid, {
               forceServer: false,
             }).catch(() => null);
+            if (reqId !== syncRequestIdRef.current) return;
             if (historyFallback && (historyFallback.transactions || []).length > 0) {
               cloudBackup = historyFallback;
             }
           }
+          if (reqId !== syncRequestIdRef.current) return;
 
           const resolvedCloudPersonalTxs =
             unifiedPersonalTxs.length > 0
@@ -2721,17 +2603,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           savePersonalState({ user: nextUser }, { skipDirty: true });
         }
 
-        if (isOnline) {
+        if (isOnline && reqId === syncRequestIdRef.current) {
           isCloudLoadedRef.current = true;
           setIsCloudLoaded(true);
         }
       } catch (err) {
+        if (reqId !== syncRequestIdRef.current) return;
         console.error('Cloud auth sync error:', err);
         setCloudDiagnosticsError(
           formatFirestoreErrorForDisplay(err, latestPersonalRef.current.settings.language === 'ar')
         );
       } finally {
-        hasCompletedInitialCloudSyncRef.current = true;
+        if (reqId === syncRequestIdRef.current) {
+          hasCompletedInitialCloudSyncRef.current = true;
+        }
       }
     });
 
@@ -2747,19 +2632,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const uid = user.id;
     const activeWsId = normalizeWorkspaceId(activeWorkspace);
     const backfillKey = `${uid}::${activeWsId}`;
+    const effectSyncReqId = syncRequestIdRef.current;
     let cancelled = false;
     let hasAuthoritativeServer = false;
     isCloudLoadedRef.current = false;
     setIsCloudLoaded(false);
 
+    const isStaleSync = () => cancelled || effectSyncReqId !== syncRequestIdRef.current;
+
     const markCloudReady = () => {
-      if (cancelled) return;
+      if (isStaleSync()) return;
       isCloudLoadedRef.current = true;
       setIsCloudLoaded(true);
     };
 
     const applyReconciledToCache = (cloudTxs: Transaction[], fromServer: boolean) => {
-      if (cancelled) return;
+      if (isStaleSync()) return;
       if (fromServer) {
         hasAuthoritativeServer = true;
         markCloudReady();
@@ -2830,7 +2718,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     const runCloudFirstFetchAndBackfill = async () => {
-      if (cancelled || isEmergencyRecoveryActiveRef.current) return;
+      if (isStaleSync() || isEmergencyRecoveryActiveRef.current) return;
       if (typeof navigator !== 'undefined' && !navigator.onLine) return;
 
       const fetchEpoch = workspaceSyncEpochRef.current;
@@ -2838,7 +2726,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const serverTxs = await fetchWorkspaceTransactionsCloud(uid, activeWsId, {
           forceServer: true,
         });
-        if (cancelled) return;
+        if (isStaleSync()) return;
         if (fetchEpoch !== workspaceSyncEpochRef.current) {
           // Newer local mutations occurred while server fetch was in-flight; keep listener authoritative
           markCloudReady();
@@ -2862,6 +2750,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         // 1) Check legacy cloud backup chunks / history for this exact workspace
         let legacyCloudTxs: Transaction[] = [];
         const cloudBackup = await fetchCloudBackup(uid, { forceServer: true }).catch(() => null);
+        if (isStaleSync()) return;
         if (activeWsId === 'personal') {
           legacyCloudTxs = (cloudBackup?.transactions || []).filter((tx) =>
             isActiveWorkspaceTransaction(tx, 'personal')
@@ -2870,6 +2759,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             const hist = await fetchLatestCloudBackupFromHistory(uid, { forceServer: true }).catch(
               () => null
             );
+            if (isStaleSync()) return;
             legacyCloudTxs = (hist?.transactions || []).filter((tx) =>
               isActiveWorkspaceTransaction(tx, 'personal')
             );
@@ -2880,10 +2770,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           );
         }
 
-        if (cancelled || isEmergencyRecoveryActiveRef.current) return;
+        if (isStaleSync() || isEmergencyRecoveryActiveRef.current) return;
 
         if (legacyCloudTxs.length > 0) {
           await batchUpsertWorkspaceTransactionsCloud(uid, activeWsId, legacyCloudTxs);
+          if (isStaleSync()) return;
           applyReconciledToCache(legacyCloudTxs, true);
           return;
         }
@@ -2898,7 +2789,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             : (latestLocalOrgWorkspacesRef.current[activeWsId]?.transactions || []).filter(
                 (tx) => !tx.deletedAt
               );
-        if (localSeed.length > 0 && !isEmergencyRecoveryActiveRef.current) {
+        if (localSeed.length > 0 && !isEmergencyRecoveryActiveRef.current && !isStaleSync()) {
           await batchUpsertWorkspaceTransactionsCloud(uid, activeWsId, localSeed);
         }
         markCloudReady();
@@ -2911,6 +2802,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       uid,
       activeWsId,
       (cloudTxs, meta) => {
+        if (isStaleSync()) return;
         if (!meta.fromCache) {
           const cloudIdSet = new Set(cloudTxs.map((t) => t.id));
           const pendingSet = new Set(meta.pendingIds);
@@ -2934,6 +2826,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setCloudSyncStatus(meta.hasPendingWrites ? 'syncing' : 'synced');
       },
       (err) => {
+        if (isStaleSync()) return;
         const formatted = formatFirestoreErrorForDisplay(
           err,
           latestPersonalRef.current.settings.language === 'ar'
@@ -3566,17 +3459,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const restoreFromCloudNow = useCallback(async (): Promise<boolean> => {
     if (!auth.currentUser) return false;
+    const reqId = ++syncRequestIdRef.current;
     setIsCloudSyncing(true);
     setCloudSyncStatus('syncing');
     setCloudSyncError(null);
     try {
       const uid = auth.currentUser.uid;
       await createPreRestoreSnapshot();
+      if (reqId !== syncRequestIdRef.current) return false;
       const [profile, cloudBackup, unifiedPersonal] = await Promise.all([
         fetchUserProfile(uid),
         fetchCloudBackup(uid, { forceServer: true }),
         fetchWorkspaceTransactionsCloud(uid, 'personal', { forceServer: true }).catch(() => []),
       ]);
+      if (reqId !== syncRequestIdRef.current) return false;
 
       const active = isEntitlementActive(profile);
       await applyVerifiedProState({
@@ -3589,6 +3485,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         proExpiresAt: profile?.proExpiresAt ?? profile?.expiresAt ?? null,
         verifiedAt: Date.now(),
       });
+      if (reqId !== syncRequestIdRef.current) return false;
       void refreshScanQuota();
 
       if (cloudBackup || unifiedPersonal.length > 0) {
@@ -3621,6 +3518,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setCloudSyncStatus('idle');
       return active;
     } catch (err: unknown) {
+      if (reqId !== syncRequestIdRef.current) return false;
       const msg = formatFirestoreErrorForDisplay(
         err,
         latestPersonalRef.current.settings.language === 'ar'
@@ -3631,7 +3529,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setCloudDiagnosticsError(msg);
       return false;
     } finally {
-      setIsCloudSyncing(false);
+      if (reqId === syncRequestIdRef.current) {
+        setIsCloudSyncing(false);
+      }
     }
   }, [applyCloudBackupLocally, applyVerifiedProState, createPreRestoreSnapshot, refreshScanQuota]);
 
@@ -3657,6 +3557,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return { ok: false, recoveredPersonalCount: 0, recoveredOrgCount: 0, errorMessage: msg };
     }
 
+    const reqId = ++syncRequestIdRef.current;
     isEmergencyRecoveryActiveRef.current = true;
     setIsCloudSyncing(true);
     setCloudSyncStatus('syncing');
@@ -3672,6 +3573,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         orgRefs.some((r) => r.orgId === currentWsId);
 
       await createPreRestoreSnapshot().catch(() => {});
+      if (reqId !== syncRequestIdRef.current) {
+        return { ok: false, recoveredPersonalCount: 0, recoveredOrgCount: 0 };
+      }
 
       pendingLocalTxIdsRef.current.clear();
       locallyDeletedTxIdsRef.current.clear();
@@ -3687,6 +3591,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setExtraOrgTransactions([]);
         setExtraOrgTrashTransactions([]);
         const orgRes = await forceFetchOrgTransactionsFromServer(currentWsId);
+        if (reqId !== syncRequestIdRef.current) {
+          return { ok: false, recoveredPersonalCount: 0, recoveredOrgCount: 0 };
+        }
         setActiveCloudTransactions(orgRes.active);
         setActiveCloudTrashTransactions(orgRes.trash);
         setOrgHasMoreTx(false);
@@ -3730,16 +3637,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const unifiedServerTxs = await fetchWorkspaceTransactionsCloud(uid, currentWsId, {
           forceServer: true,
         });
+        if (reqId !== syncRequestIdRef.current) {
+          return { ok: false, recoveredPersonalCount: 0, recoveredOrgCount: 0 };
+        }
 
         // 3. Also check legacy backupChunks / backupHistory for non-migrated transactions strictly matching currentWsId
         let cloudBackup = await fetchCloudBackup(uid, { forceServer: true }).catch((err) => {
           console.warn('[EmergencyRecovery] Legacy backup fetch note:', err);
           return null;
         });
+        if (reqId !== syncRequestIdRef.current) {
+          return { ok: false, recoveredPersonalCount: 0, recoveredOrgCount: 0 };
+        }
         if (!cloudBackup || (cloudBackup.transactions || []).length === 0) {
           const historyFallback = await fetchLatestCloudBackupFromHistory(uid, {
             forceServer: true,
           }).catch(() => null);
+          if (reqId !== syncRequestIdRef.current) {
+            return { ok: false, recoveredPersonalCount: 0, recoveredOrgCount: 0 };
+          }
           if (historyFallback && (historyFallback.transactions || []).length > 0) {
             cloudBackup = cloudBackup
               ? {
@@ -3771,6 +3687,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           await batchUpsertWorkspaceTransactionsCloud(uid, currentWsId, missingInUnified).catch(
             (err) => console.warn('[EmergencyRecovery] Unified backfill warning:', err)
           );
+          if (reqId !== syncRequestIdRef.current) {
+            return { ok: false, recoveredPersonalCount: 0, recoveredOrgCount: 0 };
+          }
         }
 
         const recoveredForWorkspace = reconcileWorkspaceTransactions(
@@ -3819,8 +3738,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
 
       await fetchCloudBackupHistory(uid, { forceServer: true })
-        .then((list) => setCloudBackupHistory(list))
+        .then((list) => {
+          if (reqId === syncRequestIdRef.current) setCloudBackupHistory(list);
+        })
         .catch(() => {});
+      if (reqId !== syncRequestIdRef.current) {
+        return { ok: false, recoveredPersonalCount: 0, recoveredOrgCount: 0 };
+      }
 
       setCloudSyncStatus('synced');
       return {
@@ -3829,6 +3753,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         recoveredOrgCount,
       };
     } catch (err) {
+      if (reqId !== syncRequestIdRef.current) {
+        return { ok: false, recoveredPersonalCount: 0, recoveredOrgCount: 0 };
+      }
       console.error('[Emergency Cloud Recovery Error]', err);
       const formatted = formatFirestoreErrorForDisplay(err, isAr);
       setCloudSyncStatus('error');
@@ -3841,8 +3768,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         errorMessage: formatted,
       };
     } finally {
-      isEmergencyRecoveryActiveRef.current = false;
-      setIsCloudSyncing(false);
+      if (reqId === syncRequestIdRef.current) {
+        isEmergencyRecoveryActiveRef.current = false;
+        setIsCloudSyncing(false);
+      }
     }
   }, [applyCloudBackupLocally, createPreRestoreSnapshot, orgRefs]);
 
@@ -4233,6 +4162,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // ===========================================================================
   const switchWorkspace = useCallback(
     (workspaceId: string) => {
+      syncRequestIdRef.current += 1;
       setSelectedTransactionIds([]);
       setActiveWalletId(null);
       setOrgActionError(null);
@@ -5204,20 +5134,44 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const { sourceDelta, destDelta } = getTransactionWalletDeltas(tx);
       if (sourceDelta === 0 && destDelta === 0) return walletList;
 
-      return walletList.map((w) => {
-        if (w.id === tx.walletId && sourceDelta !== 0) {
+      const deltas = new Map<string, number>();
+      if (tx.walletId && sourceDelta !== 0) {
+        const srcWallet = walletList.find((w) => w.id === tx.walletId);
+        if (srcWallet) {
           const deltaInWallet = convertCurrency(
             sourceDelta,
             tx.currency,
-            w.currency,
+            srcWallet.currency,
             settings.customExchangeRates
           );
-          return { ...w, balance: roundCurrency(w.balance + deltaInWallet * multiplier, w.currency) };
+          deltas.set(
+            srcWallet.id,
+            roundCurrency((deltas.get(srcWallet.id) || 0) + deltaInWallet * multiplier, srcWallet.currency)
+          );
         }
-        if (tx.toWalletId && w.id === tx.toWalletId && destDelta !== 0) {
-          return { ...w, balance: roundCurrency(w.balance + destDelta * multiplier, w.currency) };
+      }
+      if (tx.toWalletId && destDelta !== 0) {
+        const destWallet = walletList.find((w) => w.id === tx.toWalletId);
+        if (destWallet) {
+          deltas.set(
+            destWallet.id,
+            roundCurrency((deltas.get(destWallet.id) || 0) + destDelta * multiplier, destWallet.currency)
+          );
         }
-        return w;
+      }
+      if (deltas.size === 0) return walletList;
+
+      return walletList.map((w) => {
+        const delta = deltas.get(w.id);
+        if (delta === undefined || delta === 0) return w;
+        const nextBalance = roundCurrency(w.balance + delta, w.currency);
+        return {
+          ...w,
+          balance: nextBalance,
+          ...(typeof w.balanceMinor === 'number'
+            ? { balanceMinor: toMinor(nextBalance, w.currency) }
+            : {}),
+        };
       });
     },
     [settings.customExchangeRates]

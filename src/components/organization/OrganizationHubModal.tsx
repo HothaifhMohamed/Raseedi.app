@@ -53,6 +53,7 @@ import {
 import { normalizeApprovalStatus } from '../../services/entitlements';
 import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../../services/numbers';
 import { resolveOrgAttachmentUrl } from '../../services/firebase';
+import { escapeCsvCell } from '../../services/csvImport';
 import { MoneyText } from '../common/MoneyText';
 import {
   AuditLogAction,
@@ -394,7 +395,7 @@ export const OrganizationHubModal: React.FC = () => {
       ['Receivables (AR)', String(aging.receivablesTotal)],
       ['Payables (AP)', String(aging.payablesTotal)],
     ];
-    const csv = '\uFEFF' + rows.map((r) => r.map((v) => `"${v.replace(/"/g, '""')}"`).join(',')).join('\n');
+    const csv = '\uFEFF' + rows.map((r) => r.map((v) => escapeCsvCell(v)).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');

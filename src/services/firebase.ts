@@ -75,16 +75,7 @@ import {
 import { shouldFallbackAccountDeleteError } from './accountDeletion';
 import { resolveSafeCloudBackupWrite } from './backupMerge';
 import { sortTransactionsDescending } from './orgTransactionQuery';
-import {
-  AdminCouponCycle,
-  AdminCouponTier,
-  computeLicenseCodeHash,
-  isAuthorizedAdminUser,
-} from './licenseCodes';
-import {
-  calculateSubscriptionDatesUpdate,
-  computeAdminDirectSubscriptionPayload,
-} from './subscriptionHelpers';
+import { AdminCouponCycle, AdminCouponTier } from './licenseCodes';
 import {
   BackupHistoryRecord,
   BackupHistorySummary,
@@ -294,6 +285,7 @@ export interface CloudUserProfile {
   email: string;
   displayName?: string;
   photoURL?: string;
+  isAdmin?: boolean;
   isPro: boolean;
   proActive?: boolean;
   proPlan?: ProPlanCode;
@@ -578,33 +570,104 @@ export function subscribeUserProfile(
   );
 }
 
-export async function fetchAllUsersForAdmin(maxUsers = 200): Promise<CloudUserProfile[]> {
+export class ServerApiError extends Error {
+  code: string;
+  status: number;
+
+  constructor(code: string, message: string, status = 400) {
+    super(message || code);
+    this.code = code;
+    this.status = status;
+  }
+}
+
+export async function fetchAdminStatusFromServer(): Promise<{ isAdmin: boolean }> {
   const currentUser = auth.currentUser;
-  if (
-    !currentUser ||
-    !isAuthorizedAdminUser({
-      email: currentUser.email,
-      isLoggedIn: true,
-      emailVerified: currentUser.emailVerified,
-    })
-  ) {
-    throw new Error('FORBIDDEN_ADMIN_ONLY');
+  if (!currentUser) return { isAdmin: false };
+  try {
+    const idToken = await currentUser.getIdToken();
+    const response = await fetch('/api/admin/status', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+      },
+    });
+    if (!response.ok) return { isAdmin: false };
+    const payload = (await response.json().catch(() => ({}))) as { isAdmin?: boolean };
+    return { isAdmin: Boolean(payload.isAdmin) };
+  } catch {
+    return { isAdmin: false };
+  }
+}
+
+export async function verifyAdminPasscodeOnServer(
+  passcode: string
+): Promise<{ adminSessionToken: string; expiresAt: number }> {
+  const idToken = await getRequiredIdToken();
+  const response = await fetch('/api/admin/verify-passcode', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({ passcode: passcode.trim() }),
+  });
+
+  const payload = (await response.json().catch(() => ({}))) as {
+    adminSessionToken?: string;
+    expiresAt?: number;
+    error?: string;
+    message?: string;
+  };
+
+  if (!response.ok || !payload.adminSessionToken) {
+    throw new ServerApiError(
+      payload.error || 'VERIFY_PASSCODE_FAILED',
+      payload.message || payload.error || 'VERIFY_PASSCODE_FAILED',
+      response.status
+    );
   }
 
-  try {
-    const snap = await getDocs(query(collection(db, 'users'), limit(maxUsers)));
-    const rows = snap.docs.map((d) => mapCloudUserProfile(d.id, d.data() as Record<string, unknown>));
-    rows.sort((a, b) => {
-      if (a.isPro !== b.isPro) return a.isPro ? -1 : 1;
-      const aTime = a.lastSyncedAt || a.startedAt || 0;
-      const bTime = b.lastSyncedAt || b.startedAt || 0;
-      if (aTime !== bTime) return bTime - aTime;
-      return (a.email || '').localeCompare(b.email || '');
-    });
-    return rows;
-  } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, 'users');
+  return {
+    adminSessionToken: payload.adminSessionToken,
+    expiresAt: Number(payload.expiresAt || 0),
+  };
+}
+
+export async function fetchAllUsersForAdmin(
+  adminSessionToken: string
+): Promise<CloudUserProfile[]> {
+  if (!adminSessionToken) {
+    throw new ServerApiError('ADMIN_SESSION_REQUIRED', 'ADMIN_SESSION_REQUIRED', 403);
   }
+  const idToken = await getRequiredIdToken();
+  const response = await fetch('/api/admin/users', {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      'X-Admin-Session': adminSessionToken,
+    },
+  });
+
+  const payload = (await response.json().catch(() => ({}))) as {
+    users?: CloudUserProfile[];
+    error?: string;
+    message?: string;
+  };
+
+  if (!response.ok || !Array.isArray(payload.users)) {
+    throw new ServerApiError(
+      payload.error || 'ADMIN_USERS_LIST_FAILED',
+      payload.message || payload.error || 'ADMIN_USERS_LIST_FAILED',
+      response.status
+    );
+  }
+
+  return payload.users.map((row) => ({
+    ...row,
+    proActive: Boolean(row.proActive ?? row.isPro),
+    proExpiresAt: row.proExpiresAt ?? row.expiresAt ?? null,
+  }));
 }
 
 export async function adminUpdateUserSubscription(params: {
@@ -612,52 +675,66 @@ export async function adminUpdateUserSubscription(params: {
   planTier: PlanTier;
   billingCycle: 'free' | 'monthly' | 'yearly' | 'lifetime';
   customDays?: number | null;
+  adminSessionToken: string;
 }): Promise<CloudUserProfile> {
-  const currentUser = auth.currentUser;
-  if (
-    !currentUser ||
-    !isAuthorizedAdminUser({
-      email: currentUser.email,
-      isLoggedIn: true,
-      emailVerified: currentUser.emailVerified,
-    })
-  ) {
-    throw new Error('FORBIDDEN_ADMIN_ONLY');
+  if (!params.adminSessionToken) {
+    throw new ServerApiError('ADMIN_SESSION_REQUIRED', 'ADMIN_SESSION_REQUIRED', 403);
   }
-
-  const targetPath = `users/${params.targetUid}`;
-  const payload = computeAdminDirectSubscriptionPayload({
-    planTier: params.planTier,
-    billingCycle: params.billingCycle,
-    customDays: params.customDays,
-  });
-
-  try {
-    const targetRef = doc(db, 'users', params.targetUid);
-    await updateDoc(targetRef, {
-      ...payload,
-      redeemedCouponCode: null,
-      updatedAt: serverTimestamp(),
-    });
-    const refreshed = await getDoc(targetRef);
-    if (refreshed.exists()) {
-      return mapCloudUserProfile(refreshed.id, refreshed.data() as Record<string, unknown>);
+  const idToken = await getRequiredIdToken();
+  const response = await fetch(
+    `/api/admin/users/${encodeURIComponent(params.targetUid)}/subscription`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+        'X-Admin-Session': params.adminSessionToken,
+      },
+      body: JSON.stringify({
+        planTier: params.planTier,
+        billingCycle: params.billingCycle,
+        ...(params.customDays && params.customDays > 0 ? { customDays: params.customDays } : {}),
+      }),
     }
-    return {
-      uid: params.targetUid,
-      email: '',
-      ...payload,
-    };
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, targetPath);
+  );
+
+  const payload = (await response.json().catch(() => ({}))) as Partial<CloudUserProfile> & {
+    error?: string;
+    message?: string;
+  };
+
+  if (!response.ok) {
+    throw new ServerApiError(
+      payload.error || 'ADMIN_UPDATE_SUBSCRIPTION_FAILED',
+      payload.message || payload.error || 'ADMIN_UPDATE_SUBSCRIPTION_FAILED',
+      response.status
+    );
   }
+
+  return {
+    uid: payload.uid || params.targetUid,
+    email: payload.email || '',
+    isPro: Boolean(payload.isPro),
+    proActive: Boolean(payload.proActive ?? payload.isPro),
+    proPlan: payload.proPlan || 'free',
+    planTier: payload.planTier || params.planTier,
+    billingCycle: payload.billingCycle || params.billingCycle,
+    startedAt: payload.startedAt ?? null,
+    expiresAt: payload.expiresAt ?? null,
+    proExpiresAt: payload.proExpiresAt ?? payload.expiresAt ?? null,
+    redeemedCouponCode: payload.redeemedCouponCode ?? null,
+  };
 }
 
-export async function adminCancelUserSubscription(targetUid: string): Promise<CloudUserProfile> {
+export async function adminCancelUserSubscription(
+  targetUid: string,
+  adminSessionToken: string
+): Promise<CloudUserProfile> {
   return adminUpdateUserSubscription({
     targetUid,
     planTier: 'free',
     billingCycle: 'free',
+    adminSessionToken,
   });
 }
 
@@ -1544,6 +1621,59 @@ async function getRequiredIdToken(): Promise<string> {
   return currentUser.getIdToken();
 }
 
+export async function previewProCodeWithServer(
+  code: string,
+  orgId?: string
+): Promise<{
+  valid: boolean;
+  tier?: AdminCouponTier;
+  planTier?: PlanTier;
+  proPlan?: ProPlanCode;
+  billingCycle?: AdminCouponCycle;
+  expiresAt?: number | null;
+}> {
+  const currentUser = auth.currentUser;
+  if (!currentUser) return { valid: false };
+  try {
+    const idToken = await currentUser.getIdToken();
+    const response = await fetch('/api/redeem-code', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({
+        code: code.trim(),
+        preview: true,
+        ...(orgId ? { orgId } : {}),
+      }),
+    });
+
+    if (!response.ok) return { valid: false };
+    const payload = (await response.json().catch(() => ({}))) as {
+      valid?: boolean;
+      preview?: boolean;
+      tier?: AdminCouponTier;
+      planTier?: PlanTier;
+      proPlan?: ProPlanCode;
+      billingCycle?: AdminCouponCycle;
+      expiresAt?: number | null;
+    };
+
+    if (!payload.valid && !payload.preview) return { valid: false };
+    return {
+      valid: true,
+      tier: payload.tier === 'business' ? 'business' : 'pro',
+      planTier: payload.planTier,
+      proPlan: payload.proPlan,
+      billingCycle: payload.billingCycle,
+      expiresAt: payload.expiresAt ?? null,
+    };
+  } catch {
+    return { valid: false };
+  }
+}
+
 export async function redeemProCodeWithServer(
   code: string,
   orgId?: string
@@ -1553,6 +1683,7 @@ export async function redeemProCodeWithServer(
   planTier: PlanTier;
   billingCycle: BillingCycle;
   expiresAt: number | null;
+  isCumulativeRenewal?: boolean;
 }> {
   const idToken = await getRequiredIdToken();
   const response = await fetch('/api/redeem-code', {
@@ -1571,6 +1702,7 @@ export async function redeemProCodeWithServer(
     planTier?: PlanTier;
     billingCycle?: BillingCycle;
     expiresAt?: number | null;
+    isCumulativeRenewal?: boolean;
     error?: string;
     message?: string;
   };
@@ -1585,514 +1717,100 @@ export async function redeemProCodeWithServer(
     planTier: payload.planTier || 'personal_pro',
     billingCycle: payload.billingCycle || 'lifetime',
     expiresAt: payload.expiresAt ?? null,
+    isCumulativeRenewal: Boolean(payload.isCumulativeRenewal),
   };
 }
 
-export interface AdminIssuedCodeRecord {
+export interface ServerLicenseCodeRecord {
   codeHash: string;
-  tier: AdminCouponTier;
-  cycle: AdminCouponCycle;
-  planTier: PlanTier;
-  issuedByUid: string;
-  issuedByEmail: string;
-  targetEmail: string | null;
-  usedBy: string | null;
-  usedAt: number | null;
-  createdAtMs: number;
-}
-
-export async function registerAdminIssuedCodeInDb(params: {
-  code: string;
-  tier: AdminCouponTier;
-  cycle: AdminCouponCycle;
-  planTier: PlanTier;
-  targetEmail?: string;
-}): Promise<{ savedCloud: boolean; savedServer: boolean; codeHash: string }> {
-  const codeHash = computeLicenseCodeHash(params.code);
-  const currentUser = auth.currentUser;
-  if (
-    !currentUser ||
-    !isAuthorizedAdminUser({
-      email: currentUser.email,
-      isLoggedIn: true,
-      emailVerified: currentUser.emailVerified,
-    })
-  ) {
-    return { savedCloud: false, savedServer: false, codeHash };
-  }
-
-  const normalizedTarget = params.targetEmail?.trim().toLowerCase() || null;
-  const docPath = `adminIssuedCodes/${codeHash}`;
-  let savedCloud = false;
-  let savedServer = false;
-
-  try {
-    await setDoc(doc(db, 'adminIssuedCodes', codeHash), {
-      codeHash,
-      tier: params.tier,
-      cycle: params.cycle,
-      planTier: params.planTier,
-      issuedByUid: currentUser.uid,
-      issuedByEmail: (currentUser.email || '').trim().toLowerCase(),
-      targetEmail: normalizedTarget,
-      usedBy: null,
-      usedAt: null,
-      createdAt: serverTimestamp(),
-    });
-    savedCloud = true;
-  } catch (error) {
-    try {
-      handleFirestoreError(error, OperationType.WRITE, docPath);
-    } catch {
-      // Best-effort fallback: code remains cryptographically valid offline/local-first
-    }
-  }
-
-  const adminReady = await isCloudAdminReady();
-  if (adminReady) {
-    try {
-      const idToken = await currentUser.getIdToken();
-      const resp = await fetch('/api/admin/register-code', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
-        },
-        body: JSON.stringify({
-          code: params.code,
-          tier: params.tier,
-          cycle: params.cycle,
-          ...(normalizedTarget ? { targetEmail: normalizedTarget } : {}),
-        }),
-      });
-      if (resp.ok) {
-        savedServer = true;
-      }
-    } catch {
-      // Server registration optional when offline or static deployment
-    }
-  }
-
-  return { savedCloud, savedServer, codeHash };
-}
-
-export async function claimIssuedCodeInDb(
-  rawCode: string,
-  orgId?: string
-): Promise<{
-  ok: boolean;
-  conflict?: 'CODE_ALREADY_USED' | 'TARGET_EMAIL_MISMATCH' | 'CODE_ALREADY_USED_OTHER_ORG';
-  cloudSynced: boolean;
-  serverSynced: boolean;
-}> {
-  const currentUser = auth.currentUser;
-  if (!currentUser) {
-    return { ok: true, cloudSynced: false, serverSynced: false };
-  }
-
-  const codeHash = computeLicenseCodeHash(rawCode);
-  const docPath = `adminIssuedCodes/${codeHash}`;
-  let cloudSynced = false;
-  let serverSynced = false;
-
-  try {
-    const ref = doc(db, 'adminIssuedCodes', codeHash);
-    const snap = await getDoc(ref);
-    if (snap.exists()) {
-      const data = snap.data() as {
-        usedBy?: string | null;
-        targetEmail?: string | null;
-      };
-      if (data.usedBy && data.usedBy !== currentUser.uid) {
-        return {
-          ok: false,
-          conflict: 'CODE_ALREADY_USED',
-          cloudSynced: false,
-          serverSynced: false,
-        };
-      }
-      const expectedEmail = typeof data.targetEmail === 'string' ? data.targetEmail.trim().toLowerCase() : '';
-      const userEmail = (currentUser.email || '').trim().toLowerCase();
-      if (expectedEmail && expectedEmail !== userEmail) {
-        return {
-          ok: false,
-          conflict: 'TARGET_EMAIL_MISMATCH',
-          cloudSynced: false,
-          serverSynced: false,
-        };
-      }
-      if (!data.usedBy && currentUser.emailVerified) {
-        await updateDoc(ref, {
-          usedBy: currentUser.uid,
-          usedAt: serverTimestamp(),
-        });
-        cloudSynced = true;
-      } else if (data.usedBy === currentUser.uid) {
-        cloudSynced = true;
-      }
-    }
-  } catch (error) {
-    try {
-      handleFirestoreError(error, OperationType.WRITE, docPath);
-    } catch {
-      // Ignore offline/network issues so valid cryptographic codes still activate locally
-    }
-  }
-
-  const adminReady = await isCloudAdminReady();
-  if (adminReady) {
-    try {
-      await redeemProCodeWithServer(rawCode, orgId);
-      serverSynced = true;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : '';
-      if (
-        msg.includes('CODE_ALREADY_USED_OTHER_ORG') ||
-        msg.includes('مؤسسة أخرى')
-      ) {
-        return {
-          ok: false,
-          conflict: 'CODE_ALREADY_USED_OTHER_ORG',
-          cloudSynced,
-          serverSynced: false,
-        };
-      }
-      if (msg.includes('CODE_ALREADY_USED') || msg.includes('بحساب آخر')) {
-        return {
-          ok: false,
-          conflict: 'CODE_ALREADY_USED',
-          cloudSynced,
-          serverSynced: false,
-        };
-      }
-      if (msg.includes('TARGET_EMAIL_MISMATCH') || msg.includes('بريد إلكتروني آخر')) {
-        return {
-          ok: false,
-          conflict: 'TARGET_EMAIL_MISMATCH',
-          cloudSynced,
-          serverSynced: false,
-        };
-      }
-    }
-  }
-
-  return { ok: true, cloudSynced, serverSynced };
-}
-
-export async function fetchRecentAdminIssuedCodes(maxItems = 10): Promise<AdminIssuedCodeRecord[]> {
-  const currentUser = auth.currentUser;
-  if (
-    !currentUser ||
-    !isAuthorizedAdminUser({
-      email: currentUser.email,
-      isLoggedIn: true,
-      emailVerified: currentUser.emailVerified,
-    })
-  ) {
-    return [];
-  }
-
-  const colPath = 'adminIssuedCodes';
-  try {
-    const q = query(
-      collection(db, colPath),
-      orderBy('createdAt', 'desc'),
-      limit(maxItems)
-    );
-    const snap = await getDocs(q);
-    return snap.docs.map((d) => {
-      const raw = d.data() as Record<string, unknown>;
-      const createdAtTs = raw.createdAt as { toMillis?: () => number } | undefined;
-      const usedAtTs = raw.usedAt as { toMillis?: () => number } | undefined;
-      return {
-        codeHash: String(raw.codeHash || d.id),
-        tier: raw.tier === 'business' ? 'business' : 'pro',
-        cycle:
-          raw.cycle === 'monthly' || raw.cycle === 'yearly' || raw.cycle === 'lifetime'
-            ? raw.cycle
-            : 'yearly',
-        planTier: raw.planTier === 'business_pro' ? 'business_pro' : 'personal_pro',
-        issuedByUid: String(raw.issuedByUid || ''),
-        issuedByEmail: String(raw.issuedByEmail || ''),
-        targetEmail: typeof raw.targetEmail === 'string' ? raw.targetEmail : null,
-        usedBy: typeof raw.usedBy === 'string' ? raw.usedBy : null,
-        usedAt: typeof usedAtTs?.toMillis === 'function' ? usedAtTs.toMillis() : null,
-        createdAtMs: typeof createdAtTs?.toMillis === 'function' ? createdAtTs.toMillis() : Date.now(),
-      };
-    });
-  } catch (error) {
-    try {
-      handleFirestoreError(error, OperationType.LIST, colPath);
-    } catch {
-      return [];
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Firestore `coupons` Collection (Admin Panel + Atomic User Redemption)
-// ---------------------------------------------------------------------------
-
-export interface FirestoreCouponRecord {
-  code: string;
+  codePreview: string;
   tier: AdminCouponTier;
   planTier: PlanTier;
   cycle: AdminCouponCycle;
   status: 'unused' | 'used';
   used: boolean;
   usedBy: string | null;
+  usedOrgId: string | null;
   usedAt: number | null;
   createdByUid: string;
   createdByEmail: string;
   createdAtMs: number;
 }
 
-const VALID_COUPON_ID_RE = /^[a-zA-Z0-9_\-]+$/;
+export async function fetchLicenseCodesFromServer(
+  adminSessionToken: string
+): Promise<ServerLicenseCodeRecord[]> {
+  if (!adminSessionToken) {
+    throw new ServerApiError('ADMIN_SESSION_REQUIRED', 'ADMIN_SESSION_REQUIRED', 403);
+  }
+  const idToken = await getRequiredIdToken();
+  const response = await fetch('/api/admin/license-codes', {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      'X-Admin-Session': adminSessionToken,
+    },
+  });
 
-export async function createCouponInFirestore(params: {
-  code: string;
+  const payload = (await response.json().catch(() => ({}))) as {
+    codes?: ServerLicenseCodeRecord[];
+    error?: string;
+    message?: string;
+  };
+
+  if (!response.ok || !Array.isArray(payload.codes)) {
+    throw new ServerApiError(
+      payload.error || 'LIST_LICENSE_CODES_FAILED',
+      payload.message || payload.error || 'LIST_LICENSE_CODES_FAILED',
+      response.status
+    );
+  }
+
+  return payload.codes;
+}
+
+export async function createLicenseCodeOnServer(params: {
+  adminSessionToken: string;
   tier: AdminCouponTier;
   cycle: AdminCouponCycle;
-  planTier: PlanTier;
-}): Promise<{ saved: boolean; code: string }> {
-  const normalizedCode = String(params.code || '')
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, '')
-    .slice(0, 128);
-  const currentUser = auth.currentUser;
-
-  if (
-    !normalizedCode ||
-    !VALID_COUPON_ID_RE.test(normalizedCode) ||
-    !currentUser ||
-    !isAuthorizedAdminUser({
-      email: currentUser.email,
-      isLoggedIn: true,
-      emailVerified: currentUser.emailVerified,
-    })
-  ) {
-    return { saved: false, code: normalizedCode };
+  targetEmail?: string;
+}): Promise<{ code: string; record: ServerLicenseCodeRecord }> {
+  if (!params.adminSessionToken) {
+    throw new ServerApiError('ADMIN_SESSION_REQUIRED', 'ADMIN_SESSION_REQUIRED', 403);
   }
-
-  const docPath = `coupons/${normalizedCode}`;
-  try {
-    await setDoc(doc(db, 'coupons', normalizedCode), {
-      code: normalizedCode,
+  const idToken = await getRequiredIdToken();
+  const response = await fetch('/api/admin/license-codes', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+      'X-Admin-Session': params.adminSessionToken,
+    },
+    body: JSON.stringify({
       tier: params.tier,
-      planTier: params.planTier,
       cycle: params.cycle,
-      status: 'unused',
-      used: false,
-      usedBy: null,
-      usedAt: null,
-      createdByUid: currentUser.uid,
-      createdByEmail: (currentUser.email || '').trim().toLowerCase().slice(0, 254),
-      createdAt: serverTimestamp(),
-    });
-    return { saved: true, code: normalizedCode };
-  } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, docPath);
-  }
-}
-
-export async function fetchAdminCouponsFromFirestore(
-  maxItems = 25
-): Promise<FirestoreCouponRecord[]> {
-  const currentUser = auth.currentUser;
-  if (
-    !currentUser ||
-    !isAuthorizedAdminUser({
-      email: currentUser.email,
-      isLoggedIn: true,
-      emailVerified: currentUser.emailVerified,
-    })
-  ) {
-    return [];
-  }
-
-  const colPath = 'coupons';
-  try {
-    const q = query(collection(db, colPath), orderBy('createdAt', 'desc'), limit(maxItems));
-    const snap = await getDocs(q);
-    return snap.docs.map((d) => {
-      const raw = d.data() as Record<string, unknown>;
-      const createdAtTs = raw.createdAt as { toMillis?: () => number } | undefined;
-      const usedAtTs = raw.usedAt as { toMillis?: () => number } | undefined;
-      const isUsed = Boolean(raw.used === true || raw.status === 'used');
-      return {
-        code: String(raw.code || d.id),
-        tier: raw.tier === 'business' ? 'business' : 'pro',
-        planTier: raw.planTier === 'business_pro' ? 'business_pro' : 'personal_pro',
-        cycle:
-          raw.cycle === 'monthly' || raw.cycle === 'yearly' || raw.cycle === 'lifetime'
-            ? raw.cycle
-            : 'yearly',
-        status: isUsed ? 'used' : 'unused',
-        used: isUsed,
-        usedBy: typeof raw.usedBy === 'string' ? raw.usedBy : null,
-        usedAt: typeof usedAtTs?.toMillis === 'function' ? usedAtTs.toMillis() : null,
-        createdByUid: String(raw.createdByUid || ''),
-        createdByEmail: String(raw.createdByEmail || ''),
-        createdAtMs: typeof createdAtTs?.toMillis === 'function' ? createdAtTs.toMillis() : Date.now(),
-      };
-    });
-  } catch (error) {
-    try {
-      handleFirestoreError(error, OperationType.LIST, colPath);
-    } catch {
-      return [];
-    }
-  }
-}
-
-export interface CouponRedemptionResult {
-  status: 'redeemed' | 'not_found' | 'already_used' | 'invalid_format' | 'auth_required';
-  code?: string;
-  tier?: AdminCouponTier;
-  planTier?: PlanTier;
-  proPlan?: ProPlanCode;
-  billingCycle?: BillingCycle;
-  startedAt?: number | null;
-  expiresAt?: number | null;
-  isCumulativeRenewal?: boolean;
-}
-
-export async function peekCouponInFirestore(rawCode: string): Promise<{
-  exists: boolean;
-  used: boolean;
-  code?: string;
-  tier?: AdminCouponTier;
-  planTier?: PlanTier;
-  cycle?: AdminCouponCycle;
-}> {
-  if (!auth.currentUser) {
-    return { exists: false, used: false };
-  }
-  const normalizedCode = String(rawCode || '')
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, '')
-    .slice(0, 128);
-  if (!normalizedCode || !VALID_COUPON_ID_RE.test(normalizedCode)) {
-    return { exists: false, used: false };
-  }
-  try {
-    const snap = await getDoc(doc(db, 'coupons', normalizedCode));
-    if (!snap.exists()) {
-      return { exists: false, used: false };
-    }
-    const data = snap.data() as Record<string, unknown>;
-    const used = Boolean(data.used === true || data.status === 'used');
-    const tier: AdminCouponTier = data.tier === 'business' ? 'business' : 'pro';
-    const cycle: AdminCouponCycle =
-      data.cycle === 'monthly' || data.cycle === 'yearly' || data.cycle === 'lifetime'
-        ? data.cycle
-        : 'lifetime';
-    const planTier: PlanTier = tier === 'business' ? 'business_pro' : 'personal_pro';
-    return { exists: true, used, code: normalizedCode, tier, planTier, cycle };
-  } catch {
-    return { exists: false, used: false };
-  }
-}
-
-export async function redeemCouponInFirestore(rawCode: string): Promise<CouponRedemptionResult> {
-  const currentUser = auth.currentUser;
-  if (!currentUser) {
-    return { status: 'auth_required' };
-  }
-
-  const normalizedCode = String(rawCode || '')
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, '')
-    .slice(0, 128);
-  if (!normalizedCode || !VALID_COUPON_ID_RE.test(normalizedCode)) {
-    return { status: 'invalid_format' };
-  }
-
-  const couponPath = `coupons/${normalizedCode}`;
-  const couponRef = doc(db, 'coupons', normalizedCode);
-
-  let couponSnap;
-  try {
-    couponSnap = await getDoc(couponRef);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, couponPath);
-  }
-
-  if (!couponSnap.exists()) {
-    return { status: 'not_found' };
-  }
-
-  const data = couponSnap.data() as Record<string, unknown>;
-  if (data.used === true || data.status === 'used') {
-    return { status: 'already_used', code: normalizedCode };
-  }
-
-  const tier: AdminCouponTier = data.tier === 'business' ? 'business' : 'pro';
-  const cycle: AdminCouponCycle =
-    data.cycle === 'monthly' || data.cycle === 'yearly' || data.cycle === 'lifetime'
-      ? data.cycle
-      : 'lifetime';
-  const planTier: Exclude<PlanTier, 'free'> = tier === 'business' ? 'business_pro' : 'personal_pro';
-  const proPlan: ProPlanCode =
-    tier === 'business'
-      ? cycle === 'monthly'
-        ? 'business_monthly'
-        : cycle === 'yearly'
-        ? 'business_yearly'
-        : 'code'
-      : cycle;
-
-  const existingProfile = await ensureUserProfile(currentUser);
-  const dateCalc = calculateSubscriptionDatesUpdate({
-    currentTier: existingProfile.planTier || 'free',
-    currentExpiresAt: existingProfile.proExpiresAt ?? existingProfile.expiresAt ?? null,
-    currentBillingCycle: existingProfile.billingCycle ?? null,
-    currentIsPro: Boolean(existingProfile.isPro || existingProfile.proActive),
-    newTier: planTier,
-    newCycle: cycle,
-    nowMs: Date.now(),
+      ...(params.targetEmail?.trim() ? { targetEmail: params.targetEmail.trim().toLowerCase() } : {}),
+    }),
   });
 
-  const userRef = doc(db, 'users', currentUser.uid);
-  const batch = writeBatch(db);
-  batch.update(couponRef, {
-    used: true,
-    status: 'used',
-    usedBy: currentUser.uid,
-    usedAt: serverTimestamp(),
-  });
-  batch.update(userRef, {
-    isPro: true,
-    proActive: true,
-    planTier,
-    proPlan,
-    billingCycle: cycle,
-    startedAt: dateCalc.startedAt,
-    expiresAt: dateCalc.expiresAt,
-    proExpiresAt: dateCalc.expiresAt,
-    redeemedCouponCode: normalizedCode,
-    updatedAt: serverTimestamp(),
-  });
+  const payload = (await response.json().catch(() => ({}))) as {
+    code?: string;
+    record?: ServerLicenseCodeRecord;
+    error?: string;
+    message?: string;
+  };
 
-  try {
-    await batch.commit();
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, couponPath);
+  if (!response.ok || !payload.code || !payload.record) {
+    throw new ServerApiError(
+      payload.error || 'CREATE_LICENSE_CODE_FAILED',
+      payload.message || payload.error || 'CREATE_LICENSE_CODE_FAILED',
+      response.status
+    );
   }
 
   return {
-    status: 'redeemed',
-    code: normalizedCode,
-    tier,
-    planTier,
-    proPlan,
-    billingCycle: cycle,
-    startedAt: dateCalc.startedAt,
-    expiresAt: dateCalc.expiresAt,
-    isCumulativeRenewal: dateCalc.isCumulativeRenewal,
+    code: payload.code,
+    record: payload.record,
   };
 }
 

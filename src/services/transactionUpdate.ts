@@ -34,10 +34,12 @@ export function buildUpdatedTransaction(
 ): Transaction {
   const nextType = updates.type ?? oldTx.type;
   const nextCurrency = updates.currency ?? oldTx.currency;
-  const nextAmount =
+  const nextAmount = roundCurrency(
     updates.amount !== undefined
       ? updates.amount
-      : getEffectiveTransactionAmount(oldTx);
+      : getEffectiveTransactionAmount(oldTx),
+    nextCurrency
+  );
 
   const currencyChanged = Boolean(updates.currency && updates.currency !== oldTx.currency);
 
@@ -60,9 +62,16 @@ export function buildUpdatedTransaction(
   const nextToWalletId =
     nextType === 'transfer' ? updates.toWalletId ?? oldTx.toWalletId : undefined;
 
+  const destWallet = nextToWalletId ? wallets.find((w) => w.id === nextToWalletId) : undefined;
+  const destCurrency = destWallet?.currency || nextCurrency;
+
   let nextConvertedAmount =
     nextType === 'transfer'
-      ? updates.convertedAmount ?? oldTx.convertedAmount
+      ? updates.convertedAmount !== undefined
+        ? roundCurrency(updates.convertedAmount, destCurrency)
+        : oldTx.convertedAmount !== undefined
+        ? roundCurrency(oldTx.convertedAmount, destCurrency)
+        : undefined
       : undefined;
 
   if (
@@ -74,7 +83,6 @@ export function buildUpdatedTransaction(
       updates.toWalletId !== undefined ||
       updates.type !== undefined)
   ) {
-    const destWallet = wallets.find((w) => w.id === nextToWalletId);
     nextConvertedAmount = destWallet
       ? convertCurrency(nextAmount, nextCurrency, destWallet.currency, customRates)
       : nextAmount;
@@ -92,8 +100,10 @@ export function buildUpdatedTransaction(
     transferFee:
       nextType === 'transfer'
         ? updates.transferFee !== undefined
-          ? updates.transferFee
-          : oldTx.transferFee
+          ? roundCurrency(updates.transferFee, nextCurrency)
+          : oldTx.transferFee !== undefined
+          ? roundCurrency(oldTx.transferFee, nextCurrency)
+          : undefined
         : undefined,
     exchangeRate:
       currencyChanged && updates.exchangeRate === undefined

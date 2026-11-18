@@ -7,6 +7,7 @@ import {
   getTransactionsInDateRange,
 } from '../../services/calculations';
 import { convertCurrency } from '../../services/currency';
+import { escapeCsvCell } from '../../services/csvImport';
 import { MoneyText } from '../common/MoneyText';
 import { HairlineFigure } from '../common/HairlineVisuals';
 import { BrandLogo } from '../common/BrandLogo';
@@ -71,14 +72,16 @@ export const ReportsModal: React.FC<ReportsModalProps> = ({ isOpen, onClose }) =
         tx.type === 'expense' ? 'مصروف' : tx.type === 'income' ? 'دخل' : 'تحويل',
         tx.amount,
         tx.currency,
-        `"${w?.name || ''}"`,
-        `"${cat?.nameAr || ''}"`,
+        w?.name || '',
+        cat?.nameAr || '',
         tx.priority,
-        `"${(tx.notes || '').replace(/"/g, '""')}"`,
-      ].join(',');
+        tx.notes || '',
+      ]
+        .map(escapeCsvCell)
+        .join(',');
     });
 
-    const csvContent = '\uFEFF' + [headers.join(','), ...rows].join('\n');
+    const csvContent = '\uFEFF' + [headers.map(escapeCsvCell).join(','), ...rows].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');

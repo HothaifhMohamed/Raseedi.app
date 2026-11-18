@@ -18,20 +18,17 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import {
-  AdminCouponCycle,
-  AdminCouponTier,
-  generateAdminLicenseCode,
-  verifyAdminPassword,
-} from '../../services/licenseCodes';
+import { AdminCouponCycle, AdminCouponTier } from '../../services/licenseCodes';
 import {
   adminCancelUserSubscription,
   adminUpdateUserSubscription,
   CloudUserProfile,
-  createCouponInFirestore,
-  fetchAdminCouponsFromFirestore,
+  createLicenseCodeOnServer,
   fetchAllUsersForAdmin,
-  FirestoreCouponRecord,
+  fetchLicenseCodesFromServer,
+  ServerApiError,
+  ServerLicenseCodeRecord,
+  verifyAdminPasscodeOnServer,
 } from '../../services/firebase';
 import { SUBSCRIPTION_DAY_MS } from '../../services/subscriptionHelpers';
 import type { PlanTier } from '../../types';
@@ -62,6 +59,8 @@ export const AdminCodePanelModal: React.FC = () => {
 
   const [passcodeInput, setPasscodeInput] = useState('');
   const [passcodeError, setPasscodeError] = useState<string | null>(null);
+  const [isVerifyingPasscode, setIsVerifyingPasscode] = useState(false);
+  const [adminSessionToken, setAdminSessionToken] = useState<string | null>(null);
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [activeTab, setActiveTab] = useState<AdminTab>('users');
 
@@ -90,19 +89,20 @@ export const AdminCodePanelModal: React.FC = () => {
     'idle' | 'syncing' | 'cloud_synced' | 'error'
   >('idle');
   const [adminCodeError, setAdminCodeError] = useState<string | null>(null);
-  const [recentCoupons, setRecentCoupons] = useState<FirestoreCouponRecord[]>([]);
+  const [recentCoupons, setRecentCoupons] = useState<ServerLicenseCodeRecord[]>([]);
   const [isLoadingCoupons, setIsLoadingCoupons] = useState(false);
   const [copiedAdminCode, setCopiedAdminCode] = useState(false);
 
-  const isAuthorizedAdmin =
-    isAdminUser && user?.email?.trim().toLowerCase() === 'hapaypal2003@gmail.com';
+  const isAuthorizedAdmin = Boolean(isAdminUser);
 
-  // Reset passcode gate & transient editor state every time modal closes
+  // Reset passcode gate, ephemeral session token & transient editor state every time modal closes
   useEffect(() => {
     if (!isAdminCodeModalOpen) {
       setIsUnlocked(false);
+      setAdminSessionToken(null);
       setPasscodeInput('');
       setPasscodeError(null);
+      setIsVerifyingPasscode(false);
       setAdminCodeError(null);
       setAdminCodeSyncStatus('idle');
       setCopiedAdminCode(false);
@@ -113,17 +113,32 @@ export const AdminCodePanelModal: React.FC = () => {
     }
   }, [isAdminCodeModalOpen]);
 
-  const loadAdminUsers = async () => {
+  const handleSessionExpiry = (err: unknown): boolean => {
+    if (err instanceof ServerApiError && err.code === 'ADMIN_SESSION_REQUIRED') {
+      setIsUnlocked(false);
+      setAdminSessionToken(null);
+      setPasscodeError(
+        isRTL ? 'انتهت جلسة الإدارة، يرجى إعادة إدخال رمز المرور.' : 'Admin session expired. Please re-enter passcode.'
+      );
+      return true;
+    }
+    return false;
+  };
+
+  const loadAdminUsers = async (tokenOverride?: string) => {
+    const token = tokenOverride || adminSessionToken;
+    if (!token) return;
     setIsLoadingUsers(true);
     setUsersError(null);
     try {
-      const rows = await fetchAllUsersForAdmin(200);
+      const rows = await fetchAllUsersForAdmin(token);
       setUsersList(rows);
     } catch (err) {
+      if (handleSessionExpiry(err)) return;
       setUsersError(
         parseReadableError(
           err,
-          isRTL ? 'تعذر تحميل قائمة الحسابات من Firestore.' : 'Failed to load accounts from Firestore.'
+          isRTL ? 'تعذر تحميل قائمة الحسابات من الخادم.' : 'Failed to load accounts from server.'
         )
       );
     } finally {
@@ -131,21 +146,31 @@ export const AdminCodePanelModal: React.FC = () => {
     }
   };
 
-  const loadAdminCoupons = async () => {
+  const loadAdminCoupons = async (tokenOverride?: string) => {
+    const token = tokenOverride || adminSessionToken;
+    if (!token) return;
     setIsLoadingCoupons(true);
     try {
-      const records = await fetchAdminCouponsFromFirestore(25);
+      const records = await fetchLicenseCodesFromServer(token);
       setRecentCoupons(records);
+    } catch (err) {
+      if (handleSessionExpiry(err)) return;
+      setAdminCodeError(
+        parseReadableError(
+          err,
+          isRTL ? 'تعذر تحميل سجل الأكواد من الخادم.' : 'Failed to load license codes from server.'
+        )
+      );
     } finally {
       setIsLoadingCoupons(false);
     }
   };
 
   useEffect(() => {
-    if (!isAdminCodeModalOpen || !isAuthorizedAdmin || !isUnlocked) return;
-    void loadAdminUsers();
-    void loadAdminCoupons();
-  }, [isAdminCodeModalOpen, isAuthorizedAdmin, isUnlocked]);
+    if (!isAdminCodeModalOpen || !isAuthorizedAdmin || !isUnlocked || !adminSessionToken) return;
+    void loadAdminUsers(adminSessionToken);
+    void loadAdminCoupons(adminSessionToken);
+  }, [isAdminCodeModalOpen, isAuthorizedAdmin, isUnlocked, adminSessionToken]);
 
   const filteredUsers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -167,17 +192,30 @@ export const AdminCodePanelModal: React.FC = () => {
 
   if (!isAdminCodeModalOpen || !isAuthorizedAdmin) return null;
 
-  const handleUnlockSubmit = (e: React.FormEvent) => {
+  const handleUnlockSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (verifyAdminPassword(passcodeInput)) {
-      setPasscodeError(null);
+    if (!passcodeInput.trim() || isVerifyingPasscode) return;
+    setIsVerifyingPasscode(true);
+    setPasscodeError(null);
+    try {
+      const { adminSessionToken: token } = await verifyAdminPasscodeOnServer(passcodeInput);
+      setAdminSessionToken(token);
       setPasscodeInput('');
       setIsUnlocked(true);
-      return;
+    } catch (err) {
+      const msg =
+        err instanceof ServerApiError && err.code === 'ADMIN_PASSCODE_NOT_CONFIGURED'
+          ? isRTL
+            ? 'لم يتم ضبط رمز مرور الإدارة (ADMIN_PASSCODE) على الخادم.'
+            : 'ADMIN_PASSCODE is not configured on the server.'
+          : parseReadableError(
+              err,
+              isRTL ? 'كلمة مرور الإدارة غير صحيحة.' : 'Incorrect admin passcode.'
+            );
+      setPasscodeError(msg);
+    } finally {
+      setIsVerifyingPasscode(false);
     }
-    setPasscodeError(
-      isRTL ? 'كلمة مرور الإدارة غير صحيحة.' : 'Incorrect admin passcode.'
-    );
   };
 
   const openInlineEditor = (u: CloudUserProfile) => {
@@ -198,6 +236,7 @@ export const AdminCodePanelModal: React.FC = () => {
   };
 
   const handleSaveUserSubscription = async (targetUid: string) => {
+    if (!adminSessionToken) return;
     setIsSavingUserUid(targetUid);
     setUsersActionMsg(null);
     try {
@@ -212,6 +251,7 @@ export const AdminCodePanelModal: React.FC = () => {
         planTier: editTier,
         billingCycle: editTier === 'free' ? 'free' : editCycle,
         customDays,
+        adminSessionToken,
       });
 
       setUsersList((prev) =>
@@ -225,6 +265,7 @@ export const AdminCodePanelModal: React.FC = () => {
           : 'User subscription updated successfully.',
       });
     } catch (err) {
+      if (handleSessionExpiry(err)) return;
       setUsersActionMsg({
         type: 'err',
         text: parseReadableError(
@@ -238,10 +279,11 @@ export const AdminCodePanelModal: React.FC = () => {
   };
 
   const handleCancelUserSubscription = async (targetUid: string) => {
+    if (!adminSessionToken) return;
     setIsSavingUserUid(targetUid);
     setUsersActionMsg(null);
     try {
-      const updated = await adminCancelUserSubscription(targetUid);
+      const updated = await adminCancelUserSubscription(targetUid, adminSessionToken);
       setUsersList((prev) =>
         prev.map((row) => (row.uid === targetUid ? { ...row, ...updated } : row))
       );
@@ -253,6 +295,7 @@ export const AdminCodePanelModal: React.FC = () => {
           : 'Subscription cancelled and reverted to Free.',
       });
     } catch (err) {
+      if (handleSessionExpiry(err)) return;
       setUsersActionMsg({
         type: 'err',
         text: parseReadableError(
@@ -266,40 +309,27 @@ export const AdminCodePanelModal: React.FC = () => {
   };
 
   const handleGenerateAndSave = async () => {
-    const code = generateAdminLicenseCode({
-      tier: adminCouponTier,
-      cycle: adminCouponCycle,
-    });
-    setGeneratedAdminCode(code);
+    if (!adminSessionToken) return;
     setCopiedAdminCode(false);
     setAdminCodeSyncStatus('syncing');
     setAdminCodeError(null);
 
     try {
-      const res = await createCouponInFirestore({
-        code,
+      const res = await createLicenseCodeOnServer({
+        adminSessionToken,
         tier: adminCouponTier,
         cycle: adminCouponCycle,
-        planTier: adminCouponTier === 'business' ? 'business_pro' : 'personal_pro',
       });
-      if (res.saved) {
-        setAdminCodeSyncStatus('cloud_synced');
-        const updatedList = await fetchAdminCouponsFromFirestore(25);
-        setRecentCoupons(updatedList);
-      } else {
-        setAdminCodeSyncStatus('error');
-        setAdminCodeError(
-          isRTL
-            ? 'تعذر حفظ الكود في قاعدة البيانات. تحقق من تسجيل الدخول بحساب المدير.'
-            : 'Failed to save coupon to Firestore.'
-        );
-      }
+      setGeneratedAdminCode(res.code);
+      setAdminCodeSyncStatus('cloud_synced');
+      setRecentCoupons((prev) => [res.record, ...prev].slice(0, 50));
     } catch (err) {
+      if (handleSessionExpiry(err)) return;
       setAdminCodeSyncStatus('error');
       setAdminCodeError(
         parseReadableError(
           err,
-          isRTL ? 'تعذر حفظ الكود في Firestore.' : 'Could not save coupon in Firestore.'
+          isRTL ? 'تعذر توليد وحفظ الكود على الخادم.' : 'Could not generate license code on server.'
         )
       );
     }
@@ -440,10 +470,12 @@ export const AdminCodePanelModal: React.FC = () => {
 
               <button
                 type="submit"
+                disabled={isVerifyingPasscode || !passcodeInput.trim()}
                 data-testid="admin-passcode-submit"
-                className="w-full py-2.5 px-4 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[44px] hover:opacity-95 transition-opacity"
+                className="w-full py-2.5 px-4 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[44px] hover:opacity-95 transition-opacity disabled:opacity-60 flex items-center justify-center gap-2"
               >
-                {isRTL ? 'فتح لوحة الإدارة' : 'Unlock Admin Panel'}
+                {isVerifyingPasscode && <Loader2 className="w-4 h-4 animate-spin" />}
+                <span>{isRTL ? 'فتح لوحة الإدارة' : 'Unlock Admin Panel'}</span>
               </button>
             </form>
           ) : (
@@ -584,8 +616,7 @@ export const AdminCodePanelModal: React.FC = () => {
                         const badge = formatTierBadge(account);
                         const isEditing = editingUid === account.uid;
                         const isBusy = isSavingUserUid === account.uid;
-                        const isSelfAdmin =
-                          account.email?.trim().toLowerCase() === 'hapaypal2003@gmail.com';
+                        const isSelfAdmin = Boolean(account.isAdmin || account.uid === user?.id);
 
                         return (
                           <div
@@ -916,12 +947,12 @@ export const AdminCodePanelModal: React.FC = () => {
                       <div className="space-y-1.5 max-h-48 overflow-y-auto">
                         {recentCoupons.map((rec) => (
                           <div
-                            key={rec.code}
+                            key={rec.codeHash}
                             className="px-3 py-2 rounded-lg bg-[var(--color-bg)] border border-[var(--color-line)] flex items-center justify-between gap-2 text-[11px]"
                           >
                             <div className="min-w-0">
                               <code className="block font-mono font-bold text-[var(--color-ink)] truncate" dir="ltr">
-                                {rec.code}
+                                {rec.codePreview}
                               </code>
                               <span className="text-[10px] text-[var(--color-muted)]">
                                 {rec.tier === 'business' ? 'Business' : 'PRO'} •{' '}

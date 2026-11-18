@@ -220,7 +220,7 @@
     },
     "AdminIssuedCode": {
       "title": "AdminIssuedCode",
-      "description": "Hashed PRO / Business activation codes issued by the verified admin and redeemable once by target users",
+      "description": "Legacy server-only hashed PRO / Business activation codes",
       "type": "object",
       "properties": {
         "codeHash": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
@@ -236,9 +236,43 @@
       },
       "required": ["codeHash", "tier", "cycle", "planTier", "issuedByUid", "issuedByEmail", "createdAt"]
     },
+    "LicenseCode": {
+      "title": "LicenseCode",
+      "description": "Server-only hashed PRO / Business license codes created and redeemed exclusively via Admin SDK endpoints",
+      "type": "object",
+      "properties": {
+        "codeHash": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "codePreview": { "type": "string", "maxLength": 32 },
+        "tier": { "type": "string", "enum": ["pro", "business"] },
+        "planTier": { "type": "string", "enum": ["personal_pro", "business_pro"] },
+        "cycle": { "type": "string", "enum": ["monthly", "yearly", "lifetime"] },
+        "status": { "type": "string", "enum": ["unused", "used"] },
+        "used": { "type": "boolean" },
+        "usedBy": { "type": "string", "maxLength": 128 },
+        "usedAt": { "type": "string", "format": "date-time" },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "createdByEmail": { "type": "string", "format": "email", "maxLength": 254 },
+        "createdAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["codeHash", "tier", "planTier", "cycle", "status", "used", "createdByUid", "createdAt"]
+    },
+    "JoinRateLimit": {
+      "title": "JoinRateLimit",
+      "description": "Server-only persistent brute-force protection state for /api/org/join",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "failures": { "type": "number" },
+        "windowStartMs": { "type": "number" },
+        "blockedUntilMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "failures", "windowStartMs", "updatedAt"]
+    },
     "Coupon": {
       "title": "Coupon",
-      "description": "Admin-generated license coupon in coupons collection redeemable once by a verified user",
+      "description": "Legacy server-only activation coupons",
       "type": "object",
       "properties": {
         "code": {
@@ -550,13 +584,21 @@
       "schema": { "$ref": "#/entities/ActivationCode" },
       "description": "Server-only PRO activation code hashes"
     },
+    "/licenseCodes/{codeHash}": {
+      "schema": { "$ref": "#/entities/LicenseCode" },
+      "description": "Server-only hashed PRO / Business license codes (no client reads or writes)"
+    },
     "/adminIssuedCodes/{codeHash}": {
       "schema": { "$ref": "#/entities/AdminIssuedCode" },
-      "description": "Admin-issued hashed PRO license codes redeemable once by verified users"
+      "description": "Server-only legacy activation codes"
     },
     "/coupons/{couponId}": {
       "schema": { "$ref": "#/entities/Coupon" },
-      "description": "Admin-generated activation coupons redeemable once to upgrade user planTier and proActive"
+      "description": "Server-only legacy coupons"
+    },
+    "/joinRateLimits/{uid}": {
+      "schema": { "$ref": "#/entities/JoinRateLimit" },
+      "description": "Server-only persistent org join rate limiting records"
     },
     "/organizations/{orgId}": {
       "schema": { "$ref": "#/entities/Organization" },
