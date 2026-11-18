@@ -7,6 +7,7 @@ import {
   isSignedLicenseFormat,
 } from './licenseCodes';
 import {
+  buildAdminCustomClaims,
   generateRandomLicenseCodeServer,
   hashLicenseCodeServer,
   isAllowedCorsOrigin,
@@ -62,6 +63,14 @@ describe('licenseCodes format helpers and serverSecurity hardening', () => {
       false
     );
     assert.equal(isServerAdminUser(null, 'opsadmin@example.com'), false);
+
+    const added = buildAdminCustomClaims({ orgRole: 'owner', tier: 'pro' });
+    assert.equal(added.changed, true);
+    assert.deepEqual(added.claims, { orgRole: 'owner', tier: 'pro', admin: true });
+
+    const unchanged = buildAdminCustomClaims({ admin: true, orgRole: 'owner' });
+    assert.equal(unchanged.changed, false);
+    assert.deepEqual(unchanged.claims, { admin: true, orgRole: 'owner' });
   });
 
   it('enforces strict CORS origin allowlist checks', () => {

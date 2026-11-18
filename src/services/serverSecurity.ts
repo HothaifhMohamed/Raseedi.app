@@ -336,6 +336,25 @@ export function isServerAdminUser(
   return allowlist.has(email);
 }
 
+export function buildAdminCustomClaims(
+  existingClaims?: Record<string, unknown> | null
+): { changed: boolean; claims: Record<string, unknown> } {
+  const base =
+    existingClaims && typeof existingClaims === 'object' && !Array.isArray(existingClaims)
+      ? { ...existingClaims }
+      : {};
+  if (base.admin === true) {
+    return { changed: false, claims: base };
+  }
+  return {
+    changed: true,
+    claims: {
+      ...base,
+      admin: true,
+    },
+  };
+}
+
 export function verifyTimingSafePasscode(input: string, configuredPasscode?: string): boolean {
   const cleanConfigured = typeof configuredPasscode === 'string' ? configuredPasscode.trim() : '';
   const cleanInput = typeof input === 'string' ? input.trim() : '';

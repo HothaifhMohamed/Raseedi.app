@@ -2,7 +2,7 @@
  * Firestore Security Rules Emulator Test Suite
  * Run via: npm run test:rules (requires Java runtime + firebase emulators:exec)
  */
-import test, { after, before, beforeEach } from 'node:test';
+import test, { after, before, beforeEach, describe } from 'node:test';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -83,25 +83,31 @@ async function seedOrgBase(options?: { expiresAt?: number; lockedUntilDate?: str
   });
 }
 
-before(async () => {
-  const rules = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf8');
-  testEnv = await initializeTestEnvironment({
-    projectId: PROJECT_ID,
-    firestore: { rules },
+const HAS_FIRESTORE_EMULATOR = Boolean(process.env.FIRESTORE_EMULATOR_HOST?.trim());
+const SKIP_EMULATOR_REASON = HAS_FIRESTORE_EMULATOR
+  ? false
+  : 'FIRESTORE_EMULATOR_HOST is not set (run via npm run test:rules with Java + Firebase Emulator)';
+
+describe('Firestore Security Rules', { skip: SKIP_EMULATOR_REASON }, () => {
+  before(async () => {
+    const rules = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf8');
+    testEnv = await initializeTestEnvironment({
+      projectId: PROJECT_ID,
+      firestore: { rules },
+    });
   });
-});
 
-after(async () => {
-  if (testEnv) {
-    await testEnv.cleanup();
-  }
-});
+  after(async () => {
+    if (testEnv) {
+      await testEnv.cleanup();
+    }
+  });
 
-beforeEach(async () => {
-  await testEnv.clearFirestore();
-});
+  beforeEach(async () => {
+    await testEnv.clearFirestore();
+  });
 
-test('Users collection enforces ownership and blocks client writes to server-only subscription fields', async () => {
+  test('Users collection enforces ownership and blocks client writes to server-only subscription fields', async () => {
   const ownerDb = authContext(OWNER_UID).firestore();
   const outsiderDb = authContext(OUTSIDER_UID).firestore();
 
@@ -443,6 +449,7 @@ test('Personal cloud backup, chunks, and history allow owner access and block ou
   await assertFails(getDoc(doc(outsiderDb, 'users', OWNER_UID, 'backup', 'meta')));
   await assertFails(getDoc(doc(outsiderDb, 'users', OWNER_UID, 'backupChunks', 'chunk_0')));
   await assertFails(getDocs(collection(outsiderDb, 'users', OWNER_UID, 'backupHistory')));
+  });
 });
 
 

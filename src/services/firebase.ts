@@ -593,7 +593,13 @@ export async function fetchAdminStatusFromServer(): Promise<{ isAdmin: boolean }
       },
     });
     if (!response.ok) return { isAdmin: false };
-    const payload = (await response.json().catch(() => ({}))) as { isAdmin?: boolean };
+    const payload = (await response.json().catch(() => ({}))) as {
+      isAdmin?: boolean;
+      claimsUpdated?: boolean;
+    };
+    if (payload.isAdmin && payload.claimsUpdated && auth.currentUser) {
+      await auth.currentUser.getIdToken(true).catch(() => undefined);
+    }
     return { isAdmin: Boolean(payload.isAdmin) };
   } catch {
     return { isAdmin: false };
@@ -616,6 +622,7 @@ export async function verifyAdminPasscodeOnServer(
   const payload = (await response.json().catch(() => ({}))) as {
     adminSessionToken?: string;
     expiresAt?: number;
+    claimsUpdated?: boolean;
     error?: string;
     message?: string;
   };
@@ -626,6 +633,10 @@ export async function verifyAdminPasscodeOnServer(
       payload.message || payload.error || 'VERIFY_PASSCODE_FAILED',
       response.status
     );
+  }
+
+  if (payload.claimsUpdated && auth.currentUser) {
+    await auth.currentUser.getIdToken(true).catch(() => undefined);
   }
 
   return {

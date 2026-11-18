@@ -32,6 +32,7 @@ import {
   isFirestorePermissionDeniedError,
 } from './src/services/firestoreRest';
 import {
+  buildAdminCustomClaims,
   generateRandomLicenseCodeServer,
   getLocalTodayDateString,
   hashLicenseCodeServer,
@@ -168,6 +169,35 @@ function respondCloudAdminUnavailable(res: Response, fallbackMessage?: string): 
 
 function isAdminRequestUser(authUser?: DecodedIdToken): boolean {
   return isServerAdminUser(authUser, process.env.ADMIN_EMAILS);
+}
+
+async function ensureAdminCustomClaim(authUser?: DecodedIdToken): Promise<{
+  synced: boolean;
+  claimsUpdated: boolean;
+}> {
+  if (!authUser || authUser.email_verified !== true || !isAdminRequestUser(authUser)) {
+    return { synced: false, claimsUpdated: false };
+  }
+  if (authUser.admin === true) {
+    return { synced: true, claimsUpdated: false };
+  }
+
+  try {
+    const userRecord = await adminAuth.getUser(authUser.uid);
+    const { changed, claims } = buildAdminCustomClaims(
+      userRecord.customClaims as Record<string, unknown> | undefined
+    );
+    if (changed) {
+      await adminAuth.setCustomUserClaims(authUser.uid, claims);
+    }
+    return { synced: true, claimsUpdated: true };
+  } catch (err) {
+    console.warn(
+      'Unable to auto-sync admin custom claim (check roles/firebaseauth.admin IAM permission):',
+      err instanceof Error ? err.message : err
+    );
+    return { synced: false, claimsUpdated: false };
+  }
 }
 
 function issueAdminSessionToken(uid: string): { token: string; expiresAt: number } {
@@ -1078,11 +1108,17 @@ Return JSON matching the schema with:
     '/api/admin/status',
     redeemIpLimiter,
     requireFirebaseAuth,
-    (req: AuthenticatedRequest, res: Response) => {
+    async (req: AuthenticatedRequest, res: Response) => {
       const authUser = req.authUser!;
+      const isAdmin = isAdminRequestUser(authUser);
+      const claimSync = isAdmin
+        ? await ensureAdminCustomClaim(authUser)
+        : { synced: false, claimsUpdated: false };
       res.json({
         ok: true,
-        isAdmin: isAdminRequestUser(authUser),
+        isAdmin,
+        customClaimSynced: claimSync.synced,
+        claimsUpdated: claimSync.claimsUpdated,
       });
     }
   );
@@ -1091,7 +1127,7 @@ Return JSON matching the schema with:
     '/api/admin/verify-passcode',
     redeemIpLimiter,
     requireFirebaseAuth,
-    (req: AuthenticatedRequest, res: Response) => {
+    async (req: AuthenticatedRequest, res: Response) => {
       const authUser = req.authUser!;
       if (!isAdminRequestUser(authUser)) {
         res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات المدير مطلوبة.' });
@@ -1117,11 +1153,14 @@ Return JSON matching the schema with:
         return;
       }
 
+      const claimSync = await ensureAdminCustomClaim(authUser);
       const session = issueAdminSessionToken(authUser.uid);
       res.json({
         ok: true,
         adminSessionToken: session.token,
         expiresAt: session.expiresAt,
+        customClaimSynced: claimSync.synced,
+        claimsUpdated: claimSync.claimsUpdated,
       });
     }
   );
