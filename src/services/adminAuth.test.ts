@@ -1,21 +1,33 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import {
+  ADMIN_PANEL_SESSION_STORAGE_KEY,
+  ADMIN_PANEL_SESSION_TTL_MS,
   ADMIN_PBKDF2_HASH_REGEX,
   buildDirectAdminSubscriptionPatch,
   canUserAccessAdminPanelUi,
+  clearVerifiedAdminSession,
   generateRandomLicenseCodeBrowser,
   hashAdminPinBrowser,
   hashLicenseCodeBrowser,
+  isAdminSessionExpired,
   isApiEndpointUnavailableResponse,
   isAuthorizedPrimaryAdminUser,
   isVerifiedPrimaryAdminForSensitiveAction,
+  loadVerifiedAdminSession,
+  normalizeAdminSessionExpiry,
+  saveVerifiedAdminSession,
   verifyAdminPinBrowser,
+  type SessionStorageLike,
 } from './adminAuth';
 import {
+  deriveCrossInstanceAdminSessionKey,
   hashAdminPinServer,
   hashLicenseCodeServer,
+  issueSignedAdminSessionToken,
   verifyAdminPinHashServer,
+  verifySignedAdminSessionToken,
 } from './serverSecurity';
 import { stripSensitivePinFromSettings, stripSensitivePinsFromWallets } from './security';
 
@@ -216,5 +228,146 @@ describe('Vercel & Server Primary Admin Access (adminAuth)', () => {
     assert.equal('pin' in cleanedWallets[0], false);
     assert.equal('pinSalt' in cleanedWallets[0], false);
     assert.equal(cleanedWallets[0].isLocked, false);
+  });
+
+  it('verifies admin session tokens across separate server instances and revokes them on PIN rotation', async () => {
+    const pinHashV1 = await hashAdminPinBrowser('AdminPin#2026');
+    const pinHashV2 = await hashAdminPinBrowser('RotatedPin#2027');
+    const fallbackInstanceA = crypto.randomBytes(32);
+    const fallbackInstanceB = crypto.randomBytes(32);
+
+    const keyInstanceA = deriveCrossInstanceAdminSessionKey({
+      pinHash: pinHashV1,
+      projectId: 'raseedi-prod',
+      databaseId: 'ai-studio-db',
+      fallbackSecret: fallbackInstanceA,
+    });
+    const keyInstanceB = deriveCrossInstanceAdminSessionKey({
+      pinHash: pinHashV1,
+      projectId: 'raseedi-prod',
+      databaseId: 'ai-studio-db',
+      fallbackSecret: fallbackInstanceB,
+    });
+    assert.deepEqual(keyInstanceA, keyInstanceB);
+
+    const nowMs = 1_750_000_000_000;
+    const issued = issueSignedAdminSessionToken('admin-uid-1', keyInstanceA, 30 * 60 * 1000, nowMs);
+
+    // Instance B verifies token signed by Instance A even with a different process fallback secret
+    assert.equal(
+      verifySignedAdminSessionToken(issued.token, 'admin-uid-1', [fallbackInstanceB, keyInstanceB], nowMs + 5_000),
+      true
+    );
+
+    // Wrong UID is strictly rejected
+    assert.equal(
+      verifySignedAdminSessionToken(issued.token, 'other-uid', [keyInstanceB], nowMs + 5_000),
+      false
+    );
+
+    // Expired token is strictly rejected
+    assert.equal(
+      verifySignedAdminSessionToken(issued.token, 'admin-uid-1', [keyInstanceB], issued.expiresAt + 1),
+      false
+    );
+
+    // Rotating the PIN automatically invalidates prior session tokens derived from old pinHash
+    const keyAfterRotation = deriveCrossInstanceAdminSessionKey({
+      pinHash: pinHashV2,
+      projectId: 'raseedi-prod',
+      databaseId: 'ai-studio-db',
+      fallbackSecret: fallbackInstanceB,
+    });
+    assert.equal(
+      verifySignedAdminSessionToken(issued.token, 'admin-uid-1', [keyAfterRotation], nowMs + 5_000),
+      false
+    );
+
+    // Explicit ADMIN_SESSION_SECRET (>=32 chars) takes highest priority
+    const explicitSecret = 'a-very-strong-explicit-admin-session-secret-key-2026';
+    const envKey = deriveCrossInstanceAdminSessionKey({
+      envSecret: explicitSecret,
+      pinHash: pinHashV1,
+      projectId: 'raseedi-prod',
+      fallbackSecret: fallbackInstanceA,
+    });
+    assert.equal(envKey.toString('utf8'), explicitSecret);
+  });
+
+  it('persists, validates, expires, and clears verified admin browser sessions cleanly', () => {
+    const store = new Map<string, string>();
+    const memoryStorage: SessionStorageLike = {
+      getItem: (k) => store.get(k) ?? null,
+      setItem: (k, v) => {
+        store.set(k, v);
+      },
+      removeItem: (k) => {
+        store.delete(k);
+      },
+    };
+
+    const nowMs = Date.now();
+    const expiresAt = normalizeAdminSessionExpiry(nowMs + 10 * 60 * 1000, nowMs);
+    assert.equal(isAdminSessionExpired(expiresAt, nowMs), false);
+    assert.equal(isAdminSessionExpired(expiresAt, expiresAt), true);
+    assert.equal(isAdminSessionExpired(null, nowMs), true);
+
+    const fallbackExpiry = normalizeAdminSessionExpiry(nowMs - 1000, nowMs);
+    assert.equal(fallbackExpiry, nowMs + ADMIN_PANEL_SESSION_TTL_MS);
+
+    saveVerifiedAdminSession(
+      {
+        uid: 'admin-uid-1',
+        token: 'admin-uid-1.9999999999999.deadbeef',
+        expiresAt,
+        pinSource: 'firestore',
+        pinUpdatedAtMs: nowMs - 1000,
+      },
+      memoryStorage
+    );
+
+    const rawStored = store.get(ADMIN_PANEL_SESSION_STORAGE_KEY) || '';
+    assert.ok(rawStored.length > 0);
+    assert.equal(rawStored.includes('pbkdf2$'), false);
+    assert.equal(rawStored.includes('scrypt$'), false);
+
+    // Restores for matching UID while active
+    const restored = loadVerifiedAdminSession('admin-uid-1', nowMs + 1000, memoryStorage);
+    assert.ok(restored);
+    assert.equal(restored?.uid, 'admin-uid-1');
+    assert.equal(restored?.token, 'admin-uid-1.9999999999999.deadbeef');
+    assert.equal(restored?.pinSource, 'firestore');
+
+    // Rejects mismatched UID and clears storage
+    assert.equal(loadVerifiedAdminSession('someone-else', nowMs + 1000, memoryStorage), null);
+    assert.equal(store.has(ADMIN_PANEL_SESSION_STORAGE_KEY), false);
+
+    // Re-save and verify expiry clears storage automatically
+    saveVerifiedAdminSession(
+      {
+        uid: 'admin-uid-1',
+        token: 'direct-firestore:admin-uid-1:123',
+        expiresAt,
+        pinSource: 'firestore',
+        pinUpdatedAtMs: null,
+      },
+      memoryStorage
+    );
+    assert.equal(loadVerifiedAdminSession('admin-uid-1', expiresAt + 500, memoryStorage), null);
+    assert.equal(store.has(ADMIN_PANEL_SESSION_STORAGE_KEY), false);
+
+    // Explicit clear removes session
+    saveVerifiedAdminSession(
+      {
+        uid: 'admin-uid-1',
+        token: 'direct-firestore:admin-uid-1:456',
+        expiresAt,
+        pinSource: 'firestore',
+        pinUpdatedAtMs: null,
+      },
+      memoryStorage
+    );
+    clearVerifiedAdminSession(memoryStorage);
+    assert.equal(store.has(ADMIN_PANEL_SESSION_STORAGE_KEY), false);
   });
 });

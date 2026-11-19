@@ -587,6 +587,79 @@ export function resolveAdminSessionSecret(envSecret?: string): Buffer {
   return crypto.randomBytes(32);
 }
 
+/**
+ * Derive a deterministic cross-instance admin session HMAC signing key so
+ * multi-instance Cloud Run / preview deployments never reject a freshly issued
+ * admin session token on the next request.
+ *
+ * Priority:
+ * 1. Explicit `ADMIN_SESSION_SECRET` env var (>= 32 chars)
+ * 2. Deterministic SHA-256 derived from the Firestore-stored salted `pinHash`
+ *    + `projectId` + `databaseId` (identical across all server instances AND
+ *    automatically revokes prior sessions whenever the Admin PIN is rotated)
+ * 3. Per-process fallback secret
+ */
+export function deriveCrossInstanceAdminSessionKey(params: {
+  envSecret?: string;
+  pinHash?: string | null;
+  projectId: string;
+  databaseId?: string;
+  fallbackSecret: Buffer;
+}): Buffer {
+  const trimmedEnv = typeof params.envSecret === 'string' ? params.envSecret.trim() : '';
+  if (trimmedEnv.length >= 32) {
+    return Buffer.from(trimmedEnv, 'utf8');
+  }
+  const cleanHash = typeof params.pinHash === 'string' ? params.pinHash.trim() : '';
+  if (cleanHash.length >= 32) {
+    return crypto
+      .createHash('sha256')
+      .update(
+        `raseedi-admin-session-v2:${params.projectId}:${params.databaseId || '(default)'}:${cleanHash}`
+      )
+      .digest();
+  }
+  return params.fallbackSecret;
+}
+
+export function issueSignedAdminSessionToken(
+  uid: string,
+  signingKey: Buffer,
+  ttlMs: number,
+  nowMs: number = Date.now()
+): { token: string; expiresAt: number } {
+  const expiresAt = nowMs + ttlMs;
+  const payload = `${uid}.${expiresAt}`;
+  const sig = crypto.createHmac('sha256', signingKey).update(payload).digest('hex');
+  return { token: `${payload}.${sig}`, expiresAt };
+}
+
+export function verifySignedAdminSessionToken(
+  token: unknown,
+  expectedUid: string,
+  candidateKeys: ReadonlyArray<Buffer>,
+  nowMs: number = Date.now()
+): boolean {
+  if (typeof token !== 'string' || !token.trim() || !expectedUid) return false;
+  const parts = token.trim().split('.');
+  if (parts.length !== 3) return false;
+  const [uid, expStr, sig] = parts;
+  if (!uid || uid !== expectedUid) return false;
+  const exp = Number(expStr);
+  if (!Number.isFinite(exp) || exp <= nowMs) return false;
+
+  const sigBuf = Buffer.from(sig);
+  for (const key of candidateKeys) {
+    if (!key || key.length === 0) continue;
+    const expectedSig = crypto.createHmac('sha256', key).update(`${uid}.${expStr}`).digest('hex');
+    const expectedBuf = Buffer.from(expectedSig);
+    if (sigBuf.length === expectedBuf.length && crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function isSensitiveRevocationPath(originalUrl: string): boolean {
   return /^\/api\/(admin|delete-account|org\/(delete|transfer-ownership))(\/|\?|$)/.test(
     String(originalUrl || '')

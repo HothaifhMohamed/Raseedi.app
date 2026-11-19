@@ -90,15 +90,21 @@ import {
   PRIMARY_SYSTEM_ADMIN_EMAIL,
 } from './licenseCodes';
 import {
+  ADMIN_PANEL_SESSION_TTL_MS,
   buildDirectAdminSubscriptionPatch,
+  clearVerifiedAdminSession,
   DIRECT_ADMIN_SESSION_PREFIX,
   generateRandomLicenseCodeBrowser,
   hashAdminPinBrowser,
+  isAdminSessionExpired,
   isApiEndpointUnavailableResponse,
   isAuthorizedPrimaryAdminUser,
   isDirectAdminSessionToken,
   isValidAdminPinLength,
   isVerifiedPrimaryAdminForSensitiveAction,
+  loadVerifiedAdminSession,
+  normalizeAdminSessionExpiry,
+  saveVerifiedAdminSession,
   verifyAdminPinBrowser,
 } from './adminAuth';
 import {
@@ -638,7 +644,7 @@ class AdminApiUnavailableError extends Error {
   }
 }
 
-const DIRECT_ADMIN_SESSION_TTL_MS = 30 * 60 * 1000;
+const DIRECT_ADMIN_SESSION_TTL_MS = ADMIN_PANEL_SESSION_TTL_MS;
 
 function assertDirectPrimaryAdminUser(userOverride?: User | null): {
   user: User;
@@ -681,25 +687,68 @@ function createDirectAdminSessionToken(uid: string): {
   };
 }
 
-function assertValidDirectAdminSession(token: string, expectedUid: string): void {
-  if (!isDirectAdminSessionToken(token)) {
-    throw new ServerApiError(
-      'ADMIN_SESSION_REQUIRED',
-      'يرجى إعادة إدخال الرمز السري لفتح جلسة الإدارة.',
-      403
-    );
+function hasActiveLocalAdminSession(token: string, expectedUid: string): boolean {
+  const cleanToken = typeof token === 'string' ? token.trim() : '';
+  if (!cleanToken || !expectedUid) return false;
+
+  // 1. Direct-Firestore token format: direct-firestore:<uid>:<expiresAt>:<random>
+  if (isDirectAdminSessionToken(cleanToken)) {
+    const rest = cleanToken.slice(DIRECT_ADMIN_SESSION_PREFIX.length);
+    const parts = rest.split(':');
+    const tokenUid = parts[0] || '';
+    const expiresAt = Number(parts[1] || 0);
+    return tokenUid === expectedUid && !isAdminSessionExpired(expiresAt);
   }
-  const rest = token.slice(DIRECT_ADMIN_SESSION_PREFIX.length);
-  const parts = rest.split(':');
-  const tokenUid = parts[0] || '';
-  const expiresAt = Number(parts[1] || 0);
-  if (tokenUid !== expectedUid || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+
+  // 2. Stored verified session from current browser tab (works seamlessly across server restarts/instances)
+  const stored = loadVerifiedAdminSession(expectedUid);
+  if (stored && stored.token === cleanToken && !isAdminSessionExpired(stored.expiresAt)) {
+    return true;
+  }
+
+  // 3. Server-signed token format: <uid>.<expiresAt>.<hmacHex>
+  const serverParts = cleanToken.split('.');
+  if (serverParts.length === 3) {
+    const [tokenUid, expStr] = serverParts;
+    const exp = Number(expStr);
+    if (tokenUid === expectedUid && !isAdminSessionExpired(exp)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function assertValidDirectAdminSession(token: string, expectedUid: string): void {
+  if (!hasActiveLocalAdminSession(token, expectedUid)) {
+    clearVerifiedAdminSession();
     throw new ServerApiError(
       'ADMIN_SESSION_EXPIRED',
       'انتهت جلسة الإدارة. يرجى إدخال الرمز السري مجدداً.',
       403
     );
   }
+}
+
+function shouldFallbackAdminApiErrorToDirect(
+  err: unknown,
+  token: string,
+  expectedUid?: string | null
+): boolean {
+  if (err instanceof AdminApiUnavailableError) {
+    return true;
+  }
+  if (
+    err instanceof ServerApiError &&
+    expectedUid &&
+    hasActiveLocalAdminSession(token, expectedUid) &&
+    (err.code === 'ADMIN_SESSION_REQUIRED' ||
+      err.code === 'CLOUD_ADMIN_UNAVAILABLE' ||
+      err.status >= 500)
+  ) {
+    return true;
+  }
+  return false;
 }
 
 async function readAdminPinDocDirect(): Promise<{
@@ -952,11 +1001,23 @@ export async function setupAdminPinOnServer(
       await auth.currentUser.getIdToken(true).catch(() => undefined);
     }
 
+    const expiresAt = normalizeAdminSessionExpiry(payload.expiresAt);
+    const pinUpdatedAtMs =
+      typeof payload.pinUpdatedAtMs === 'number' ? payload.pinUpdatedAtMs : Date.now();
+    if (auth.currentUser?.uid) {
+      saveVerifiedAdminSession({
+        uid: auth.currentUser.uid,
+        token: payload.adminSessionToken,
+        expiresAt,
+        pinSource: 'firestore',
+        pinUpdatedAtMs,
+      });
+    }
+
     return {
       adminSessionToken: payload.adminSessionToken,
-      expiresAt: Number(payload.expiresAt || 0),
-      pinUpdatedAtMs:
-        typeof payload.pinUpdatedAtMs === 'number' ? payload.pinUpdatedAtMs : Date.now(),
+      expiresAt,
+      pinUpdatedAtMs,
     };
   } catch (err) {
     if (!(err instanceof AdminApiUnavailableError)) {
@@ -979,6 +1040,13 @@ export async function setupAdminPinOnServer(
       isFirstCreate: true,
     });
     const session = createDirectAdminSessionToken(user.uid);
+    saveVerifiedAdminSession({
+      uid: user.uid,
+      token: session.adminSessionToken,
+      expiresAt: session.expiresAt,
+      pinSource: 'firestore',
+      pinUpdatedAtMs,
+    });
     return {
       adminSessionToken: session.adminSessionToken,
       expiresAt: session.expiresAt,
@@ -1027,17 +1095,35 @@ export async function verifyAdminPasscodeOnServer(
       await auth.currentUser.getIdToken(true).catch(() => undefined);
     }
 
+    const expiresAt = normalizeAdminSessionExpiry(payload.expiresAt);
+    const pinSource: 'firestore' | 'env' | 'unset' =
+      payload.pinSource === 'firestore' || payload.pinSource === 'env'
+        ? payload.pinSource
+        : 'unset';
+    const pinUpdatedAtMs =
+      typeof payload.pinUpdatedAtMs === 'number' ? payload.pinUpdatedAtMs : null;
+
+    if (auth.currentUser?.uid) {
+      saveVerifiedAdminSession({
+        uid: auth.currentUser.uid,
+        token: payload.adminSessionToken,
+        expiresAt,
+        pinSource,
+        pinUpdatedAtMs,
+      });
+    }
+
     return {
       adminSessionToken: payload.adminSessionToken,
-      expiresAt: Number(payload.expiresAt || 0),
-      pinSource:
-        payload.pinSource === 'firestore' || payload.pinSource === 'env'
-          ? payload.pinSource
-          : 'unset',
-      pinUpdatedAtMs: typeof payload.pinUpdatedAtMs === 'number' ? payload.pinUpdatedAtMs : null,
+      expiresAt,
+      pinSource,
+      pinUpdatedAtMs,
     };
   } catch (err) {
-    if (!(err instanceof AdminApiUnavailableError)) {
+    if (
+      !(err instanceof AdminApiUnavailableError) &&
+      !(err instanceof ServerApiError && err.status >= 500)
+    ) {
       throw err;
     }
     const { user } = assertDirectPrimaryAdminUser();
@@ -1065,6 +1151,13 @@ export async function verifyAdminPasscodeOnServer(
       );
     }
     const session = createDirectAdminSessionToken(user.uid);
+    saveVerifiedAdminSession({
+      uid: user.uid,
+      token: session.adminSessionToken,
+      expiresAt: session.expiresAt,
+      pinSource: 'firestore',
+      pinUpdatedAtMs: pinDoc.updatedAtMs,
+    });
     return {
       adminSessionToken: session.adminSessionToken,
       expiresAt: session.expiresAt,
@@ -1101,6 +1194,13 @@ export async function resetAdminPinAfterGoogleReauth(
     isFirstCreate: !existing.pinHash,
   });
   const session = createDirectAdminSessionToken(user.uid);
+  saveVerifiedAdminSession({
+    uid: user.uid,
+    token: session.adminSessionToken,
+    expiresAt: session.expiresAt,
+    pinSource: 'firestore',
+    pinUpdatedAtMs,
+  });
   return {
     adminSessionToken: session.adminSessionToken,
     expiresAt: session.expiresAt,
@@ -1153,6 +1253,13 @@ export async function changeAdminPinOnServer(params: {
       isFirstCreate: false,
     });
     const session = createDirectAdminSessionToken(user.uid);
+    saveVerifiedAdminSession({
+      uid: user.uid,
+      token: session.adminSessionToken,
+      expiresAt: session.expiresAt,
+      pinSource: 'firestore',
+      pinUpdatedAtMs: updatedAtMs,
+    });
     return {
       adminSessionToken: session.adminSessionToken,
       expiresAt: session.expiresAt,
@@ -1193,13 +1300,25 @@ export async function changeAdminPinOnServer(params: {
       );
     }
 
+    const expiresAt = normalizeAdminSessionExpiry(payload.expiresAt);
+    const updatedAtMs = Number(payload.updatedAtMs || Date.now());
+    if (auth.currentUser?.uid) {
+      saveVerifiedAdminSession({
+        uid: auth.currentUser.uid,
+        token: payload.adminSessionToken,
+        expiresAt,
+        pinSource: 'firestore',
+        pinUpdatedAtMs: updatedAtMs,
+      });
+    }
+
     return {
       adminSessionToken: payload.adminSessionToken,
-      expiresAt: Number(payload.expiresAt || 0),
-      updatedAtMs: Number(payload.updatedAtMs || Date.now()),
+      expiresAt,
+      updatedAtMs,
     };
   } catch (err) {
-    if (!(err instanceof AdminApiUnavailableError)) {
+    if (!shouldFallbackAdminApiErrorToDirect(err, params.adminSessionToken, auth.currentUser?.uid)) {
       throw err;
     }
     return runDirectChange();
@@ -1261,7 +1380,7 @@ export async function fetchAllUsersForAdmin(
       proExpiresAt: row.proExpiresAt ?? row.expiresAt ?? null,
     }));
   } catch (err) {
-    if (!(err instanceof AdminApiUnavailableError)) {
+    if (!shouldFallbackAdminApiErrorToDirect(err, adminSessionToken, auth.currentUser?.uid)) {
       throw err;
     }
     return runDirectFetchUsers();
@@ -1347,7 +1466,7 @@ export async function adminUpdateUserSubscription(params: {
       redeemedCouponCode: payload.redeemedCouponCode ?? null,
     };
   } catch (err) {
-    if (!(err instanceof AdminApiUnavailableError)) {
+    if (!shouldFallbackAdminApiErrorToDirect(err, params.adminSessionToken, auth.currentUser?.uid)) {
       throw err;
     }
     return runDirectUpdate();
@@ -1386,6 +1505,7 @@ export async function reauthenticateWithGoogle(): Promise<User> {
 }
 
 export async function signOutGoogle(): Promise<void> {
+  clearVerifiedAdminSession();
   await signOut(auth);
 }
 
@@ -2635,7 +2755,7 @@ export async function fetchLicenseCodesFromServer(
 
     return payload.codes;
   } catch (err) {
-    if (!(err instanceof AdminApiUnavailableError)) {
+    if (!shouldFallbackAdminApiErrorToDirect(err, adminSessionToken, auth.currentUser?.uid)) {
       throw err;
     }
     return runDirectFetchCodes();
@@ -2744,7 +2864,7 @@ export async function createLicenseCodeOnServer(params: {
       record: payload.record,
     };
   } catch (err) {
-    if (!(err instanceof AdminApiUnavailableError)) {
+    if (!shouldFallbackAdminApiErrorToDirect(err, params.adminSessionToken, auth.currentUser?.uid)) {
       throw err;
     }
     return runDirectCreateCode();

@@ -7,6 +7,128 @@ export const ADMIN_PBKDF2_ITERATIONS = 100_000;
 export const ADMIN_SCRYPT_HASH_REGEX = /^scrypt\$[0-9a-f]{32}\$[0-9a-f]{128}$/i;
 export const ADMIN_PBKDF2_HASH_REGEX = /^pbkdf2\$100000\$[0-9a-f]{32}\$[0-9a-f]{64}$/i;
 export const DIRECT_ADMIN_SESSION_PREFIX = 'direct-firestore:';
+export const ADMIN_PANEL_SESSION_STORAGE_KEY = 'raseedi_admin_panel_session_v1';
+export const ADMIN_PANEL_SESSION_TTL_MS = 30 * 60 * 1000;
+
+export interface SessionStorageLike {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+export interface StoredAdminPanelSession {
+  uid: string;
+  token: string;
+  expiresAt: number;
+  pinSource: 'firestore' | 'env' | 'unset';
+  pinUpdatedAtMs: number | null;
+}
+
+function getDefaultSessionStorage(): SessionStorageLike | null {
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      return window.sessionStorage;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export function isAdminSessionExpired(
+  expiresAt?: number | null,
+  nowMs: number = Date.now()
+): boolean {
+  return typeof expiresAt !== 'number' || !Number.isFinite(expiresAt) || expiresAt <= nowMs;
+}
+
+export function normalizeAdminSessionExpiry(
+  expiresAt?: number | null,
+  nowMs: number = Date.now()
+): number {
+  if (typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt > nowMs) {
+    return expiresAt;
+  }
+  return nowMs + ADMIN_PANEL_SESSION_TTL_MS;
+}
+
+export function saveVerifiedAdminSession(
+  session: StoredAdminPanelSession,
+  storage: SessionStorageLike | null = getDefaultSessionStorage()
+): StoredAdminPanelSession {
+  const normalized: StoredAdminPanelSession = {
+    uid: String(session.uid || '').trim(),
+    token: String(session.token || '').trim(),
+    expiresAt: normalizeAdminSessionExpiry(session.expiresAt),
+    pinSource:
+      session.pinSource === 'firestore' || session.pinSource === 'env'
+        ? session.pinSource
+        : 'unset',
+    pinUpdatedAtMs:
+      typeof session.pinUpdatedAtMs === 'number' && Number.isFinite(session.pinUpdatedAtMs)
+        ? session.pinUpdatedAtMs
+        : null,
+  };
+  if (storage && normalized.uid && normalized.token) {
+    try {
+      storage.setItem(ADMIN_PANEL_SESSION_STORAGE_KEY, JSON.stringify(normalized));
+    } catch {
+      // Ignore quota/private-mode storage errors
+    }
+  }
+  return normalized;
+}
+
+export function loadVerifiedAdminSession(
+  expectedUid?: string | null,
+  nowMs: number = Date.now(),
+  storage: SessionStorageLike | null = getDefaultSessionStorage()
+): StoredAdminPanelSession | null {
+  const cleanUid = typeof expectedUid === 'string' ? expectedUid.trim() : '';
+  if (!cleanUid || !storage) return null;
+  try {
+    const raw = storage.getItem(ADMIN_PANEL_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredAdminPanelSession>;
+    if (
+      !parsed ||
+      typeof parsed.uid !== 'string' ||
+      parsed.uid.trim() !== cleanUid ||
+      typeof parsed.token !== 'string' ||
+      !parsed.token.trim() ||
+      isAdminSessionExpired(parsed.expiresAt, nowMs)
+    ) {
+      storage.removeItem(ADMIN_PANEL_SESSION_STORAGE_KEY);
+      return null;
+    }
+    return {
+      uid: cleanUid,
+      token: parsed.token.trim(),
+      expiresAt: Number(parsed.expiresAt),
+      pinSource:
+        parsed.pinSource === 'firestore' || parsed.pinSource === 'env'
+          ? parsed.pinSource
+          : 'unset',
+      pinUpdatedAtMs:
+        typeof parsed.pinUpdatedAtMs === 'number' && Number.isFinite(parsed.pinUpdatedAtMs)
+          ? parsed.pinUpdatedAtMs
+          : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function clearVerifiedAdminSession(
+  storage: SessionStorageLike | null = getDefaultSessionStorage()
+): void {
+  if (!storage) return;
+  try {
+    storage.removeItem(ADMIN_PANEL_SESSION_STORAGE_KEY);
+  } catch {
+    // Ignore
+  }
+}
 
 const UNSAFE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const PRO_CODE_PREFIX = 'RSD-PRO-';

@@ -42,7 +42,14 @@ import {
   setupAdminPinOnServer,
   verifyAdminPasscodeOnServer,
 } from '../../services/firebase';
-import { canUserAccessAdminPanelUi } from '../../services/adminAuth';
+import {
+  canUserAccessAdminPanelUi,
+  clearVerifiedAdminSession,
+  isAdminSessionExpired,
+  loadVerifiedAdminSession,
+  normalizeAdminSessionExpiry,
+  saveVerifiedAdminSession,
+} from '../../services/adminAuth';
 import { SUBSCRIPTION_DAY_MS } from '../../services/subscriptionHelpers';
 import type { PlanTier } from '../../types';
 
@@ -79,6 +86,7 @@ export const AdminCodePanelModal: React.FC = () => {
   const [pinSource, setPinSource] = useState<'firestore' | 'env' | 'unset'>('unset');
   const [pinUpdatedAtMs, setPinUpdatedAtMs] = useState<number | null>(null);
   const [adminSessionToken, setAdminSessionToken] = useState<string | null>(null);
+  const [adminSessionExpiresAt, setAdminSessionExpiresAt] = useState<number | null>(null);
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [activeTab, setActiveTab] = useState<AdminTab>('users');
 
@@ -139,11 +147,21 @@ export const AdminCodePanelModal: React.FC = () => {
     appUser: user,
   });
 
-  // Reset passcode gate, ephemeral session token & transient editor state every time modal closes
+  const currentAdminUid = auth.currentUser?.uid || (user?.isLoggedIn ? user.id : '') || '';
+
+  // Clear admin session immediately if the user signs out or switches away from primary admin
   useEffect(() => {
-    if (!isAdminCodeModalOpen) {
+    if (!isAuthorizedAdmin || !currentAdminUid) {
+      clearVerifiedAdminSession();
       setIsUnlocked(false);
       setAdminSessionToken(null);
+      setAdminSessionExpiresAt(null);
+    }
+  }, [isAuthorizedAdmin, currentAdminUid]);
+
+  // Restore active verified session when modal opens; reset only transient form/error state on close
+  useEffect(() => {
+    if (!isAdminCodeModalOpen) {
       setPasscodeInput('');
       setSetupConfirmPin('');
       setPasscodeError(null);
@@ -169,6 +187,23 @@ export const AdminCodePanelModal: React.FC = () => {
     }
 
     if (!isAuthorizedAdmin) return;
+
+    const existingSession = loadVerifiedAdminSession(currentAdminUid);
+    if (existingSession) {
+      setAdminSessionToken(existingSession.token);
+      setAdminSessionExpiresAt(existingSession.expiresAt);
+      setPinConfigured(true);
+      setPinSource(existingSession.pinSource);
+      setPinUpdatedAtMs(existingSession.pinUpdatedAtMs);
+      setIsUnlocked(true);
+      setIsCheckingPinStatus(false);
+      return;
+    }
+
+    setIsUnlocked(false);
+    setAdminSessionToken(null);
+    setAdminSessionExpiresAt(null);
+
     let active = true;
     setIsCheckingPinStatus(true);
     fetchAdminStatusFromServer()
@@ -188,15 +223,29 @@ export const AdminCodePanelModal: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [isAdminCodeModalOpen, isAuthorizedAdmin]);
+  }, [isAdminCodeModalOpen, isAuthorizedAdmin, currentAdminUid]);
+
+  const handleLockAdminPanel = () => {
+    clearVerifiedAdminSession();
+    setIsUnlocked(false);
+    setAdminSessionToken(null);
+    setAdminSessionExpiresAt(null);
+    setPasscodeInput('');
+    setPasscodeError(null);
+  };
 
   const handleSessionExpiry = (err: unknown): boolean => {
-    if (
-      err instanceof ServerApiError &&
-      (err.code === 'ADMIN_SESSION_REQUIRED' || err.code === 'ADMIN_SESSION_EXPIRED')
-    ) {
+    const isGenuineExpiry =
+      (err instanceof ServerApiError && err.code === 'ADMIN_SESSION_EXPIRED') ||
+      (err instanceof ServerApiError &&
+        err.code === 'ADMIN_SESSION_REQUIRED' &&
+        isAdminSessionExpired(adminSessionExpiresAt));
+
+    if (isGenuineExpiry) {
+      clearVerifiedAdminSession();
       setIsUnlocked(false);
       setAdminSessionToken(null);
+      setAdminSessionExpiresAt(null);
       setPasscodeError(
         isRTL
           ? 'انتهت جلسة الإدارة، يرجى إعادة إدخال رمز المرور.'
@@ -299,7 +348,18 @@ export const AdminCodePanelModal: React.FC = () => {
       setPasscodeError(null);
       try {
         const res = await setupAdminPinOnServer(cleanPin);
+        const normalizedExp = normalizeAdminSessionExpiry(res.expiresAt);
+        if (currentAdminUid) {
+          saveVerifiedAdminSession({
+            uid: currentAdminUid,
+            token: res.adminSessionToken,
+            expiresAt: normalizedExp,
+            pinSource: 'firestore',
+            pinUpdatedAtMs: res.pinUpdatedAtMs,
+          });
+        }
         setAdminSessionToken(res.adminSessionToken);
+        setAdminSessionExpiresAt(normalizedExp);
         setPinConfigured(true);
         setPinSource('firestore');
         setPinUpdatedAtMs(res.pinUpdatedAtMs);
@@ -332,7 +392,18 @@ export const AdminCodePanelModal: React.FC = () => {
     setPasscodeError(null);
     try {
       const res = await verifyAdminPasscodeOnServer(cleanPin);
+      const normalizedExp = normalizeAdminSessionExpiry(res.expiresAt);
+      if (currentAdminUid) {
+        saveVerifiedAdminSession({
+          uid: currentAdminUid,
+          token: res.adminSessionToken,
+          expiresAt: normalizedExp,
+          pinSource: res.pinSource,
+          pinUpdatedAtMs: res.pinUpdatedAtMs,
+        });
+      }
       setAdminSessionToken(res.adminSessionToken);
+      setAdminSessionExpiresAt(normalizedExp);
       setPinSource(res.pinSource);
       setPinUpdatedAtMs(res.pinUpdatedAtMs);
       setPasscodeInput('');
@@ -389,7 +460,18 @@ export const AdminCodePanelModal: React.FC = () => {
     setPasscodeError(null);
     try {
       const res = await resetAdminPinAfterGoogleReauth(cleanPin);
+      const normalizedExp = normalizeAdminSessionExpiry(res.expiresAt);
+      if (currentAdminUid) {
+        saveVerifiedAdminSession({
+          uid: currentAdminUid,
+          token: res.adminSessionToken,
+          expiresAt: normalizedExp,
+          pinSource: 'firestore',
+          pinUpdatedAtMs: res.pinUpdatedAtMs,
+        });
+      }
       setAdminSessionToken(res.adminSessionToken);
+      setAdminSessionExpiresAt(normalizedExp);
       setPinConfigured(true);
       setPinSource('firestore');
       setPinUpdatedAtMs(res.pinUpdatedAtMs);
@@ -458,7 +540,18 @@ export const AdminCodePanelModal: React.FC = () => {
         newPin: cleanNext,
         adminSessionToken,
       });
+      const normalizedExp = normalizeAdminSessionExpiry(updated.expiresAt);
+      if (currentAdminUid) {
+        saveVerifiedAdminSession({
+          uid: currentAdminUid,
+          token: updated.adminSessionToken,
+          expiresAt: normalizedExp,
+          pinSource: 'firestore',
+          pinUpdatedAtMs: updated.updatedAtMs,
+        });
+      }
       setAdminSessionToken(updated.adminSessionToken);
+      setAdminSessionExpiresAt(normalizedExp);
       setPinSource('firestore');
       setPinConfigured(true);
       setPinUpdatedAtMs(updated.updatedAtMs);
@@ -675,14 +768,28 @@ export const AdminCodePanelModal: React.FC = () => {
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setIsAdminCodeModalOpen(false)}
-            aria-label={isRTL ? 'إغلاق' : 'Close'}
-            className="w-9 h-9 rounded-lg border border-[var(--color-line)] flex items-center justify-center text-[var(--color-muted)] hover:text-[var(--color-ink)] min-h-[36px] min-w-[36px] shrink-0"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {isUnlocked && (
+              <button
+                type="button"
+                onClick={handleLockAdminPanel}
+                data-testid="admin-lock-session-btn"
+                title={isRTL ? 'قفل لوحة الإدارة' : 'Lock Admin Panel'}
+                className="px-2.5 h-9 rounded-lg border border-[var(--color-line)] flex items-center gap-1 text-[11px] font-semibold text-[var(--color-muted)] hover:text-[var(--color-ink)] hover:border-[var(--color-accent)] min-h-[36px]"
+              >
+                <Lock className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">{isRTL ? 'قفل' : 'Lock'}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setIsAdminCodeModalOpen(false)}
+              aria-label={isRTL ? 'إغلاق' : 'Close'}
+              className="w-9 h-9 rounded-lg border border-[var(--color-line)] flex items-center justify-center text-[var(--color-muted)] hover:text-[var(--color-ink)] min-h-[36px] min-w-[36px]"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Body */}

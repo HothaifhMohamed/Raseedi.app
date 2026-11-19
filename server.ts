@@ -39,6 +39,7 @@ import {
 } from './src/services/licenseCodes';
 import {
   buildAdminCustomClaims,
+  deriveCrossInstanceAdminSessionKey,
   generateRandomLicenseCodeServer,
   getLocalTodayDateString,
   hashAdminPinServer,
@@ -48,6 +49,7 @@ import {
   isSafeWebhookId,
   isSensitiveRevocationPath,
   isServerAdminUser,
+  issueSignedAdminSessionToken,
   normalizeScannedReceiptResult,
   resolveActivationPlanDetails,
   resolveAdminSessionSecret,
@@ -59,6 +61,7 @@ import {
   validateScanReceiptPayload,
   validateWebhookOrgPlanMatch,
   verifyAdminPinHashServer,
+  verifySignedAdminSessionToken,
   verifyTimingSafePasscode,
 } from './src/services/serverSecurity';
 
@@ -446,30 +449,51 @@ async function ensureAdminCustomClaim(authUser?: DecodedIdToken): Promise<{
   }
 }
 
-function issueAdminSessionToken(uid: string): { token: string; expiresAt: number } {
-  const expiresAt = Date.now() + ADMIN_SESSION_TTL_MS;
-  const payload = `${uid}.${expiresAt}`;
-  const sig = crypto
-    .createHmac('sha256', ADMIN_SESSION_SECRET)
-    .update(payload)
-    .digest('hex');
-  return { token: `${payload}.${sig}`, expiresAt };
+function getEffectiveAdminSessionKey(pinHash?: string | null): Buffer {
+  return deriveCrossInstanceAdminSessionKey({
+    envSecret: process.env.ADMIN_SESSION_SECRET,
+    pinHash: pinHash ?? cachedAdminPinState?.pinHash ?? null,
+    projectId: firebaseConfig.projectId,
+    databaseId: firebaseConfig.firestoreDatabaseId,
+    fallbackSecret: ADMIN_SESSION_SECRET,
+  });
 }
 
-function verifyAdminSessionToken(token: unknown, expectedUid: string): boolean {
-  if (typeof token !== 'string' || !token.trim()) return false;
-  const parts = token.trim().split('.');
-  if (parts.length !== 3) return false;
-  const [uid, expStr, sig] = parts;
-  if (!uid || uid !== expectedUid) return false;
-  const exp = Number(expStr);
-  if (!Number.isFinite(exp) || exp <= Date.now()) return false;
-  const expectedSig = crypto
-    .createHmac('sha256', ADMIN_SESSION_SECRET)
-    .update(`${uid}.${expStr}`)
-    .digest('hex');
-  if (sig.length !== expectedSig.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig));
+function issueAdminSessionToken(
+  uid: string,
+  pinHash?: string | null
+): { token: string; expiresAt: number } {
+  const signingKey = getEffectiveAdminSessionKey(pinHash);
+  return issueSignedAdminSessionToken(uid, signingKey, ADMIN_SESSION_TTL_MS);
+}
+
+async function verifyServerAdminSession(
+  req: AuthenticatedRequest,
+  expectedUid: string
+): Promise<boolean> {
+  const rawToken = req.headers['x-admin-session'];
+  if (typeof rawToken !== 'string' || !rawToken.trim()) return false;
+
+  const fastKeys: Buffer[] = [ADMIN_SESSION_SECRET];
+  if (cachedAdminPinState?.pinHash) {
+    fastKeys.unshift(getEffectiveAdminSessionKey(cachedAdminPinState.pinHash));
+  }
+  if (verifySignedAdminSessionToken(rawToken, expectedUid, fastKeys)) {
+    return true;
+  }
+
+  // Cold-start / cross-instance verification: fetch current pinHash from Firestore
+  // so tokens issued on another Cloud Run instance verify seamlessly.
+  try {
+    const pinState = await loadAdminPanelPinState(extractBearerToken(req));
+    if (pinState.pinHash) {
+      const pinKey = getEffectiveAdminSessionKey(pinState.pinHash);
+      return verifySignedAdminSessionToken(rawToken, expectedUid, [pinKey, ADMIN_SESSION_SECRET]);
+    }
+  } catch {
+    // Ignore read error and fall through to false
+  }
+  return false;
 }
 
 // Persistent per-UID brute-force lock for /api/org/join (5 failures -> 15 min block)
@@ -1588,7 +1612,7 @@ Return JSON matching the schema with:
           return;
         }
         const claimSync = await ensureAdminCustomClaim(authUser);
-        const session = issueAdminSessionToken(authUser.uid);
+        const session = issueAdminSessionToken(authUser.uid, pinHash);
         res.json({
           ok: true,
           adminSessionToken: session.token,
@@ -1638,7 +1662,7 @@ Return JSON matching the schema with:
       }
 
       const claimSync = await ensureAdminCustomClaim(authUser);
-      const session = issueAdminSessionToken(authUser.uid);
+      const session = issueAdminSessionToken(authUser.uid, pinState.pinHash);
       res.json({
         ok: true,
         adminSessionToken: session.token,
@@ -1661,7 +1685,7 @@ Return JSON matching the schema with:
         res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات مالك النظام مطلوبة.' });
         return;
       }
-      if (!verifyAdminSessionToken(req.headers['x-admin-session'], authUser.uid)) {
+      if (!(await verifyServerAdminSession(req, authUser.uid))) {
         res.status(403).json({
           error: 'ADMIN_SESSION_REQUIRED',
           message: 'يتطلب التحقق من رمز مرور الإدارة أولاً.',
@@ -1712,7 +1736,7 @@ Return JSON matching the schema with:
           return;
         }
 
-        const refreshedSession = issueAdminSessionToken(authUser.uid);
+        const refreshedSession = issueAdminSessionToken(authUser.uid, pinHash);
         res.json({
           ok: true,
           adminSessionToken: refreshedSession.token,
@@ -1759,7 +1783,7 @@ Return JSON matching the schema with:
         res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات مالك النظام مطلوبة.' });
         return;
       }
-      if (!verifyAdminSessionToken(req.headers['x-admin-session'], authUser.uid)) {
+      if (!(await verifyServerAdminSession(req, authUser.uid))) {
         res.status(403).json({
           error: 'ADMIN_SESSION_REQUIRED',
           message: 'يتطلب التحقق من رمز مرور الإدارة أولاً.',
@@ -1824,7 +1848,7 @@ Return JSON matching the schema with:
         res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات مالك النظام مطلوبة.' });
         return;
       }
-      if (!verifyAdminSessionToken(req.headers['x-admin-session'], authUser.uid)) {
+      if (!(await verifyServerAdminSession(req, authUser.uid))) {
         res.status(403).json({
           error: 'ADMIN_SESSION_REQUIRED',
           message: 'يتطلب التحقق من رمز مرور الإدارة أولاً.',
@@ -1962,7 +1986,7 @@ Return JSON matching the schema with:
         res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات مالك النظام مطلوبة.' });
         return;
       }
-      if (!verifyAdminSessionToken(req.headers['x-admin-session'], authUser.uid)) {
+      if (!(await verifyServerAdminSession(req, authUser.uid))) {
         res.status(403).json({
           error: 'ADMIN_SESSION_REQUIRED',
           message: 'يتطلب التحقق من رمز مرور الإدارة أولاً.',
@@ -2029,7 +2053,7 @@ Return JSON matching the schema with:
         res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات مالك النظام مطلوبة.' });
         return;
       }
-      if (!verifyAdminSessionToken(req.headers['x-admin-session'], authUser.uid)) {
+      if (!(await verifyServerAdminSession(req, authUser.uid))) {
         res.status(403).json({
           error: 'ADMIN_SESSION_REQUIRED',
           message: 'يتطلب التحقق من رمز مرور الإدارة أولاً.',
