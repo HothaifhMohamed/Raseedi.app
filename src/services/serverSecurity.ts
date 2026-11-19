@@ -386,20 +386,39 @@ export function verifyAdminPinHashServer(pin: string, storedHash?: string | null
   if (!cleanPin || !cleanHash) return false;
 
   const parts = cleanHash.split('$');
-  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
-  const [, salt, expectedHex] = parts;
-  if (!/^[0-9a-f]{32}$/i.test(salt) || !/^[0-9a-f]{128}$/i.test(expectedHex)) {
-    return false;
+  if (parts.length === 3 && parts[0] === 'scrypt') {
+    const [, salt, expectedHex] = parts;
+    if (!/^[0-9a-f]{32}$/i.test(salt) || !/^[0-9a-f]{128}$/i.test(expectedHex)) {
+      return false;
+    }
+
+    try {
+      const derived = crypto.scryptSync(cleanPin, salt, 64);
+      const expected = Buffer.from(expectedHex, 'hex');
+      if (derived.length !== expected.length) return false;
+      return crypto.timingSafeEqual(derived, expected);
+    } catch {
+      return false;
+    }
   }
 
-  try {
-    const derived = crypto.scryptSync(cleanPin, salt, 64);
-    const expected = Buffer.from(expectedHex, 'hex');
-    if (derived.length !== expected.length) return false;
-    return crypto.timingSafeEqual(derived, expected);
-  } catch {
-    return false;
+  if (parts.length === 4 && parts[0] === 'pbkdf2' && parts[1] === '100000') {
+    const [, , salt, expectedHex] = parts;
+    if (!/^[0-9a-f]{32}$/i.test(salt) || !/^[0-9a-f]{64}$/i.test(expectedHex)) {
+      return false;
+    }
+
+    try {
+      const derived = crypto.pbkdf2Sync(cleanPin, salt, 100_000, 32, 'sha256');
+      const expected = Buffer.from(expectedHex, 'hex');
+      if (derived.length !== expected.length) return false;
+      return crypto.timingSafeEqual(derived, expected);
+    } catch {
+      return false;
+    }
   }
+
+  return false;
 }
 
 export function buildAdminCustomClaims(

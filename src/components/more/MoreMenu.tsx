@@ -51,6 +51,8 @@ import {
   getEffectiveTransactionAmount,
 } from '../../services/calculations';
 import { isPrimarySystemAdminEmail } from '../../services/licenseCodes';
+import { auth, resolveFirebaseUserEmail } from '../../services/firebase';
+import { isAuthorizedPrimaryAdminUser } from '../../services/adminAuth';
 
 export const MoreMenu: React.FC = () => {
   const {
@@ -189,7 +191,12 @@ export const MoreMenu: React.FC = () => {
       </div>
 
       {/* 1. HERO CARD: Admin Code Panel for Admin, Active Subscriber Summary, or Free Upgrade */}
-      {isAdminUser ? (
+      {isAdminUser ||
+      isAuthorizedPrimaryAdminUser({
+        uid: auth.currentUser?.uid || (user?.isLoggedIn ? user.id : null),
+        email: resolveFirebaseUserEmail(auth.currentUser) || user?.email,
+        emailVerified: auth.currentUser ? auth.currentUser.emailVerified : Boolean(user?.isLoggedIn),
+      }) ? (
         <div
           onClick={() => openAdminPanel()}
           data-testid="more-admin-hero-card"
@@ -860,7 +867,14 @@ export const MoreMenu: React.FC = () => {
             <ArrowIcon className="w-4 h-4 text-[var(--color-muted)]" />
           </button>
 
-          {isAdminUser && (
+          {(isAdminUser ||
+            isAuthorizedPrimaryAdminUser({
+              uid: auth.currentUser?.uid || (user?.isLoggedIn ? user.id : null),
+              email: resolveFirebaseUserEmail(auth.currentUser) || user?.email,
+              emailVerified: auth.currentUser
+                ? auth.currentUser.emailVerified
+                : Boolean(user?.isLoggedIn),
+            })) && (
             <button
               type="button"
               data-testid="more-admin-panel-btn"

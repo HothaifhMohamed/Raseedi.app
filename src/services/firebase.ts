@@ -83,7 +83,22 @@ import {
 import { shouldFallbackAccountDeleteError } from './accountDeletion';
 import { resolveSafeCloudBackupWrite } from './backupMerge';
 import { sortTransactionsDescending } from './orgTransactionQuery';
-import { AdminCouponCycle, AdminCouponTier } from './licenseCodes';
+import {
+  AdminCouponCycle,
+  AdminCouponTier,
+  PRIMARY_SYSTEM_ADMIN_EMAIL,
+} from './licenseCodes';
+import {
+  buildDirectAdminSubscriptionPatch,
+  DIRECT_ADMIN_SESSION_PREFIX,
+  generateRandomLicenseCodeBrowser,
+  hashAdminPinBrowser,
+  isApiEndpointUnavailableResponse,
+  isAuthorizedPrimaryAdminUser,
+  isDirectAdminSessionToken,
+  isValidAdminPinLength,
+  verifyAdminPinBrowser,
+} from './adminAuth';
 import {
   BackupHistoryRecord,
   BackupHistorySummary,
@@ -609,21 +624,181 @@ export function resolveFirebaseUserEmail(firebaseUser?: User | null): string {
   return typeof fromProvider === 'string' ? fromProvider.trim() : '';
 }
 
+class AdminApiUnavailableError extends Error {
+  constructor() {
+    super('ADMIN_API_UNAVAILABLE');
+  }
+}
+
+const DIRECT_ADMIN_SESSION_TTL_MS = 30 * 60 * 1000;
+
+function assertDirectPrimaryAdminUser(userOverride?: User | null): {
+  user: User;
+  email: string;
+} {
+  const targetUser = userOverride ?? auth.currentUser;
+  const email = resolveFirebaseUserEmail(targetUser).trim().toLowerCase();
+  if (
+    !targetUser ||
+    !isAuthorizedPrimaryAdminUser({
+      uid: targetUser.uid,
+      email,
+      emailVerified: targetUser.emailVerified,
+    })
+  ) {
+    throw new ServerApiError(
+      'FORBIDDEN',
+      'فقط مالك النظام المخول يمكنه تنفيذ هذا الإجراء.',
+      403
+    );
+  }
+  return { user: targetUser, email };
+}
+
+function createDirectAdminSessionToken(uid: string): {
+  adminSessionToken: string;
+  expiresAt: number;
+} {
+  const expiresAt = Date.now() + DIRECT_ADMIN_SESSION_TTL_MS;
+  const randomPart =
+    typeof globalThis !== 'undefined' && globalThis.crypto?.getRandomValues
+      ? Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)))
+          .map((b) => b.toString(16).padStart(2, '0'))
+          .join('')
+      : `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
+  return {
+    adminSessionToken: `${DIRECT_ADMIN_SESSION_PREFIX}${uid}:${expiresAt}:${randomPart}`,
+    expiresAt,
+  };
+}
+
+function assertValidDirectAdminSession(token: string, expectedUid: string): void {
+  if (!isDirectAdminSessionToken(token)) {
+    throw new ServerApiError(
+      'ADMIN_SESSION_REQUIRED',
+      'يرجى إعادة إدخال الرمز السري لفتح جلسة الإدارة.',
+      403
+    );
+  }
+  const rest = token.slice(DIRECT_ADMIN_SESSION_PREFIX.length);
+  const parts = rest.split(':');
+  const tokenUid = parts[0] || '';
+  const expiresAt = Number(parts[1] || 0);
+  if (tokenUid !== expectedUid || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    throw new ServerApiError(
+      'ADMIN_SESSION_EXPIRED',
+      'انتهت جلسة الإدارة. يرجى إدخال الرمز السري مجدداً.',
+      403
+    );
+  }
+}
+
+async function readAdminPinDocDirect(): Promise<{
+  pinHash: string | null;
+  updatedAtMs: number | null;
+}> {
+  const primaryRef = doc(db, 'adminConfig', 'security');
+  try {
+    const snap = await getDocFromServer(primaryRef).catch(() => getDoc(primaryRef));
+    if (snap.exists()) {
+      const data = snap.data() as Record<string, unknown>;
+      const pinHash = typeof data.pinHash === 'string' && data.pinHash.trim() ? data.pinHash.trim() : null;
+      const updatedAtMs =
+        typeof data.updatedAtMs === 'number' && Number.isFinite(data.updatedAtMs)
+          ? data.updatedAtMs
+          : null;
+      if (pinHash) {
+        return { pinHash, updatedAtMs };
+      }
+    }
+  } catch (err) {
+    console.warn('Direct adminConfig/security read warning:', err);
+  }
+
+  // Legacy read-only fallback path (adminSecurity/panelConfig)
+  try {
+    const legacyRef = doc(db, 'adminSecurity', 'panelConfig');
+    const legacySnap = await getDocFromServer(legacyRef).catch(() => getDoc(legacyRef));
+    if (legacySnap.exists()) {
+      const data = legacySnap.data() as Record<string, unknown>;
+      const pinHash = typeof data.pinHash === 'string' && data.pinHash.trim() ? data.pinHash.trim() : null;
+      const updatedAtMs =
+        typeof data.updatedAtMs === 'number' && Number.isFinite(data.updatedAtMs)
+          ? data.updatedAtMs
+          : null;
+      if (pinHash) {
+        return { pinHash, updatedAtMs };
+      }
+    }
+  } catch {
+    // Ignore legacy fallback errors
+  }
+
+  return { pinHash: null, updatedAtMs: null };
+}
+
+async function writeAdminPinDocDirect(params: {
+  uid: string;
+  email: string;
+  pinHash: string;
+  isFirstCreate: boolean;
+}): Promise<number> {
+  const updatedAtMs = Date.now();
+  const ref = doc(db, 'adminConfig', 'security');
+  const payload: Record<string, unknown> = {
+    pinHash: params.pinHash,
+    updatedByUid: params.uid,
+    updatedByEmail: params.email.trim().toLowerCase() || PRIMARY_SYSTEM_ADMIN_EMAIL,
+    updatedAtMs,
+    updatedAt: serverTimestamp(),
+  };
+  if (params.isFirstCreate) {
+    payload.createdAt = serverTimestamp();
+  }
+  await setDoc(ref, payload, { merge: !params.isFirstCreate });
+  return updatedAtMs;
+}
+
+async function fetchAdminApiJson<T>(
+  url: string,
+  init: RequestInit
+): Promise<{ response: Response; payload: T }> {
+  let response: Response;
+  try {
+    response = await fetch(url, init);
+  } catch {
+    throw new AdminApiUnavailableError();
+  }
+  const contentType = response.headers.get('content-type');
+  if (isApiEndpointUnavailableResponse(response.status, contentType)) {
+    throw new AdminApiUnavailableError();
+  }
+  const payload = (await response.json().catch(() => ({}))) as T;
+  return { response, payload };
+}
+
 async function requestAdminStatusEndpoint(
   endpoint: '/api/admin/bootstrap' | '/api/admin/status',
   method: 'POST' | 'GET',
   idToken: string
-): Promise<{ ok: boolean; payload: Record<string, unknown> }> {
-  const response = await fetch(endpoint, {
-    method,
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
-    },
-    ...(method === 'POST' ? { body: '{}' } : {}),
-  });
-  const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-  return { ok: response.ok, payload };
+): Promise<{ ok: boolean; unavailable: boolean; payload: Record<string, unknown> }> {
+  try {
+    const response = await fetch(endpoint, {
+      method,
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(method === 'POST' ? { body: '{}' } : {}),
+    });
+    if (isApiEndpointUnavailableResponse(response.status, response.headers.get('content-type'))) {
+      return { ok: false, unavailable: true, payload: {} };
+    }
+    const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    return { ok: response.ok, unavailable: false, payload };
+  } catch {
+    return { ok: false, unavailable: true, payload: {} };
+  }
 }
 
 export async function bootstrapAdminStatusOnServer(
@@ -633,49 +808,85 @@ export async function bootstrapAdminStatusOnServer(
   if (!targetUser) {
     return { isAdmin: false, pinConfigured: false, pinSource: 'unset', pinUpdatedAtMs: null };
   }
+
+  const resolvedEmail = resolveFirebaseUserEmail(targetUser);
+  const isVerifiedPrimaryAdmin = isAuthorizedPrimaryAdminUser({
+    uid: targetUser.uid,
+    email: resolvedEmail,
+    emailVerified: targetUser.emailVerified,
+  });
+
   try {
     const idToken = await targetUser.getIdToken();
-    let result = await requestAdminStatusEndpoint('/api/admin/bootstrap', 'POST', idToken).catch(
-      () => ({ ok: false, payload: {} as Record<string, unknown> })
-    );
+    let result = await requestAdminStatusEndpoint('/api/admin/bootstrap', 'POST', idToken);
     if (!result.ok) {
-      result = await requestAdminStatusEndpoint('/api/admin/status', 'GET', idToken).catch(
-        () => ({ ok: false, payload: {} as Record<string, unknown> })
-      );
-    }
-    if (!result.ok) {
-      return { isAdmin: false, pinConfigured: false, pinSource: 'unset', pinUpdatedAtMs: null };
+      result = await requestAdminStatusEndpoint('/api/admin/status', 'GET', idToken);
     }
 
-    const payload = result.payload as {
-      isAdmin?: boolean;
-      pinConfigured?: boolean;
-      pinSource?: 'firestore' | 'env' | 'unset';
-      pinUpdatedAtMs?: number | null;
-      claimsUpdated?: boolean;
-      customClaimSynced?: boolean;
-    };
+    if (result.ok) {
+      const payload = result.payload as {
+        isAdmin?: boolean;
+        pinConfigured?: boolean;
+        pinSource?: 'firestore' | 'env' | 'unset';
+        pinUpdatedAtMs?: number | null;
+        claimsUpdated?: boolean;
+        customClaimSynced?: boolean;
+      };
 
-    const isAdmin = Boolean(payload.isAdmin);
-    if (isAdmin) {
-      await targetUser.getIdToken(true).catch(() => undefined);
+      const isAdmin = Boolean(payload.isAdmin);
+      if (isAdmin) {
+        await targetUser.getIdToken(true).catch(() => undefined);
+      }
+
+      return {
+        isAdmin,
+        pinConfigured: Boolean(payload.pinConfigured),
+        pinSource:
+          payload.pinSource === 'firestore' || payload.pinSource === 'env'
+            ? payload.pinSource
+            : 'unset',
+        pinUpdatedAtMs:
+          typeof payload.pinUpdatedAtMs === 'number' && Number.isFinite(payload.pinUpdatedAtMs)
+            ? payload.pinUpdatedAtMs
+            : null,
+        claimsUpdated: Boolean(payload.claimsUpdated),
+        customClaimSynced: Boolean(payload.customClaimSynced),
+      };
+    }
+
+    // Static hosting fallback (e.g. Vercel where /api/admin/* is not deployed):
+    // Strictly limited to the verified exclusive primary admin via Firestore Security Rules `isAdmin()`.
+    if (isVerifiedPrimaryAdmin && result.unavailable) {
+      const pinDoc = await readAdminPinDocDirect();
+      return {
+        isAdmin: true,
+        pinConfigured: Boolean(pinDoc.pinHash),
+        pinSource: pinDoc.pinHash ? 'firestore' : 'unset',
+        pinUpdatedAtMs: pinDoc.updatedAtMs,
+        claimsUpdated: false,
+        customClaimSynced: false,
+      };
     }
 
     return {
-      isAdmin,
-      pinConfigured: Boolean(payload.pinConfigured),
-      pinSource:
-        payload.pinSource === 'firestore' || payload.pinSource === 'env'
-          ? payload.pinSource
-          : 'unset',
-      pinUpdatedAtMs:
-        typeof payload.pinUpdatedAtMs === 'number' && Number.isFinite(payload.pinUpdatedAtMs)
-          ? payload.pinUpdatedAtMs
-          : null,
-      claimsUpdated: Boolean(payload.claimsUpdated),
-      customClaimSynced: Boolean(payload.customClaimSynced),
+      isAdmin: isVerifiedPrimaryAdmin,
+      pinConfigured: false,
+      pinSource: 'unset',
+      pinUpdatedAtMs: null,
     };
   } catch {
+    if (isVerifiedPrimaryAdmin) {
+      const pinDoc = await readAdminPinDocDirect().catch(() => ({
+        pinHash: null,
+        updatedAtMs: null,
+      }));
+      return {
+        isAdmin: true,
+        pinConfigured: Boolean(pinDoc.pinHash),
+        pinSource: pinDoc.pinHash ? 'firestore' : 'unset',
+        pinUpdatedAtMs: pinDoc.updatedAtMs,
+      };
+    }
     return { isAdmin: false, pinConfigured: false, pinSource: 'unset', pinUpdatedAtMs: null };
   }
 }
@@ -693,42 +904,78 @@ export async function setupAdminPinOnServer(
   expiresAt: number;
   pinUpdatedAtMs: number | null;
 }> {
-  const idToken = await getRequiredIdToken();
-  const response = await fetch('/api/admin/pin/setup', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${idToken}`,
-    },
-    body: JSON.stringify({ newPin: newPin.trim() }),
-  });
-
-  const payload = (await response.json().catch(() => ({}))) as {
-    adminSessionToken?: string;
-    expiresAt?: number;
-    pinUpdatedAtMs?: number | null;
-    claimsUpdated?: boolean;
-    error?: string;
-    message?: string;
-  };
-
-  if (!response.ok || !payload.adminSessionToken) {
+  const cleanPin = newPin.trim();
+  if (!isValidAdminPinLength(cleanPin)) {
     throw new ServerApiError(
-      payload.error || 'PIN_SETUP_FAILED',
-      payload.message || payload.error || 'PIN_SETUP_FAILED',
-      response.status
+      'INVALID_PIN_LENGTH',
+      'يجب أن يتكون الرمز السري من 4 إلى 32 حرفاً أو رقماً.',
+      400
     );
   }
 
-  if (payload.claimsUpdated && auth.currentUser) {
-    await auth.currentUser.getIdToken(true).catch(() => undefined);
-  }
+  const idToken = await getRequiredIdToken();
+  try {
+    const { response, payload } = await fetchAdminApiJson<{
+      adminSessionToken?: string;
+      expiresAt?: number;
+      pinUpdatedAtMs?: number | null;
+      claimsUpdated?: boolean;
+      error?: string;
+      message?: string;
+    }>('/api/admin/pin/setup', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({ newPin: cleanPin }),
+    });
 
-  return {
-    adminSessionToken: payload.adminSessionToken,
-    expiresAt: Number(payload.expiresAt || 0),
-    pinUpdatedAtMs: typeof payload.pinUpdatedAtMs === 'number' ? payload.pinUpdatedAtMs : Date.now(),
-  };
+    if (!response.ok || !payload.adminSessionToken) {
+      throw new ServerApiError(
+        payload.error || 'PIN_SETUP_FAILED',
+        payload.message || payload.error || 'PIN_SETUP_FAILED',
+        response.status
+      );
+    }
+
+    if (payload.claimsUpdated && auth.currentUser) {
+      await auth.currentUser.getIdToken(true).catch(() => undefined);
+    }
+
+    return {
+      adminSessionToken: payload.adminSessionToken,
+      expiresAt: Number(payload.expiresAt || 0),
+      pinUpdatedAtMs:
+        typeof payload.pinUpdatedAtMs === 'number' ? payload.pinUpdatedAtMs : Date.now(),
+    };
+  } catch (err) {
+    if (!(err instanceof AdminApiUnavailableError)) {
+      throw err;
+    }
+    const { user, email } = assertDirectPrimaryAdminUser();
+    const existing = await readAdminPinDocDirect();
+    if (existing.pinHash) {
+      throw new ServerApiError(
+        'PIN_ALREADY_CONFIGURED',
+        'تم تعيين الرمز السري مسبقاً. يرجى إدخاله لفتح لوحة الإدارة.',
+        409
+      );
+    }
+    const pinHash = await hashAdminPinBrowser(cleanPin);
+    const pinUpdatedAtMs = await writeAdminPinDocDirect({
+      uid: user.uid,
+      email,
+      pinHash,
+      isFirstCreate: true,
+    });
+    const session = createDirectAdminSessionToken(user.uid);
+    return {
+      adminSessionToken: session.adminSessionToken,
+      expiresAt: session.expiresAt,
+      pinUpdatedAtMs,
+    };
+  }
 }
 
 export async function verifyAdminPasscodeOnServer(
@@ -739,46 +986,116 @@ export async function verifyAdminPasscodeOnServer(
   pinSource: 'firestore' | 'env' | 'unset';
   pinUpdatedAtMs: number | null;
 }> {
+  const cleanPin = passcode.trim();
   const idToken = await getRequiredIdToken();
-  const response = await fetch('/api/admin/verify-passcode', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${idToken}`,
-    },
-    body: JSON.stringify({ passcode: passcode.trim() }),
-  });
+  try {
+    const { response, payload } = await fetchAdminApiJson<{
+      adminSessionToken?: string;
+      expiresAt?: number;
+      pinSource?: 'firestore' | 'env' | 'unset';
+      pinUpdatedAtMs?: number | null;
+      claimsUpdated?: boolean;
+      error?: string;
+      message?: string;
+    }>('/api/admin/verify-passcode', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({ passcode: cleanPin }),
+    });
 
-  const payload = (await response.json().catch(() => ({}))) as {
-    adminSessionToken?: string;
-    expiresAt?: number;
-    pinSource?: 'firestore' | 'env' | 'unset';
-    pinUpdatedAtMs?: number | null;
-    claimsUpdated?: boolean;
-    error?: string;
-    message?: string;
-  };
+    if (!response.ok || !payload.adminSessionToken) {
+      throw new ServerApiError(
+        payload.error || 'VERIFY_PASSCODE_FAILED',
+        payload.message || payload.error || 'VERIFY_PASSCODE_FAILED',
+        response.status
+      );
+    }
 
-  if (!response.ok || !payload.adminSessionToken) {
+    if (payload.claimsUpdated && auth.currentUser) {
+      await auth.currentUser.getIdToken(true).catch(() => undefined);
+    }
+
+    return {
+      adminSessionToken: payload.adminSessionToken,
+      expiresAt: Number(payload.expiresAt || 0),
+      pinSource:
+        payload.pinSource === 'firestore' || payload.pinSource === 'env'
+          ? payload.pinSource
+          : 'unset',
+      pinUpdatedAtMs: typeof payload.pinUpdatedAtMs === 'number' ? payload.pinUpdatedAtMs : null,
+    };
+  } catch (err) {
+    if (!(err instanceof AdminApiUnavailableError)) {
+      throw err;
+    }
+    const { user } = assertDirectPrimaryAdminUser();
+    const pinDoc = await readAdminPinDocDirect();
+    if (!pinDoc.pinHash) {
+      throw new ServerApiError(
+        'ADMIN_PIN_NOT_SET',
+        'لم يتم تعيين الرمز السري بعد. قم بتعيين رمزك السري الجديد الآن.',
+        409
+      );
+    }
+    const verified = await verifyAdminPinBrowser(cleanPin, pinDoc.pinHash);
+    if (verified === 'server_scrypt_only') {
+      throw new ServerApiError(
+        'ADMIN_PIN_NEEDS_REAUTH_RESET',
+        'تم تشفير الرمز السري سابقاً بصيغة الخادم (scrypt). أكد هويتك عبر Google لتحديث الرمز السري بصيغة متوافقة مع Vercel والخادم معاً.',
+        409
+      );
+    }
+    if (verified !== 'match') {
+      throw new ServerApiError(
+        'INVALID_ADMIN_PASSCODE',
+        'الرمز السري للوحة الإدارة غير صحيح.',
+        403
+      );
+    }
+    const session = createDirectAdminSessionToken(user.uid);
+    return {
+      adminSessionToken: session.adminSessionToken,
+      expiresAt: session.expiresAt,
+      pinSource: 'firestore',
+      pinUpdatedAtMs: pinDoc.updatedAtMs,
+    };
+  }
+}
+
+export async function resetAdminPinAfterGoogleReauth(
+  newPin: string
+): Promise<{
+  adminSessionToken: string;
+  expiresAt: number;
+  pinUpdatedAtMs: number;
+}> {
+  const cleanPin = newPin.trim();
+  if (!isValidAdminPinLength(cleanPin)) {
     throw new ServerApiError(
-      payload.error || 'VERIFY_PASSCODE_FAILED',
-      payload.message || payload.error || 'VERIFY_PASSCODE_FAILED',
-      response.status
+      'INVALID_PIN_LENGTH',
+      'يجب أن يتكون الرمز السري من 4 إلى 32 حرفاً أو رقماً.',
+      400
     );
   }
 
-  if (payload.claimsUpdated && auth.currentUser) {
-    await auth.currentUser.getIdToken(true).catch(() => undefined);
-  }
-
+  const reauthedUser = await reauthenticateWithGoogle();
+  const { user, email } = assertDirectPrimaryAdminUser(reauthedUser);
+  const existing = await readAdminPinDocDirect();
+  const pinHash = await hashAdminPinBrowser(cleanPin);
+  const pinUpdatedAtMs = await writeAdminPinDocDirect({
+    uid: user.uid,
+    email,
+    pinHash,
+    isFirstCreate: !existing.pinHash,
+  });
+  const session = createDirectAdminSessionToken(user.uid);
   return {
-    adminSessionToken: payload.adminSessionToken,
-    expiresAt: Number(payload.expiresAt || 0),
-    pinSource:
-      payload.pinSource === 'firestore' || payload.pinSource === 'env'
-        ? payload.pinSource
-        : 'unset',
-    pinUpdatedAtMs: typeof payload.pinUpdatedAtMs === 'number' ? payload.pinUpdatedAtMs : null,
+    adminSessionToken: session.adminSessionToken,
+    expiresAt: session.expiresAt,
+    pinUpdatedAtMs,
   };
 }
 
@@ -794,41 +1111,90 @@ export async function changeAdminPinOnServer(params: {
   if (!params.adminSessionToken) {
     throw new ServerApiError('ADMIN_SESSION_REQUIRED', 'ADMIN_SESSION_REQUIRED', 403);
   }
-  const idToken = await getRequiredIdToken();
-  const response = await fetch('/api/admin/pin/change', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${idToken}`,
-      'X-Admin-Session': params.adminSessionToken,
-    },
-    body: JSON.stringify({
-      currentPin: params.currentPin.trim(),
-      newPin: params.newPin.trim(),
-    }),
-  });
-
-  const payload = (await response.json().catch(() => ({}))) as {
-    adminSessionToken?: string;
-    expiresAt?: number;
-    updatedAtMs?: number;
-    error?: string;
-    message?: string;
-  };
-
-  if (!response.ok || !payload.adminSessionToken) {
+  const cleanCurrent = params.currentPin.trim();
+  const cleanNext = params.newPin.trim();
+  if (!isValidAdminPinLength(cleanNext)) {
     throw new ServerApiError(
-      payload.error || 'PIN_CHANGE_FAILED',
-      payload.message || payload.error || 'PIN_CHANGE_FAILED',
-      response.status
+      'INVALID_PIN_LENGTH',
+      'يجب أن يتكون الرمز السري من 4 إلى 32 حرفاً أو رقماً.',
+      400
     );
   }
 
-  return {
-    adminSessionToken: payload.adminSessionToken,
-    expiresAt: Number(payload.expiresAt || 0),
-    updatedAtMs: Number(payload.updatedAtMs || Date.now()),
+  const runDirectChange = async () => {
+    const { user, email } = assertDirectPrimaryAdminUser();
+    assertValidDirectAdminSession(params.adminSessionToken, user.uid);
+    const pinDoc = await readAdminPinDocDirect();
+    if (!pinDoc.pinHash) {
+      throw new ServerApiError('ADMIN_PIN_NOT_SET', 'الرمز السري غير مضبوط بعد.', 409);
+    }
+    const verified = await verifyAdminPinBrowser(cleanCurrent, pinDoc.pinHash);
+    if (verified !== 'match') {
+      throw new ServerApiError(
+        'INVALID_CURRENT_PIN',
+        'الرمز السري الحالي غير صحيح.',
+        403
+      );
+    }
+    const pinHash = await hashAdminPinBrowser(cleanNext);
+    const updatedAtMs = await writeAdminPinDocDirect({
+      uid: user.uid,
+      email,
+      pinHash,
+      isFirstCreate: false,
+    });
+    const session = createDirectAdminSessionToken(user.uid);
+    return {
+      adminSessionToken: session.adminSessionToken,
+      expiresAt: session.expiresAt,
+      updatedAtMs,
+    };
   };
+
+  if (isDirectAdminSessionToken(params.adminSessionToken)) {
+    return runDirectChange();
+  }
+
+  const idToken = await getRequiredIdToken();
+  try {
+    const { response, payload } = await fetchAdminApiJson<{
+      adminSessionToken?: string;
+      expiresAt?: number;
+      updatedAtMs?: number;
+      error?: string;
+      message?: string;
+    }>('/api/admin/pin/change', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+        'X-Admin-Session': params.adminSessionToken,
+      },
+      body: JSON.stringify({
+        currentPin: cleanCurrent,
+        newPin: cleanNext,
+      }),
+    });
+
+    if (!response.ok || !payload.adminSessionToken) {
+      throw new ServerApiError(
+        payload.error || 'PIN_CHANGE_FAILED',
+        payload.message || payload.error || 'PIN_CHANGE_FAILED',
+        response.status
+      );
+    }
+
+    return {
+      adminSessionToken: payload.adminSessionToken,
+      expiresAt: Number(payload.expiresAt || 0),
+      updatedAtMs: Number(payload.updatedAtMs || Date.now()),
+    };
+  } catch (err) {
+    if (!(err instanceof AdminApiUnavailableError)) {
+      throw err;
+    }
+    return runDirectChange();
+  }
 }
 
 export async function fetchAllUsersForAdmin(
@@ -837,34 +1203,60 @@ export async function fetchAllUsersForAdmin(
   if (!adminSessionToken) {
     throw new ServerApiError('ADMIN_SESSION_REQUIRED', 'ADMIN_SESSION_REQUIRED', 403);
   }
-  const idToken = await getRequiredIdToken();
-  const response = await fetch('/api/admin/users', {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      'X-Admin-Session': adminSessionToken,
-    },
-  });
 
-  const payload = (await response.json().catch(() => ({}))) as {
-    users?: CloudUserProfile[];
-    error?: string;
-    message?: string;
+  const runDirectFetchUsers = async (): Promise<CloudUserProfile[]> => {
+    const { user } = assertDirectPrimaryAdminUser();
+    assertValidDirectAdminSession(adminSessionToken, user.uid);
+    const q = query(collection(db, 'users'), limit(200));
+    const snap = await getDocsFromServer(q).catch(() => getDocs(q));
+    const rows = snap.docs.map((d) =>
+      mapCloudUserProfile(d.id, d.data() as Record<string, unknown>)
+    );
+    return rows.sort((a, b) => {
+      const aScore = (a.isPro ? 2 : 0) + (a.lastSyncedAt ? 1 : 0);
+      const bScore = (b.isPro ? 2 : 0) + (b.lastSyncedAt ? 1 : 0);
+      if (bScore !== aScore) return bScore - aScore;
+      return (b.lastSyncedAt || 0) - (a.lastSyncedAt || 0);
+    });
   };
 
-  if (!response.ok || !Array.isArray(payload.users)) {
-    throw new ServerApiError(
-      payload.error || 'ADMIN_USERS_LIST_FAILED',
-      payload.message || payload.error || 'ADMIN_USERS_LIST_FAILED',
-      response.status
-    );
+  if (isDirectAdminSessionToken(adminSessionToken)) {
+    return runDirectFetchUsers();
   }
 
-  return payload.users.map((row) => ({
-    ...row,
-    proActive: Boolean(row.proActive ?? row.isPro),
-    proExpiresAt: row.proExpiresAt ?? row.expiresAt ?? null,
-  }));
+  const idToken = await getRequiredIdToken();
+  try {
+    const { response, payload } = await fetchAdminApiJson<{
+      users?: CloudUserProfile[];
+      error?: string;
+      message?: string;
+    }>('/api/admin/users', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        'X-Admin-Session': adminSessionToken,
+      },
+    });
+
+    if (!response.ok || !Array.isArray(payload.users)) {
+      throw new ServerApiError(
+        payload.error || 'ADMIN_USERS_LIST_FAILED',
+        payload.message || payload.error || 'ADMIN_USERS_LIST_FAILED',
+        response.status
+      );
+    }
+
+    return payload.users.map((row) => ({
+      ...row,
+      proActive: Boolean(row.proActive ?? row.isPro),
+      proExpiresAt: row.proExpiresAt ?? row.expiresAt ?? null,
+    }));
+  } catch (err) {
+    if (!(err instanceof AdminApiUnavailableError)) {
+      throw err;
+    }
+    return runDirectFetchUsers();
+  }
 }
 
 export async function adminUpdateUserSubscription(params: {
@@ -877,10 +1269,40 @@ export async function adminUpdateUserSubscription(params: {
   if (!params.adminSessionToken) {
     throw new ServerApiError('ADMIN_SESSION_REQUIRED', 'ADMIN_SESSION_REQUIRED', 403);
   }
+
+  const runDirectUpdate = async (): Promise<CloudUserProfile> => {
+    const { user } = assertDirectPrimaryAdminUser();
+    assertValidDirectAdminSession(params.adminSessionToken, user.uid);
+    const targetRef = doc(db, 'users', params.targetUid);
+    const snap = await getDocFromServer(targetRef).catch(() => getDoc(targetRef));
+    if (!snap.exists()) {
+      throw new ServerApiError('USER_NOT_FOUND', 'تعذر العثور على حساب المستخدم.', 404);
+    }
+    const existingData = snap.data() as Record<string, unknown>;
+    const patch = buildDirectAdminSubscriptionPatch({
+      planTier: params.planTier,
+      billingCycle: params.billingCycle,
+      customDays: params.customDays,
+    });
+    await updateDoc(targetRef, {
+      ...patch,
+      updatedAt: serverTimestamp(),
+    });
+    return mapCloudUserProfile(params.targetUid, {
+      ...existingData,
+      ...patch,
+    });
+  };
+
+  if (isDirectAdminSessionToken(params.adminSessionToken)) {
+    return runDirectUpdate();
+  }
+
   const idToken = await getRequiredIdToken();
-  const response = await fetch(
-    `/api/admin/users/${encodeURIComponent(params.targetUid)}/subscription`,
-    {
+  try {
+    const { response, payload } = await fetchAdminApiJson<
+      Partial<CloudUserProfile> & { error?: string; message?: string }
+    >(`/api/admin/users/${encodeURIComponent(params.targetUid)}/subscription`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -892,35 +1314,35 @@ export async function adminUpdateUserSubscription(params: {
         billingCycle: params.billingCycle,
         ...(params.customDays && params.customDays > 0 ? { customDays: params.customDays } : {}),
       }),
+    });
+
+    if (!response.ok) {
+      throw new ServerApiError(
+        payload.error || 'ADMIN_UPDATE_SUBSCRIPTION_FAILED',
+        payload.message || payload.error || 'ADMIN_UPDATE_SUBSCRIPTION_FAILED',
+        response.status
+      );
     }
-  );
 
-  const payload = (await response.json().catch(() => ({}))) as Partial<CloudUserProfile> & {
-    error?: string;
-    message?: string;
-  };
-
-  if (!response.ok) {
-    throw new ServerApiError(
-      payload.error || 'ADMIN_UPDATE_SUBSCRIPTION_FAILED',
-      payload.message || payload.error || 'ADMIN_UPDATE_SUBSCRIPTION_FAILED',
-      response.status
-    );
+    return {
+      uid: payload.uid || params.targetUid,
+      email: payload.email || '',
+      isPro: Boolean(payload.isPro),
+      proActive: Boolean(payload.proActive ?? payload.isPro),
+      proPlan: payload.proPlan || 'free',
+      planTier: payload.planTier || params.planTier,
+      billingCycle: payload.billingCycle || params.billingCycle,
+      startedAt: payload.startedAt ?? null,
+      expiresAt: payload.expiresAt ?? null,
+      proExpiresAt: payload.proExpiresAt ?? payload.expiresAt ?? null,
+      redeemedCouponCode: payload.redeemedCouponCode ?? null,
+    };
+  } catch (err) {
+    if (!(err instanceof AdminApiUnavailableError)) {
+      throw err;
+    }
+    return runDirectUpdate();
   }
-
-  return {
-    uid: payload.uid || params.targetUid,
-    email: payload.email || '',
-    isPro: Boolean(payload.isPro),
-    proActive: Boolean(payload.proActive ?? payload.isPro),
-    proPlan: payload.proPlan || 'free',
-    planTier: payload.planTier || params.planTier,
-    billingCycle: payload.billingCycle || params.billingCycle,
-    startedAt: payload.startedAt ?? null,
-    expiresAt: payload.expiresAt ?? null,
-    proExpiresAt: payload.proExpiresAt ?? payload.expiresAt ?? null,
-    redeemedCouponCode: payload.redeemedCouponCode ?? null,
-  };
 }
 
 export async function adminCancelUserSubscription(
@@ -2115,36 +2537,100 @@ export interface ServerLicenseCodeRecord {
   createdAtMs: number;
 }
 
+function mapFirestoreLicenseCodeDoc(
+  id: string,
+  data: Record<string, unknown>
+): ServerLicenseCodeRecord {
+  const used = Boolean(data.used) || data.status === 'used';
+  const tier: AdminCouponTier = data.tier === 'business' ? 'business' : 'pro';
+  const cycle: AdminCouponCycle =
+    data.cycle === 'monthly' || data.cycle === 'yearly' || data.cycle === 'lifetime'
+      ? data.cycle
+      : 'yearly';
+  const planTier: PlanTier =
+    data.planTier === 'business_pro' || tier === 'business' ? 'business_pro' : 'personal_pro';
+  const usedAtRaw = data.usedAt;
+  const usedAt =
+    typeof usedAtRaw === 'number' && Number.isFinite(usedAtRaw)
+      ? usedAtRaw
+      : usedAtRaw && typeof (usedAtRaw as { toMillis?: () => number }).toMillis === 'function'
+      ? (usedAtRaw as { toMillis: () => number }).toMillis()
+      : null;
+
+  return {
+    codeHash: typeof data.codeHash === 'string' ? data.codeHash : id,
+    codePreview: typeof data.codePreview === 'string' ? data.codePreview : `RSD-****-${id.slice(-4)}`,
+    tier,
+    planTier,
+    cycle,
+    status: used ? 'used' : 'unused',
+    used,
+    usedBy: typeof data.usedBy === 'string' ? data.usedBy : null,
+    usedOrgId: typeof data.usedOrgId === 'string' ? data.usedOrgId : null,
+    usedAt,
+    createdByUid: typeof data.createdByUid === 'string' ? data.createdByUid : '',
+    createdByEmail: typeof data.createdByEmail === 'string' ? data.createdByEmail : PRIMARY_SYSTEM_ADMIN_EMAIL,
+    createdAtMs:
+      typeof data.createdAtMs === 'number' && Number.isFinite(data.createdAtMs)
+        ? data.createdAtMs
+        : Date.now(),
+  };
+}
+
 export async function fetchLicenseCodesFromServer(
   adminSessionToken: string
 ): Promise<ServerLicenseCodeRecord[]> {
   if (!adminSessionToken) {
     throw new ServerApiError('ADMIN_SESSION_REQUIRED', 'ADMIN_SESSION_REQUIRED', 403);
   }
-  const idToken = await getRequiredIdToken();
-  const response = await fetch('/api/admin/license-codes', {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      'X-Admin-Session': adminSessionToken,
-    },
-  });
 
-  const payload = (await response.json().catch(() => ({}))) as {
-    codes?: ServerLicenseCodeRecord[];
-    error?: string;
-    message?: string;
+  const runDirectFetchCodes = async (): Promise<ServerLicenseCodeRecord[]> => {
+    const { user } = assertDirectPrimaryAdminUser();
+    assertValidDirectAdminSession(adminSessionToken, user.uid);
+    const q = query(
+      collection(db, 'licenseCodes'),
+      orderBy('createdAtMs', 'desc'),
+      limit(50)
+    );
+    const snap = await getDocsFromServer(q).catch(() => getDocs(q));
+    return snap.docs.map((d) =>
+      mapFirestoreLicenseCodeDoc(d.id, d.data() as Record<string, unknown>)
+    );
   };
 
-  if (!response.ok || !Array.isArray(payload.codes)) {
-    throw new ServerApiError(
-      payload.error || 'LIST_LICENSE_CODES_FAILED',
-      payload.message || payload.error || 'LIST_LICENSE_CODES_FAILED',
-      response.status
-    );
+  if (isDirectAdminSessionToken(adminSessionToken)) {
+    return runDirectFetchCodes();
   }
 
-  return payload.codes;
+  const idToken = await getRequiredIdToken();
+  try {
+    const { response, payload } = await fetchAdminApiJson<{
+      codes?: ServerLicenseCodeRecord[];
+      error?: string;
+      message?: string;
+    }>('/api/admin/license-codes', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        'X-Admin-Session': adminSessionToken,
+      },
+    });
+
+    if (!response.ok || !Array.isArray(payload.codes)) {
+      throw new ServerApiError(
+        payload.error || 'LIST_LICENSE_CODES_FAILED',
+        payload.message || payload.error || 'LIST_LICENSE_CODES_FAILED',
+        response.status
+      );
+    }
+
+    return payload.codes;
+  } catch (err) {
+    if (!(err instanceof AdminApiUnavailableError)) {
+      throw err;
+    }
+    return runDirectFetchCodes();
+  }
 }
 
 export async function createLicenseCodeOnServer(params: {
@@ -2156,40 +2642,104 @@ export async function createLicenseCodeOnServer(params: {
   if (!params.adminSessionToken) {
     throw new ServerApiError('ADMIN_SESSION_REQUIRED', 'ADMIN_SESSION_REQUIRED', 403);
   }
-  const idToken = await getRequiredIdToken();
-  const response = await fetch('/api/admin/license-codes', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${idToken}`,
-      'X-Admin-Session': params.adminSessionToken,
-    },
-    body: JSON.stringify({
+
+  const runDirectCreateCode = async (): Promise<{
+    code: string;
+    record: ServerLicenseCodeRecord;
+  }> => {
+    const { user, email } = assertDirectPrimaryAdminUser();
+    assertValidDirectAdminSession(params.adminSessionToken, user.uid);
+    const generated = await generateRandomLicenseCodeBrowser({
       tier: params.tier,
       cycle: params.cycle,
-      ...(params.targetEmail?.trim() ? { targetEmail: params.targetEmail.trim().toLowerCase() } : {}),
-    }),
-  });
+    });
+    const createdAtMs = Date.now();
+    const targetEmail = params.targetEmail?.trim().toLowerCase() || null;
+    const codeRef = doc(db, 'licenseCodes', generated.codeHash);
+    await setDoc(codeRef, {
+      codeHash: generated.codeHash,
+      codePreview: generated.codePreview,
+      plan: generated.proPlan,
+      tier: generated.tier,
+      planTier: generated.planTier,
+      cycle: generated.cycle,
+      targetEmail,
+      status: 'unused',
+      used: false,
+      usedBy: null,
+      usedOrgId: null,
+      usedAt: null,
+      createdByUid: user.uid,
+      createdByEmail: email || PRIMARY_SYSTEM_ADMIN_EMAIL,
+      createdAtMs,
+      createdAt: serverTimestamp(),
+    });
 
-  const payload = (await response.json().catch(() => ({}))) as {
-    code?: string;
-    record?: ServerLicenseCodeRecord;
-    error?: string;
-    message?: string;
+    return {
+      code: generated.code,
+      record: {
+        codeHash: generated.codeHash,
+        codePreview: generated.codePreview,
+        tier: generated.tier,
+        planTier: generated.planTier,
+        cycle: generated.cycle,
+        status: 'unused',
+        used: false,
+        usedBy: null,
+        usedOrgId: null,
+        usedAt: null,
+        createdByUid: user.uid,
+        createdByEmail: email || PRIMARY_SYSTEM_ADMIN_EMAIL,
+        createdAtMs,
+      },
+    };
   };
 
-  if (!response.ok || !payload.code || !payload.record) {
-    throw new ServerApiError(
-      payload.error || 'CREATE_LICENSE_CODE_FAILED',
-      payload.message || payload.error || 'CREATE_LICENSE_CODE_FAILED',
-      response.status
-    );
+  if (isDirectAdminSessionToken(params.adminSessionToken)) {
+    return runDirectCreateCode();
   }
 
-  return {
-    code: payload.code,
-    record: payload.record,
-  };
+  const idToken = await getRequiredIdToken();
+  try {
+    const { response, payload } = await fetchAdminApiJson<{
+      code?: string;
+      record?: ServerLicenseCodeRecord;
+      error?: string;
+      message?: string;
+    }>('/api/admin/license-codes', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+        'X-Admin-Session': params.adminSessionToken,
+      },
+      body: JSON.stringify({
+        tier: params.tier,
+        cycle: params.cycle,
+        ...(params.targetEmail?.trim()
+          ? { targetEmail: params.targetEmail.trim().toLowerCase() }
+          : {}),
+      }),
+    });
+
+    if (!response.ok || !payload.code || !payload.record) {
+      throw new ServerApiError(
+        payload.error || 'CREATE_LICENSE_CODE_FAILED',
+        payload.message || payload.error || 'CREATE_LICENSE_CODE_FAILED',
+        response.status
+      );
+    }
+
+    return {
+      code: payload.code,
+      record: payload.record,
+    };
+  } catch (err) {
+    if (!(err instanceof AdminApiUnavailableError)) {
+      throw err;
+    }
+    return runDirectCreateCode();
+  }
 }
 
 export async function startBusinessTrialWithServer(orgId?: string): Promise<{

@@ -179,6 +179,7 @@ import {
   resolvePostGoogleSignInAction,
 } from '../services/subscriptionHelpers';
 import { extractAccountDeleteErrorCode, shouldFallbackAccountDeleteError } from '../services/accountDeletion';
+import { isAuthorizedPrimaryAdminUser } from '../services/adminAuth';
 import { EntitlementProvider, EntitlementContextValue, useEntitlement } from './EntitlementContext';
 import { OrgProvider, OrgContextValue, useOrg } from './OrgContext';
 import {
@@ -941,18 +942,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
 
       const resolvedEmail = resolveFirebaseUserEmail(targetUser);
-      if (!isPrimarySystemAdminEmail(resolvedEmail)) {
+      const isVerifiedPrimaryAdmin = isAuthorizedPrimaryAdminUser({
+        uid: targetUser.uid,
+        email: resolvedEmail,
+        emailVerified: targetUser.emailVerified,
+      });
+
+      if (!isVerifiedPrimaryAdmin) {
         if (seq === adminCheckSeqRef.current) {
           setIsAdminUser(false);
         }
         return false;
       }
 
+      // Immediately expose admin UI for the verified primary system admin
+      // so static hosting (e.g. Vercel where /api/admin/* is absent) never hides the panel.
+      if (seq === adminCheckSeqRef.current) {
+        setIsAdminUser(true);
+      }
+
       try {
         const [tokenResult, serverAdmin] = await Promise.all([
           targetUser.getIdTokenResult().catch(() => null),
           bootstrapAdminStatusOnServer(targetUser).catch(() => ({
-            isAdmin: false,
+            isAdmin: true,
             pinConfigured: false,
             pinSource: 'unset' as const,
             pinUpdatedAtMs: null,
@@ -961,28 +974,43 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (seq !== adminCheckSeqRef.current) return isAdminUserRef.current;
 
         const granted = Boolean(
-          isPrimarySystemAdminEmail(resolvedEmail) &&
-            (serverAdmin.isAdmin || tokenResult?.claims?.admin === true)
+          isVerifiedPrimaryAdmin &&
+            (serverAdmin.isAdmin || tokenResult?.claims?.admin === true || isVerifiedPrimaryAdmin)
         );
         setIsAdminUser(granted);
         return granted;
       } catch {
         if (seq === adminCheckSeqRef.current) {
-          setIsAdminUser(false);
+          setIsAdminUser(isVerifiedPrimaryAdmin);
         }
-        return false;
+        return isVerifiedPrimaryAdmin;
       }
     },
     []
   );
 
   useEffect(() => {
-    if (!firebaseAuthUser?.uid || !firebaseAuthUser.email) {
+    const resolvedEmail =
+      resolveFirebaseUserEmail(auth.currentUser) ||
+      (typeof firebaseAuthUser?.email === 'string' ? firebaseAuthUser.email.trim() : '');
+    const isVerifiedPrimaryAdmin = isAuthorizedPrimaryAdminUser({
+      uid: auth.currentUser?.uid || firebaseAuthUser?.uid,
+      email: resolvedEmail,
+      emailVerified: auth.currentUser ? auth.currentUser.emailVerified : firebaseAuthUser?.emailVerified,
+    });
+    if (!isVerifiedPrimaryAdmin) {
       setIsAdminUser(false);
       return;
     }
+    setIsAdminUser(true);
     void refreshAdminStatus();
-  }, [firebaseAuthUser?.uid, firebaseAuthUser?.email, firebaseAuthUser?.emailVerified, refreshAdminStatus]);
+  }, [
+    firebaseAuthUser,
+    firebaseAuthUser?.uid,
+    firebaseAuthUser?.email,
+    firebaseAuthUser?.emailVerified,
+    refreshAdminStatus,
+  ]);
 
   // Unified entitlement summary (recognizes 'business' + 'business_pro' + Admin lifetime override)
   const subscriptionSummary: UserSubscriptionSummary = useMemo(
@@ -1016,7 +1044,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, []);
 
   const openAdminPanel = useCallback(() => {
-    if (!isAdminUserRef.current) return;
+    const currentAuthUser = auth.currentUser;
+    const allowed =
+      isAdminUserRef.current ||
+      isAuthorizedPrimaryAdminUser({
+        uid: currentAuthUser?.uid,
+        email: resolveFirebaseUserEmail(currentAuthUser),
+        emailVerified: currentAuthUser?.emailVerified,
+      });
+    if (!allowed) return;
+    if (!isAdminUserRef.current) {
+      setIsAdminUser(true);
+    }
     setIsUpgradeModalOpen(false);
     setIsAdminCodeModalOpen(true);
   }, []);

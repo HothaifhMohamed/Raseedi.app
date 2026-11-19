@@ -43,7 +43,7 @@ service cloud.firestore {
         && data.pinHash is string
         && data.pinHash.size() >= 32
         && data.pinHash.size() <= 256
-        && data.pinHash.matches('^scrypt\\$[0-9a-f]{32}\\$[0-9a-f]{128}$')
+        && data.pinHash.matches('^(scrypt\\$[0-9a-f]{32}\\$[0-9a-f]{128}|pbkdf2\\$100000\\$[0-9a-f]{32}\\$[0-9a-f]{64})$')
         && data.updatedByUid is string
         && data.updatedByUid == request.auth.uid
         && isValidId(data.updatedByUid)

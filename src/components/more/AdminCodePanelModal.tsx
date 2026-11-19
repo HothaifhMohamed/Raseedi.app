@@ -35,12 +35,14 @@ import {
   fetchAdminStatusFromServer,
   fetchAllUsersForAdmin,
   fetchLicenseCodesFromServer,
+  resetAdminPinAfterGoogleReauth,
   resolveFirebaseUserEmail,
   ServerApiError,
   ServerLicenseCodeRecord,
   setupAdminPinOnServer,
   verifyAdminPasscodeOnServer,
 } from '../../services/firebase';
+import { isAuthorizedPrimaryAdminUser } from '../../services/adminAuth';
 import { SUBSCRIPTION_DAY_MS } from '../../services/subscriptionHelpers';
 import type { PlanTier } from '../../types';
 
@@ -119,8 +121,20 @@ export const AdminCodePanelModal: React.FC = () => {
   const [isLoadingCoupons, setIsLoadingCoupons] = useState(false);
   const [copiedAdminCode, setCopiedAdminCode] = useState(false);
 
-  const effectiveAdminEmail = user?.email || resolveFirebaseUserEmail(auth.currentUser);
-  const isAuthorizedAdmin = Boolean(isAdminUser && isPrimarySystemAdminEmail(effectiveAdminEmail));
+  const [needsReauthPinUpgrade, setNeedsReauthPinUpgrade] = useState(false);
+  const [reauthNewPin, setReauthNewPin] = useState('');
+  const [reauthConfirmPin, setReauthConfirmPin] = useState('');
+  const [isReauthingPin, setIsReauthingPin] = useState(false);
+
+  const effectiveAdminEmail = resolveFirebaseUserEmail(auth.currentUser) || user?.email || '';
+  const isAuthorizedAdmin = Boolean(
+    (isAdminUser && isPrimarySystemAdminEmail(effectiveAdminEmail)) ||
+      isAuthorizedPrimaryAdminUser({
+        uid: auth.currentUser?.uid || (user?.isLoggedIn ? user.id : null),
+        email: effectiveAdminEmail,
+        emailVerified: auth.currentUser ? auth.currentUser.emailVerified : Boolean(user?.isLoggedIn),
+      })
+  );
 
   // Reset passcode gate, ephemeral session token & transient editor state every time modal closes
   useEffect(() => {
@@ -132,6 +146,10 @@ export const AdminCodePanelModal: React.FC = () => {
       setPasscodeError(null);
       setIsVerifyingPasscode(false);
       setIsCheckingPinStatus(false);
+      setNeedsReauthPinUpgrade(false);
+      setReauthNewPin('');
+      setReauthConfirmPin('');
+      setIsReauthingPin(false);
       setCurrentPinInput('');
       setNewPinInput('');
       setConfirmNewPinInput('');
@@ -170,11 +188,16 @@ export const AdminCodePanelModal: React.FC = () => {
   }, [isAdminCodeModalOpen, isAuthorizedAdmin]);
 
   const handleSessionExpiry = (err: unknown): boolean => {
-    if (err instanceof ServerApiError && err.code === 'ADMIN_SESSION_REQUIRED') {
+    if (
+      err instanceof ServerApiError &&
+      (err.code === 'ADMIN_SESSION_REQUIRED' || err.code === 'ADMIN_SESSION_EXPIRED')
+    ) {
       setIsUnlocked(false);
       setAdminSessionToken(null);
       setPasscodeError(
-        isRTL ? 'انتهت جلسة الإدارة، يرجى إعادة إدخال رمز المرور.' : 'Admin session expired. Please re-enter passcode.'
+        isRTL
+          ? 'انتهت جلسة الإدارة، يرجى إعادة إدخال رمز المرور.'
+          : 'Admin session expired. Please re-enter passcode.'
       );
       return true;
     }
@@ -323,6 +346,13 @@ export const AdminCodePanelModal: React.FC = () => {
             ? 'لم يتم تعيين رمز سري بعد — قم بتعيين رمزك السري الجديد الآن.'
             : 'No Admin PIN configured yet — please create your new PIN now.'
         );
+      } else if (err instanceof ServerApiError && err.code === 'ADMIN_PIN_NEEDS_REAUTH_RESET') {
+        setNeedsReauthPinUpgrade(true);
+        setPasscodeError(
+          isRTL
+            ? 'تم حفظ الرمز السري سابقاً بصيغة الخادم فقط (scrypt). أكد هويتك عبر Google لتعيين رمز متوافق مع Vercel والخادم معاً.'
+            : 'Your previous PIN used a server-only hash format. Re-verify with Google below to set a cross-compatible PIN.'
+        );
       } else {
         setPasscodeError(
           parseReadableError(
@@ -333,6 +363,49 @@ export const AdminCodePanelModal: React.FC = () => {
       }
     } finally {
       setIsVerifyingPasscode(false);
+    }
+  };
+
+  const handleGoogleReauthPinReset = async () => {
+    const cleanPin = reauthNewPin.trim();
+    if (cleanPin.length < 4 || cleanPin.length > 32) {
+      setPasscodeError(
+        isRTL
+          ? 'يجب أن يتكون الرمز السري الجديد من 4 إلى 32 حرفاً أو رقماً.'
+          : 'New Admin PIN must be between 4 and 32 characters.'
+      );
+      return;
+    }
+    if (cleanPin !== reauthConfirmPin.trim()) {
+      setPasscodeError(
+        isRTL ? 'تأكيد الرمز السري غير متطابق.' : 'PIN confirmation does not match.'
+      );
+      return;
+    }
+    setIsReauthingPin(true);
+    setPasscodeError(null);
+    try {
+      const res = await resetAdminPinAfterGoogleReauth(cleanPin);
+      setAdminSessionToken(res.adminSessionToken);
+      setPinConfigured(true);
+      setPinSource('firestore');
+      setPinUpdatedAtMs(res.pinUpdatedAtMs);
+      setNeedsReauthPinUpgrade(false);
+      setReauthNewPin('');
+      setReauthConfirmPin('');
+      setPasscodeInput('');
+      setIsUnlocked(true);
+    } catch (err) {
+      setPasscodeError(
+        parseReadableError(
+          err,
+          isRTL
+            ? 'تعذر تأكيد الهوية عبر Google وتحديث الرمز السري.'
+            : 'Could not re-authenticate with Google and update Admin PIN.'
+        )
+      );
+    } finally {
+      setIsReauthingPin(false);
     }
   };
 
@@ -733,6 +806,52 @@ export const AdminCodePanelModal: React.FC = () => {
                     : 'Unlock Admin Panel'}
                 </span>
               </button>
+
+              {needsReauthPinUpgrade && (
+                <div
+                  data-testid="admin-reauth-pin-upgrade"
+                  className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-accent)]/40 space-y-2.5"
+                >
+                  <p className="text-[11px] font-semibold text-[var(--color-ink)]">
+                    {isRTL
+                      ? 'تحديث الرمز السري بعد تأكيد هوية Google'
+                      : 'Upgrade Admin PIN via Google Re-verification'}
+                  </p>
+                  <input
+                    type="password"
+                    dir="ltr"
+                    minLength={4}
+                    maxLength={32}
+                    value={reauthNewPin}
+                    onChange={(e) => setReauthNewPin(e.target.value)}
+                    placeholder={isRTL ? 'الرمز السري الجديد (4-32)' : 'New PIN (4-32 chars)'}
+                    className="w-full px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs font-mono text-center text-[var(--color-ink)] min-h-[40px]"
+                  />
+                  <input
+                    type="password"
+                    dir="ltr"
+                    minLength={4}
+                    maxLength={32}
+                    value={reauthConfirmPin}
+                    onChange={(e) => setReauthConfirmPin(e.target.value)}
+                    placeholder={isRTL ? 'تأكيد الرمز السري الجديد' : 'Confirm new PIN'}
+                    className="w-full px-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs font-mono text-center text-[var(--color-ink)] min-h-[40px]"
+                  />
+                  <button
+                    type="button"
+                    disabled={isReauthingPin || !reauthNewPin.trim() || !reauthConfirmPin.trim()}
+                    onClick={() => void handleGoogleReauthPinReset()}
+                    className="w-full py-2.5 px-3 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[42px] disabled:opacity-60 flex items-center justify-center gap-2"
+                  >
+                    {isReauthingPin && <Loader2 className="w-4 h-4 animate-spin" />}
+                    <span>
+                      {isRTL
+                        ? 'تأكيد هوية Google وتحديث الرمز السري'
+                        : 'Verify Google Identity & Update PIN'}
+                    </span>
+                  </button>
+                </div>
+              )}
             </form>
           ) : (
             <div className="space-y-4">

@@ -17,10 +17,14 @@ import {
   CloudDownload,
   AlertTriangle,
   CheckCircle2,
+  KeyRound,
+  ShieldCheck,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { hashPin } from '../../services/security';
+import { auth, resolveFirebaseUserEmail } from '../../services/firebase';
+import { isAuthorizedPrimaryAdminUser } from '../../services/adminAuth';
 import {
   CURRENCIES,
   getCurrency,
@@ -47,6 +51,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     wallets,
     user,
     isPro,
+    isAdminUser,
+    openAdminPanel,
     updateSettings,
     resetAllData,
     deleteAccountAndData,
@@ -67,6 +73,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     t,
     isRTL,
   } = useApp();
+
+  const canAccessAdminPanel = Boolean(
+    isAdminUser ||
+      isAuthorizedPrimaryAdminUser({
+        uid: auth.currentUser?.uid || (user?.isLoggedIn ? user.id : null),
+        email: resolveFirebaseUserEmail(auth.currentUser) || user?.email,
+        emailVerified: auth.currentUser ? auth.currentUser.emailVerified : Boolean(user?.isLoggedIn),
+      })
+  );
 
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
   const [confirmDeleteAccount, setConfirmDeleteAccount] = useState(false);
@@ -898,6 +913,41 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
                 </>
               )}
+            </div>
+          )}
+
+          {canAccessAdminPanel && (
+            <div className="p-4 bg-[var(--color-bg)] border border-[var(--color-accent)]/35 rounded-xl space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <h4 className="text-xs font-bold text-[var(--color-ink)] flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-[var(--color-accent)] shrink-0" />
+                  <span>{isRTL ? 'إدارة النظام الحصرية' : 'Exclusive System Administration'}</span>
+                </h4>
+                <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-[var(--color-income)]/15 text-[var(--color-income)]">
+                  {isRTL ? 'مالك النظام' : 'System Admin'}
+                </span>
+              </div>
+              <p className="text-[11px] text-[var(--color-muted)] leading-relaxed">
+                {isRTL
+                  ? 'إدارة اشتراكات المستخدمين، توليد أكواد التفعيل، وتحديث الرمز السري للوحة الإدارة.'
+                  : 'Manage user subscriptions, issue license codes, and manage the Admin Panel PIN.'}
+              </p>
+              <button
+                type="button"
+                data-testid="settings-open-admin-panel-btn"
+                onClick={() => {
+                  onClose();
+                  openAdminPanel();
+                }}
+                className="w-full py-2.5 px-3 bg-[var(--color-accent)] text-[var(--color-on-accent)] hover:opacity-95 font-bold rounded-lg text-xs flex items-center justify-center gap-2 transition-opacity min-h-[44px]"
+              >
+                <KeyRound className="w-4 h-4 shrink-0" />
+                <span>
+                  {isRTL
+                    ? 'فتح لوحة إدارة الأكواد والاشتراكات'
+                    : 'Open Admin Codes & Subscriptions Panel'}
+                </span>
+              </button>
             </div>
           )}
 
