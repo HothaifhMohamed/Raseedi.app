@@ -107,6 +107,7 @@ import {
   recalculateLocalOrgWallets,
 } from '../services/localOrgHelpers';
 import { verifyAndUpgradePin } from '../services/security';
+import { isPrimarySystemAdminEmail } from '../services/licenseCodes';
 import {
   auth,
   onAuthStateChanged,
@@ -2374,14 +2375,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       void (async () => {
         try {
+          if (!firebaseUser.emailVerified || !isPrimarySystemAdminEmail(firebaseUser.email)) {
+            if (reqId === syncRequestIdRef.current) {
+              setIsAdminUser(false);
+            }
+            return;
+          }
           const [tokenResult, serverAdmin] = await Promise.all([
             firebaseUser.getIdTokenResult().catch(() => null),
-            fetchAdminStatusFromServer().catch(() => ({ isAdmin: false })),
+            fetchAdminStatusFromServer().catch(() => ({
+              isAdmin: false,
+              pinConfigured: false,
+              pinSource: 'unset' as const,
+              pinUpdatedAtMs: null,
+            })),
           ]);
           if (reqId !== syncRequestIdRef.current) return;
           setIsAdminUser(
             Boolean(
               firebaseUser.emailVerified &&
+                isPrimarySystemAdminEmail(firebaseUser.email) &&
                 (tokenResult?.claims?.admin === true || serverAdmin.isAdmin)
             )
           );

@@ -236,26 +236,47 @@
       },
       "required": ["codeHash", "tier", "cycle", "planTier", "issuedByUid", "issuedByEmail", "createdAt"]
     },
+    "AdminPanelConfig": {
+      "title": "AdminPanelConfig",
+      "description": "Encrypted salted scrypt Admin Panel PIN configuration writable solely by exclusive system admin (hapaypal2003@gmail.com)",
+      "type": "object",
+      "properties": {
+        "pinHash": {
+          "type": "string",
+          "description": "Salted scrypt password hash (scrypt$<32-hex-salt>$<128-hex-hash>)",
+          "maxLength": 256
+        },
+        "updatedByUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "updatedByEmail": { "type": "string", "format": "email", "maxLength": 254 },
+        "updatedAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["pinHash", "updatedByUid", "updatedByEmail", "updatedAtMs", "updatedAt"]
+    },
     "LicenseCode": {
       "title": "LicenseCode",
-      "description": "Server-only hashed PRO / Business license codes created and redeemed exclusively via Admin SDK endpoints",
+      "description": "Server-generated hashed PRO / Business license codes managed exclusively by exclusive system admin",
       "type": "object",
       "properties": {
         "codeHash": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "codePreview": { "type": "string", "maxLength": 32 },
+        "plan": { "type": "string", "enum": ["monthly", "yearly", "lifetime", "business_monthly", "business_yearly", "code"] },
         "tier": { "type": "string", "enum": ["pro", "business"] },
         "planTier": { "type": "string", "enum": ["personal_pro", "business_pro"] },
         "cycle": { "type": "string", "enum": ["monthly", "yearly", "lifetime"] },
+        "targetEmail": { "type": "string", "maxLength": 254 },
         "status": { "type": "string", "enum": ["unused", "used"] },
         "used": { "type": "boolean" },
         "usedBy": { "type": "string", "maxLength": 128 },
+        "usedOrgId": { "type": "string", "maxLength": 128 },
         "usedAt": { "type": "string", "format": "date-time" },
         "createdByUid": { "type": "string", "maxLength": 128 },
         "createdByEmail": { "type": "string", "format": "email", "maxLength": 254 },
         "createdAtMs": { "type": "number" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["codeHash", "tier", "planTier", "cycle", "status", "used", "createdByUid", "createdAt"]
+      "required": ["codeHash", "codePreview", "plan", "tier", "planTier", "cycle", "status", "used", "createdByUid", "createdByEmail", "createdAtMs", "createdAt"]
     },
     "JoinRateLimit": {
       "title": "JoinRateLimit",
@@ -584,9 +605,13 @@
       "schema": { "$ref": "#/entities/ActivationCode" },
       "description": "Server-only PRO activation code hashes"
     },
+    "/adminSecurity/{docId}": {
+      "schema": { "$ref": "#/entities/AdminPanelConfig" },
+      "description": "Encrypted salted scrypt Admin Panel PIN configuration restricted exclusively to hapaypal2003@gmail.com"
+    },
     "/licenseCodes/{codeHash}": {
       "schema": { "$ref": "#/entities/LicenseCode" },
-      "description": "Server-only hashed PRO / Business license codes (no client reads or writes)"
+      "description": "Hashed PRO / Business license codes readable/creatable exclusively by exclusive system admin"
     },
     "/adminIssuedCodes/{codeHash}": {
       "schema": { "$ref": "#/entities/AdminIssuedCode" },

@@ -140,3 +140,186 @@ export async function fetchFirestoreDocumentWithToken(params: {
     return { exists: false };
   }
 }
+
+export function encodeFirestoreValue(value: unknown): FirestoreRestValue {
+  if (value === null || value === undefined) {
+    return { nullValue: null };
+  }
+  if (typeof value === 'boolean') {
+    return { booleanValue: value };
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return { nullValue: null };
+    if (Number.isInteger(value)) {
+      return { integerValue: String(value) };
+    }
+    return { doubleValue: value };
+  }
+  if (typeof value === 'string') {
+    return { stringValue: value };
+  }
+  if (value instanceof Date) {
+    return { timestampValue: value.toISOString() };
+  }
+  if (Array.isArray(value)) {
+    return {
+      arrayValue: {
+        values: value.map((item) => encodeFirestoreValue(item)),
+      },
+    };
+  }
+  if (typeof value === 'object') {
+    return {
+      mapValue: {
+        fields: encodeFirestoreDocumentFields(value as Record<string, unknown>),
+      },
+    };
+  }
+  return { stringValue: String(value) };
+}
+
+export function encodeFirestoreDocumentFields(
+  obj: Record<string, unknown>
+): Record<string, FirestoreRestValue> {
+  const fields: Record<string, FirestoreRestValue> = {};
+  for (const [key, val] of Object.entries(obj)) {
+    if (val === undefined) continue;
+    fields[key] = encodeFirestoreValue(val);
+  }
+  return fields;
+}
+
+export async function listFirestoreDocumentsWithToken(params: {
+  projectId: string;
+  databaseId?: string;
+  collectionPath: string;
+  idToken: string;
+  pageSize?: number;
+  fetchImpl?: typeof fetch;
+}): Promise<{
+  ok: boolean;
+  forbidden?: boolean;
+  status?: number;
+  docs: Array<{ id: string; data: Record<string, unknown> }>;
+}> {
+  const cleanCollection = params.collectionPath
+    .split('/')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => encodeURIComponent(s))
+    .join('/');
+
+  if (!cleanCollection || !params.projectId || !params.idToken) {
+    return { ok: false, docs: [] };
+  }
+
+  const dbId = params.databaseId?.trim() || '(default)';
+  const pageSize = Math.min(300, Math.max(1, params.pageSize || 100));
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+    params.projectId
+  )}/databases/${encodeURIComponent(dbId)}/documents/${cleanCollection}?pageSize=${pageSize}`;
+
+  const fetcher = params.fetchImpl || fetch;
+  try {
+    const response = await fetcher(url, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${params.idToken}`,
+      },
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      return { ok: false, forbidden: true, status: response.status, docs: [] };
+    }
+    if (!response.ok) {
+      return { ok: false, status: response.status, docs: [] };
+    }
+
+    const json = (await response.json()) as { documents?: FirestoreRestDocument[] };
+    const docs = Array.isArray(json.documents)
+      ? json.documents.map((docItem) => {
+          const parts = String(docItem.name || '').split('/');
+          const id = parts[parts.length - 1] || '';
+          return {
+            id,
+            data: decodeFirestoreDocumentFields(docItem.fields),
+          };
+        })
+      : [];
+    return { ok: true, docs };
+  } catch {
+    return { ok: false, docs: [] };
+  }
+}
+
+export async function commitFirestoreWriteWithToken(params: {
+  projectId: string;
+  databaseId?: string;
+  documentPath: string;
+  idToken: string;
+  data: Record<string, unknown>;
+  updateMaskFields?: string[];
+  serverTimestampFields?: string[];
+  currentDocumentExists?: boolean;
+  fetchImpl?: typeof fetch;
+}): Promise<{ ok: boolean; forbidden?: boolean; status?: number; errorText?: string }> {
+  const cleanSegments = params.documentPath
+    .split('/')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (cleanSegments.length < 2 || cleanSegments.length % 2 !== 0 || !params.projectId || !params.idToken) {
+    return { ok: false, errorText: 'INVALID_DOCUMENT_PATH' };
+  }
+
+  const dbId = params.databaseId?.trim() || '(default)';
+  const fullName = `projects/${params.projectId}/databases/${dbId}/documents/${cleanSegments.join('/')}`;
+  const commitUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+    params.projectId
+  )}/databases/${encodeURIComponent(dbId)}/documents:commit`;
+
+  const fields = encodeFirestoreDocumentFields(params.data);
+  const updateTransforms = (params.serverTimestampFields || []).map((fieldPath) => ({
+    fieldPath,
+    setToServerValue: 'REQUEST_TIME',
+  }));
+
+  const writeOp: Record<string, unknown> = {
+    update: {
+      name: fullName,
+      fields,
+    },
+  };
+  if (params.updateMaskFields && params.updateMaskFields.length > 0) {
+    writeOp.updateMask = { fieldPaths: params.updateMaskFields };
+  }
+  if (updateTransforms.length > 0) {
+    writeOp.updateTransforms = updateTransforms;
+  }
+  if (typeof params.currentDocumentExists === 'boolean') {
+    writeOp.currentDocument = { exists: params.currentDocumentExists };
+  }
+
+  const fetcher = params.fetchImpl || fetch;
+  try {
+    const response = await fetcher(commitUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.idToken}`,
+      },
+      body: JSON.stringify({ writes: [writeOp] }),
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      const errorText = await response.text().catch(() => '');
+      return { ok: false, forbidden: true, status: response.status, errorText };
+    }
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      return { ok: false, status: response.status, errorText };
+    }
+    return { ok: true, status: response.status };
+  } catch (err) {
+    return { ok: false, errorText: err instanceof Error ? err.message : String(err) };
+  }
+}

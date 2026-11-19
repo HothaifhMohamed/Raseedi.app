@@ -32,8 +32,85 @@ service cloud.firestore {
 
     function isAdmin() {
       return isVerifiedUser()
-        && ('admin' in request.auth.token)
-        && request.auth.token.admin == true;
+        && ('email' in request.auth.token)
+        && request.auth.token.email.lower() == 'hapaypal2003@gmail.com';
+    }
+
+    function isValidAdminPanelConfig(data) {
+      return data.keys().hasAll(['pinHash', 'updatedByUid', 'updatedByEmail', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['pinHash', 'updatedByUid', 'updatedByEmail', 'updatedAtMs', 'createdAt', 'updatedAt'])
+        && data.pinHash is string
+        && data.pinHash.size() >= 32
+        && data.pinHash.size() <= 256
+        && data.pinHash.matches('^scrypt\\$[0-9a-f]{32}\\$[0-9a-f]{128}$')
+        && data.updatedByUid is string
+        && data.updatedByUid == request.auth.uid
+        && isValidId(data.updatedByUid)
+        && data.updatedByEmail is string
+        && data.updatedByEmail.lower() == 'hapaypal2003@gmail.com'
+        && data.updatedAtMs is number
+        && data.updatedAtMs > 0
+        && (!('createdAt' in data) || data.createdAt is timestamp)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLicenseCode(data, codeHash) {
+      return data.keys().hasAll([
+        'codeHash',
+        'codePreview',
+        'plan',
+        'tier',
+        'planTier',
+        'cycle',
+        'status',
+        'used',
+        'createdByUid',
+        'createdByEmail',
+        'createdAtMs',
+        'createdAt'
+      ])
+        && data.keys().hasOnly([
+          'codeHash',
+          'codePreview',
+          'plan',
+          'tier',
+          'planTier',
+          'cycle',
+          'targetEmail',
+          'status',
+          'used',
+          'usedBy',
+          'usedOrgId',
+          'usedAt',
+          'createdByUid',
+          'createdByEmail',
+          'createdAtMs',
+          'createdAt'
+        ])
+        && data.codeHash is string
+        && data.codeHash == codeHash
+        && isValidId(data.codeHash)
+        && data.codePreview is string
+        && data.codePreview.size() > 0
+        && data.codePreview.size() <= 32
+        && data.plan in ['monthly', 'yearly', 'lifetime', 'business_monthly', 'business_yearly', 'code']
+        && data.tier in ['pro', 'business']
+        && data.planTier in ['personal_pro', 'business_pro']
+        && data.cycle in ['monthly', 'yearly', 'lifetime']
+        && (!('targetEmail' in data) || data.targetEmail == null || (data.targetEmail is string && data.targetEmail.size() <= 254))
+        && data.status == 'unused'
+        && data.used == false
+        && (!('usedBy' in data) || data.usedBy == null)
+        && (!('usedOrgId' in data) || data.usedOrgId == null)
+        && (!('usedAt' in data) || data.usedAt == null)
+        && data.createdByUid is string
+        && data.createdByUid == request.auth.uid
+        && isValidId(data.createdByUid)
+        && data.createdByEmail is string
+        && data.createdByEmail.lower() == 'hapaypal2003@gmail.com'
+        && data.createdAtMs is number
+        && data.createdAtMs > 0
+        && data.createdAt is timestamp;
     }
 
     // Single-read Organization RBAC & Subscription helpers
@@ -447,13 +524,30 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
-    // Server-only collections: never accessible from clients
+    // Encrypted admin panel PIN config accessible solely by exclusive system admin
+    match /adminSecurity/{docId} {
+      allow get: if isAdmin() && isValidId(docId) && docId == 'panelConfig';
+      allow list: if false;
+      allow create, update: if isAdmin()
+        && isValidId(docId)
+        && docId == 'panelConfig'
+        && isValidAdminPanelConfig(incoming())
+        && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // Server-only collections: never accessible from normal clients
     match /activationCodes/{codeHash} {
       allow read, write: if false;
     }
 
     match /licenseCodes/{codeHash} {
-      allow read, write: if false;
+      allow get, list: if isAdmin();
+      allow create: if isAdmin()
+        && isValidId(codeHash)
+        && isValidLicenseCode(incoming(), codeHash)
+        && incoming().createdAt == request.time;
+      allow update, delete: if false;
     }
 
     match /adminIssuedCodes/{codeHash} {

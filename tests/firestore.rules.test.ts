@@ -267,17 +267,24 @@ test('Expired Business subscription past 7-day grace puts org in read-only mode'
   );
 });
 
-test('Server-only collections lock out all client reads/writes and isAdmin requires verified custom claim', async () => {
+test('Server-only collections and isAdmin lock exclusively to verified hapaypal2003@gmail.com', async () => {
   const superAdminDb = testEnv
     .authenticatedContext('admin_uid_1', {
-      email: 'admin@raseedi.test',
+      email: 'Hapaypal2003@gmail.com',
+      email_verified: true,
+      admin: true,
+    })
+    .firestore();
+  const otherAdminClaimDb = testEnv
+    .authenticatedContext('other_admin_uid', {
+      email: 'other-admin@raseedi.test',
       email_verified: true,
       admin: true,
     })
     .firestore();
   const spoofedAdminDb = testEnv
     .authenticatedContext('spoof_admin_uid', {
-      email: 'admin@raseedi.test',
+      email: 'hapaypal2003@gmail.com',
       email_verified: false,
       admin: true,
     })
@@ -285,27 +292,71 @@ test('Server-only collections lock out all client reads/writes and isAdmin requi
   const userDb = authContext(OWNER_UID).firestore();
 
   const code = 'RSD-BIZ-BYTEST01-ABCDEFGH';
+  const validCodeHash = 'a'.repeat(64);
+  const validPinHash = `scrypt$${'0'.repeat(32)}$${'1'.repeat(128)}`;
 
-  // Client cannot create, update, read, or list licenseCodes, coupons, adminIssuedCodes, activationCodes, or joinRateLimits
+  // Normal users and other accounts (even with admin:true) are blocked from adminSecurity, licenseCodes, coupons, adminIssuedCodes, activationCodes, joinRateLimits
   await assertFails(getDocs(collection(userDb, 'coupons')));
   await assertFails(getDocs(collection(superAdminDb, 'coupons')));
-  await assertFails(getDoc(doc(userDb, 'licenseCodes', 'hash_1')));
-  await assertFails(setDoc(doc(superAdminDb, 'licenseCodes', 'hash_1'), { codeHash: 'hash_1' }));
+  await assertFails(getDoc(doc(userDb, 'licenseCodes', validCodeHash)));
+  await assertFails(getDocs(collection(otherAdminClaimDb, 'licenseCodes')));
+  await assertFails(getDoc(doc(otherAdminClaimDb, 'adminSecurity', 'panelConfig')));
+  await assertFails(
+    setDoc(doc(otherAdminClaimDb, 'adminSecurity', 'panelConfig'), {
+      pinHash: validPinHash,
+      updatedByUid: 'other_admin_uid',
+      updatedByEmail: 'other-admin@raseedi.test',
+      updatedAtMs: Date.now(),
+      updatedAt: serverTimestamp(),
+    })
+  );
   await assertFails(getDoc(doc(userDb, 'adminIssuedCodes', 'hash_1')));
   await assertFails(getDoc(doc(userDb, 'joinRateLimits', OWNER_UID)));
+
+  // Malformed licenseCodes / adminSecurity writes fail even for primary admin
+  await assertFails(setDoc(doc(superAdminDb, 'licenseCodes', 'hash_1'), { codeHash: 'hash_1' }));
   await assertFails(
-    setDoc(doc(superAdminDb, 'coupons', code), {
-      code,
+    setDoc(doc(superAdminDb, 'adminSecurity', 'panelConfig'), {
+      pinHash: 'plaintext-pin',
+      updatedByUid: 'admin_uid_1',
+      updatedByEmail: 'hapaypal2003@gmail.com',
+      updatedAtMs: Date.now(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+
+  // Exclusive primary admin can persist scrypt-hashed PIN config and create validated license codes
+  await assertSucceeds(
+    setDoc(doc(superAdminDb, 'adminSecurity', 'panelConfig'), {
+      pinHash: validPinHash,
+      updatedByUid: 'admin_uid_1',
+      updatedByEmail: 'hapaypal2003@gmail.com',
+      updatedAtMs: Date.now(),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(getDoc(doc(superAdminDb, 'adminSecurity', 'panelConfig')));
+  await assertSucceeds(
+    setDoc(doc(superAdminDb, 'licenseCodes', validCodeHash), {
+      codeHash: validCodeHash,
+      codePreview: 'RSD-BIZ-****-EFGH',
+      plan: 'code',
       tier: 'business',
       planTier: 'business_pro',
-      cycle: 'yearly',
+      cycle: 'lifetime',
       status: 'unused',
       used: false,
+      usedBy: null,
+      usedOrgId: null,
+      usedAt: null,
       createdByUid: 'admin_uid_1',
-      createdByEmail: 'admin@raseedi.test',
+      createdByEmail: 'hapaypal2003@gmail.com',
+      createdAtMs: Date.now(),
       createdAt: serverTimestamp(),
     })
   );
+  await assertFails(deleteDoc(doc(superAdminDb, 'licenseCodes', validCodeHash)));
 
   // User creates initial free profile
   await assertSucceeds(
@@ -338,8 +389,16 @@ test('Server-only collections lock out all client reads/writes and isAdmin requi
     })
   );
 
-  // Unverified admin token cannot read/update another user's profile
+  // Unverified admin token or non-primary admin claim cannot read/update another user's profile
   await assertFails(getDoc(doc(spoofedAdminDb, 'users', OWNER_UID)));
+  await assertFails(getDoc(doc(otherAdminClaimDb, 'users', OWNER_UID)));
+  await assertFails(
+    updateDoc(doc(otherAdminClaimDb, 'users', OWNER_UID), {
+      isPro: true,
+      proActive: true,
+      updatedAt: serverTimestamp(),
+    })
+  );
   await assertFails(
     updateDoc(doc(spoofedAdminDb, 'users', OWNER_UID), {
       isPro: true,
@@ -348,7 +407,7 @@ test('Server-only collections lock out all client reads/writes and isAdmin requi
     })
   );
 
-  // Verified admin with admin:true claim can manage user subscription fields
+  // Verified exclusive primary admin (hapaypal2003@gmail.com) can manage user subscription fields
   await assertSucceeds(
     updateDoc(doc(superAdminDb, 'users', OWNER_UID), {
       isPro: true,

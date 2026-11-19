@@ -28,24 +28,32 @@ import type {
   Wallet,
 } from './src/types';
 import {
+  commitFirestoreWriteWithToken,
   fetchFirestoreDocumentWithToken,
   isFirestorePermissionDeniedError,
+  listFirestoreDocumentsWithToken,
 } from './src/services/firestoreRest';
+import {
+  isPrimarySystemAdminEmail,
+  PRIMARY_SYSTEM_ADMIN_EMAIL,
+} from './src/services/licenseCodes';
 import {
   buildAdminCustomClaims,
   generateRandomLicenseCodeServer,
   getLocalTodayDateString,
+  hashAdminPinServer,
   hashLicenseCodeServer,
   isAllowedCorsOrigin,
   isServerAdminUser,
   normalizeScannedReceiptResult,
-  parseAdminEmailsEnv,
   resolveActivationPlanDetails,
   ServerActivationPlan,
   ServerSupportedBillingCycle,
   ServerSupportedPlanTier,
+  validateNewAdminPin,
   validateScanReceiptPayload,
   validateWebhookOrgPlanMatch,
+  verifyAdminPinHashServer,
   verifyTimingSafePasscode,
 } from './src/services/serverSecurity';
 
@@ -168,7 +176,179 @@ function respondCloudAdminUnavailable(res: Response, fallbackMessage?: string): 
 }
 
 function isAdminRequestUser(authUser?: DecodedIdToken): boolean {
-  return isServerAdminUser(authUser, process.env.ADMIN_EMAILS);
+  return isServerAdminUser(
+    authUser,
+    process.env.ADMIN_EMAILS || PRIMARY_SYSTEM_ADMIN_EMAIL
+  );
+}
+
+interface AdminPanelPinState {
+  pinHash: string | null;
+  source: 'firestore' | 'env' | 'unset';
+  updatedAtMs: number | null;
+}
+
+let cachedAdminPinState: { pinHash: string; updatedAtMs: number } | null = null;
+
+function getBootstrapEnvPasscode(): string {
+  return (process.env.ADMIN_PASSCODE || process.env.ADMIN_PANEL_PASSCODE || '').trim();
+}
+
+async function loadAdminPanelPinState(adminIdToken?: string): Promise<AdminPanelPinState> {
+  if (adminDbReady) {
+    try {
+      const snap = await adminDb.collection('adminSecurity').doc('panelConfig').get();
+      if (snap.exists) {
+        const data = snap.data() as Record<string, unknown> | undefined;
+        const pinHash = typeof data?.pinHash === 'string' ? data.pinHash.trim() : '';
+        const updatedAtMs =
+          typeof data?.updatedAtMs === 'number' && Number.isFinite(data.updatedAtMs)
+            ? data.updatedAtMs
+            : null;
+        if (pinHash) {
+          cachedAdminPinState = { pinHash, updatedAtMs: updatedAtMs || Date.now() };
+          return { pinHash, source: 'firestore', updatedAtMs };
+        }
+      }
+    } catch (err) {
+      if (isFirestorePermissionDeniedError(err)) {
+        adminDbReady = false;
+      }
+    }
+  }
+
+  if (!adminDbReady && adminIdToken) {
+    const restDoc = await fetchFirestoreDocumentWithToken({
+      projectId: firebaseConfig.projectId,
+      databaseId: firebaseConfig.firestoreDatabaseId,
+      documentPath: 'adminSecurity/panelConfig',
+      idToken: adminIdToken,
+    });
+    if (restDoc.exists && restDoc.data) {
+      const pinHash = typeof restDoc.data.pinHash === 'string' ? restDoc.data.pinHash.trim() : '';
+      const updatedAtMs =
+        typeof restDoc.data.updatedAtMs === 'number' && Number.isFinite(restDoc.data.updatedAtMs)
+          ? restDoc.data.updatedAtMs
+          : null;
+      if (pinHash) {
+        cachedAdminPinState = { pinHash, updatedAtMs: updatedAtMs || Date.now() };
+        return { pinHash, source: 'firestore', updatedAtMs };
+      }
+    }
+  }
+
+  if (cachedAdminPinState?.pinHash) {
+    return {
+      pinHash: cachedAdminPinState.pinHash,
+      source: 'firestore',
+      updatedAtMs: cachedAdminPinState.updatedAtMs,
+    };
+  }
+
+  const envPasscode = getBootstrapEnvPasscode();
+  if (envPasscode) {
+    return { pinHash: null, source: 'env', updatedAtMs: null };
+  }
+
+  return { pinHash: null, source: 'unset', updatedAtMs: null };
+}
+
+async function saveAdminPanelPinHash(params: {
+  uid: string;
+  email: string;
+  pinHash: string;
+  adminIdToken?: string;
+}): Promise<{ ok: boolean; updatedAtMs: number; persistedToCloud: boolean; error?: string }> {
+  const now = Date.now();
+  const cleanEmail = params.email.trim().toLowerCase();
+
+  if (adminDbReady) {
+    try {
+      const ref = adminDb.collection('adminSecurity').doc('panelConfig');
+      const existingSnap = await ref.get();
+      await ref.set(
+        {
+          pinHash: params.pinHash,
+          updatedByUid: params.uid,
+          updatedByEmail: cleanEmail,
+          updatedAtMs: now,
+          ...(existingSnap.exists ? {} : { createdAt: FieldValue.serverTimestamp() }),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+      cachedAdminPinState = { pinHash: params.pinHash, updatedAtMs: now };
+      return { ok: true, updatedAtMs: now, persistedToCloud: true };
+    } catch (err) {
+      if (isFirestorePermissionDeniedError(err)) {
+        adminDbReady = false;
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  if (params.adminIdToken) {
+    const existingRest = await fetchFirestoreDocumentWithToken({
+      projectId: firebaseConfig.projectId,
+      databaseId: firebaseConfig.firestoreDatabaseId,
+      documentPath: 'adminSecurity/panelConfig',
+      idToken: params.adminIdToken,
+    });
+    const isNew = !existingRest.exists;
+    const writeRes = await commitFirestoreWriteWithToken({
+      projectId: firebaseConfig.projectId,
+      databaseId: firebaseConfig.firestoreDatabaseId,
+      documentPath: 'adminSecurity/panelConfig',
+      idToken: params.adminIdToken,
+      data: {
+        pinHash: params.pinHash,
+        updatedByUid: params.uid,
+        updatedByEmail: cleanEmail,
+        updatedAtMs: now,
+      },
+      updateMaskFields: [
+        'pinHash',
+        'updatedByUid',
+        'updatedByEmail',
+        'updatedAtMs',
+        ...(isNew ? ['createdAt'] : []),
+        'updatedAt',
+      ],
+      serverTimestampFields: isNew ? ['createdAt', 'updatedAt'] : ['updatedAt'],
+    });
+    if (writeRes.ok) {
+      cachedAdminPinState = { pinHash: params.pinHash, updatedAtMs: now };
+      return { ok: true, updatedAtMs: now, persistedToCloud: true };
+    }
+    return {
+      ok: false,
+      updatedAtMs: now,
+      persistedToCloud: false,
+      error: writeRes.errorText || `HTTP_${writeRes.status || 500}`,
+    };
+  }
+
+  return {
+    ok: false,
+    updatedAtMs: now,
+    persistedToCloud: false,
+    error: 'MISSING_ADMIN_CREDENTIALS',
+  };
+}
+
+async function verifyActiveAdminPin(
+  suppliedPin: string,
+  pinState: AdminPanelPinState
+): Promise<boolean> {
+  if (pinState.pinHash) {
+    return verifyAdminPinHashServer(suppliedPin, pinState.pinHash);
+  }
+  const envPasscode = getBootstrapEnvPasscode();
+  if (envPasscode) {
+    return verifyTimingSafePasscode(suppliedPin, envPasscode);
+  }
+  return false;
 }
 
 async function ensureAdminCustomClaim(authUser?: DecodedIdToken): Promise<{
@@ -1111,15 +1291,97 @@ Return JSON matching the schema with:
     async (req: AuthenticatedRequest, res: Response) => {
       const authUser = req.authUser!;
       const isAdmin = isAdminRequestUser(authUser);
-      const claimSync = isAdmin
-        ? await ensureAdminCustomClaim(authUser)
-        : { synced: false, claimsUpdated: false };
+      if (!isAdmin) {
+        res.json({
+          ok: true,
+          isAdmin: false,
+          pinConfigured: false,
+          pinSource: 'unset',
+          pinUpdatedAtMs: null,
+          customClaimSynced: false,
+          claimsUpdated: false,
+        });
+        return;
+      }
+
+      const idToken = extractBearerToken(req);
+      const [claimSync, pinState] = await Promise.all([
+        ensureAdminCustomClaim(authUser),
+        loadAdminPanelPinState(idToken),
+      ]);
       res.json({
         ok: true,
-        isAdmin,
+        isAdmin: true,
+        pinConfigured: pinState.source !== 'unset',
+        pinSource: pinState.source,
+        pinUpdatedAtMs: pinState.updatedAtMs,
         customClaimSynced: claimSync.synced,
         claimsUpdated: claimSync.claimsUpdated,
       });
+    }
+  );
+
+  app.post(
+    '/api/admin/pin/setup',
+    redeemIpLimiter,
+    requireFirebaseAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const authUser = req.authUser!;
+      if (!isAdminRequestUser(authUser)) {
+        res.status(403).json({
+          error: 'FORBIDDEN',
+          message: 'فقط مالك النظام المخول يمكنه ضبط الرمز السري للإدارة.',
+        });
+        return;
+      }
+
+      const idToken = extractBearerToken(req);
+      const pinState = await loadAdminPanelPinState(idToken);
+      if (pinState.source !== 'unset') {
+        res.status(409).json({
+          error: 'PIN_ALREADY_CONFIGURED',
+          message: 'تم تعيين الرمز السري مسبقاً. افتح لوحة الإدارة لتغييره من الإعدادات.',
+        });
+        return;
+      }
+
+      const validation = validateNewAdminPin(req.body?.newPin);
+      if (!validation.ok) {
+        res.status(400).json({ error: validation.error, message: validation.message });
+        return;
+      }
+
+      try {
+        const pinHash = hashAdminPinServer(validation.pin);
+        const saved = await saveAdminPanelPinHash({
+          uid: authUser.uid,
+          email: String(authUser.email || PRIMARY_SYSTEM_ADMIN_EMAIL),
+          pinHash,
+          adminIdToken: idToken,
+        });
+        if (!saved.ok) {
+          res.status(500).json({
+            error: 'PIN_SAVE_FAILED',
+            message: 'تعذر حفظ الرمز السري المشفر في السحابة. حاول مرة أخرى.',
+          });
+          return;
+        }
+        const claimSync = await ensureAdminCustomClaim(authUser);
+        const session = issueAdminSessionToken(authUser.uid);
+        res.json({
+          ok: true,
+          adminSessionToken: session.token,
+          expiresAt: session.expiresAt,
+          pinConfigured: true,
+          pinSource: 'firestore',
+          pinUpdatedAtMs: saved.updatedAtMs,
+          customClaimSynced: claimSync.synced,
+          claimsUpdated: claimSync.claimsUpdated,
+        });
+      } catch (err) {
+        console.error('Admin initial PIN setup error:', err);
+        res.status(500).json({ error: 'PIN_SETUP_FAILED', message: 'تعذر إعداد الرمز السري حالياً.' });
+      }
     }
   );
 
@@ -1130,25 +1392,26 @@ Return JSON matching the schema with:
     async (req: AuthenticatedRequest, res: Response) => {
       const authUser = req.authUser!;
       if (!isAdminRequestUser(authUser)) {
-        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات المدير مطلوبة.' });
+        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات مالك النظام مطلوبة.' });
         return;
       }
 
-      const configuredPasscode =
-        process.env.ADMIN_PASSCODE || process.env.ADMIN_PANEL_PASSCODE || '';
-      if (!configuredPasscode.trim()) {
-        res.status(503).json({
-          error: 'ADMIN_PASSCODE_NOT_CONFIGURED',
-          message: 'رمز مرور لوحة الإدارة غير مضبوط على الخادم (ADMIN_PASSCODE).',
+      const idToken = extractBearerToken(req);
+      const pinState = await loadAdminPanelPinState(idToken);
+      if (pinState.source === 'unset') {
+        res.status(412).json({
+          error: 'ADMIN_PIN_NOT_SET',
+          message: 'لم يتم تعيين الرمز السري للوحة الإدارة بعد. قم بتعيين رمز جديد الآن.',
         });
         return;
       }
 
       const supplied = typeof req.body?.passcode === 'string' ? req.body.passcode : '';
-      if (!verifyTimingSafePasscode(supplied, configuredPasscode)) {
+      const valid = await verifyActiveAdminPin(supplied, pinState);
+      if (!valid) {
         res.status(403).json({
           error: 'INVALID_PASSCODE',
-          message: 'كلمة مرور الإدارة غير صحيحة.',
+          message: 'الرمز السري للوحة الإدارة غير صحيح.',
         });
         return;
       }
@@ -1159,20 +1422,22 @@ Return JSON matching the schema with:
         ok: true,
         adminSessionToken: session.token,
         expiresAt: session.expiresAt,
+        pinSource: pinState.source,
+        pinUpdatedAtMs: pinState.updatedAtMs,
         customClaimSynced: claimSync.synced,
         claimsUpdated: claimSync.claimsUpdated,
       });
     }
   );
 
-  app.get(
-    '/api/admin/license-codes',
+  app.post(
+    '/api/admin/pin/change',
     redeemIpLimiter,
     requireFirebaseAuth,
     async (req: AuthenticatedRequest, res: Response) => {
       const authUser = req.authUser!;
       if (!isAdminRequestUser(authUser)) {
-        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات المدير مطلوبة.' });
+        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات مالك النظام مطلوبة.' });
         return;
       }
       if (!verifyAdminSessionToken(req.headers['x-admin-session'], authUser.uid)) {
@@ -1182,49 +1447,149 @@ Return JSON matching the schema with:
         });
         return;
       }
-      if (!adminDbReady) {
-        respondCloudAdminUnavailable(res);
+
+      const idToken = extractBearerToken(req);
+      const currentPin = typeof req.body?.currentPin === 'string' ? req.body.currentPin : '';
+      const pinState = await loadAdminPanelPinState(idToken);
+      if (pinState.source !== 'unset') {
+        const currentOk = await verifyActiveAdminPin(currentPin, pinState);
+        if (!currentOk) {
+          res.status(403).json({
+            error: 'INVALID_CURRENT_PIN',
+            message: 'الرمز السري الحالي غير صحيح.',
+          });
+          return;
+        }
+      }
+
+      const validation = validateNewAdminPin(req.body?.newPin);
+      if (!validation.ok) {
+        res.status(400).json({ error: validation.error, message: validation.message });
+        return;
+      }
+      if (currentPin.trim() && validation.pin === currentPin.trim()) {
+        res.status(400).json({
+          error: 'SAME_PIN_NOT_ALLOWED',
+          message: 'يجب أن يختلف الرمز السري الجديد عن الرمز الحالي.',
+        });
         return;
       }
 
       try {
-        const snap = await adminDb
-          .collection('licenseCodes')
-          .orderBy('createdAtMs', 'desc')
-          .limit(50)
-          .get();
-        const codes = snap.docs.map((d) => {
-          const raw = d.data() as Record<string, unknown>;
-          const isUsed = Boolean(raw.used === true || raw.status === 'used' || raw.usedBy);
-          return {
-            codeHash: String(raw.codeHash || d.id),
-            codePreview: String(raw.codePreview || 'RSD-****'),
-            tier: raw.tier === 'business' ? 'business' : 'pro',
-            planTier: raw.planTier === 'business_pro' ? 'business_pro' : 'personal_pro',
-            cycle:
-              raw.cycle === 'monthly' || raw.cycle === 'yearly' || raw.cycle === 'lifetime'
-                ? raw.cycle
-                : 'yearly',
-            status: isUsed ? 'used' : 'unused',
-            used: isUsed,
-            usedBy: typeof raw.usedBy === 'string' ? raw.usedBy : null,
-            usedOrgId: typeof raw.usedOrgId === 'string' ? raw.usedOrgId : null,
-            usedAt: typeof raw.usedAt === 'number' ? raw.usedAt : null,
-            createdByUid: String(raw.createdByUid || ''),
-            createdByEmail: String(raw.createdByEmail || ''),
-            createdAtMs: typeof raw.createdAtMs === 'number' ? raw.createdAtMs : Date.now(),
-          };
+        const pinHash = hashAdminPinServer(validation.pin);
+        const saved = await saveAdminPanelPinHash({
+          uid: authUser.uid,
+          email: String(authUser.email || PRIMARY_SYSTEM_ADMIN_EMAIL),
+          pinHash,
+          adminIdToken: idToken,
         });
-        res.json({ ok: true, codes });
-      } catch (err) {
-        if (isFirestorePermissionDeniedError(err)) {
-          adminDbReady = false;
-          respondCloudAdminUnavailable(res);
+        if (!saved.ok) {
+          res.status(500).json({
+            error: 'PIN_SAVE_FAILED',
+            message: 'تعذر حفظ الرمز السري الجديد في السحابة. حاول مرة أخرى.',
+          });
           return;
         }
-        console.error('Admin list license codes error:', err);
-        res.status(500).json({ error: 'LIST_LICENSE_CODES_FAILED' });
+
+        const refreshedSession = issueAdminSessionToken(authUser.uid);
+        res.json({
+          ok: true,
+          adminSessionToken: refreshedSession.token,
+          expiresAt: refreshedSession.expiresAt,
+          pinSource: 'firestore',
+          updatedAtMs: saved.updatedAtMs,
+        });
+      } catch (err) {
+        console.error('Admin PIN change error:', err);
+        res.status(500).json({ error: 'PIN_CHANGE_FAILED', message: 'تعذر تحديث الرمز السري حالياً.' });
       }
+    }
+  );
+
+  const mapAdminLicenseCodeRow = (docId: string, raw: Record<string, unknown>) => {
+    const isUsed = Boolean(raw.used === true || raw.status === 'used' || raw.usedBy);
+    return {
+      codeHash: String(raw.codeHash || docId),
+      codePreview: String(raw.codePreview || 'RSD-****'),
+      tier: raw.tier === 'business' ? ('business' as const) : ('pro' as const),
+      planTier: raw.planTier === 'business_pro' ? ('business_pro' as const) : ('personal_pro' as const),
+      cycle:
+        raw.cycle === 'monthly' || raw.cycle === 'yearly' || raw.cycle === 'lifetime'
+          ? (raw.cycle as 'monthly' | 'yearly' | 'lifetime')
+          : ('yearly' as const),
+      status: isUsed ? ('used' as const) : ('unused' as const),
+      used: isUsed,
+      usedBy: typeof raw.usedBy === 'string' ? raw.usedBy : null,
+      usedOrgId: typeof raw.usedOrgId === 'string' ? raw.usedOrgId : null,
+      usedAt: typeof raw.usedAt === 'number' ? raw.usedAt : null,
+      createdByUid: String(raw.createdByUid || ''),
+      createdByEmail: String(raw.createdByEmail || ''),
+      createdAtMs: typeof raw.createdAtMs === 'number' ? raw.createdAtMs : Date.now(),
+    };
+  };
+
+  app.get(
+    '/api/admin/license-codes',
+    redeemIpLimiter,
+    requireFirebaseAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const authUser = req.authUser!;
+      if (!isAdminRequestUser(authUser)) {
+        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات مالك النظام مطلوبة.' });
+        return;
+      }
+      if (!verifyAdminSessionToken(req.headers['x-admin-session'], authUser.uid)) {
+        res.status(403).json({
+          error: 'ADMIN_SESSION_REQUIRED',
+          message: 'يتطلب التحقق من رمز مرور الإدارة أولاً.',
+        });
+        return;
+      }
+
+      if (adminDbReady) {
+        try {
+          const snap = await adminDb
+            .collection('licenseCodes')
+            .orderBy('createdAtMs', 'desc')
+            .limit(50)
+            .get();
+          const codes = snap.docs.map((d) =>
+            mapAdminLicenseCodeRow(d.id, d.data() as Record<string, unknown>)
+          );
+          res.json({ ok: true, codes });
+          return;
+        } catch (err) {
+          if (isFirestorePermissionDeniedError(err)) {
+            adminDbReady = false;
+          } else {
+            console.error('Admin list license codes error:', err);
+            res.status(500).json({ error: 'LIST_LICENSE_CODES_FAILED' });
+            return;
+          }
+        }
+      }
+
+      const idToken = extractBearerToken(req);
+      const restRes = await listFirestoreDocumentsWithToken({
+        projectId: firebaseConfig.projectId,
+        databaseId: firebaseConfig.firestoreDatabaseId,
+        collectionPath: 'licenseCodes',
+        idToken,
+        pageSize: 100,
+      });
+      if (!restRes.ok) {
+        if (restRes.forbidden) {
+          res.status(403).json({ error: 'FORBIDDEN', message: 'تم رفض قراءة الأكواد من Firestore.' });
+          return;
+        }
+        respondCloudAdminUnavailable(res);
+        return;
+      }
+      const codes = restRes.docs
+        .map((d) => mapAdminLicenseCodeRow(d.id, d.data))
+        .sort((a, b) => b.createdAtMs - a.createdAtMs)
+        .slice(0, 50);
+      res.json({ ok: true, codes });
     }
   );
 
@@ -1235,7 +1600,7 @@ Return JSON matching the schema with:
     async (req: AuthenticatedRequest, res: Response) => {
       const authUser = req.authUser!;
       if (!isAdminRequestUser(authUser)) {
-        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات المدير مطلوبة.' });
+        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات مالك النظام مطلوبة.' });
         return;
       }
       if (!verifyAdminSessionToken(req.headers['x-admin-session'], authUser.uid)) {
@@ -1243,10 +1608,6 @@ Return JSON matching the schema with:
           error: 'ADMIN_SESSION_REQUIRED',
           message: 'يتطلب التحقق من رمز مرور الإدارة أولاً.',
         });
-        return;
-      }
-      if (!adminDbReady) {
-        respondCloudAdminUnavailable(res);
         return;
       }
 
@@ -1260,65 +1621,115 @@ Return JSON matching the schema with:
           ? req.body.targetEmail.trim().toLowerCase().slice(0, 254)
           : null;
 
-      try {
-        const generated = generateRandomLicenseCodeServer({
-          tier: rawTier,
-          cycle: rawCycle,
-        });
-        const now = Date.now();
-        const createdByEmail = String(authUser.email || '').trim().toLowerCase().slice(0, 254);
+      const generated = generateRandomLicenseCodeServer({
+        tier: rawTier,
+        cycle: rawCycle,
+      });
+      const now = Date.now();
+      const createdByEmail = String(authUser.email || PRIMARY_SYSTEM_ADMIN_EMAIL)
+        .trim()
+        .toLowerCase()
+        .slice(0, 254);
 
-        const docData = {
-          codeHash: generated.codeHash,
-          codePreview: generated.codePreview,
-          plan: generated.proPlan,
-          tier: generated.tier,
-          planTier: generated.planTier,
-          cycle: generated.cycle,
-          targetEmail,
-          status: 'unused' as const,
-          used: false,
-          usedBy: null,
-          usedOrgId: null,
-          usedAt: null,
-          createdByUid: authUser.uid,
-          createdByEmail,
-          createdAtMs: now,
-          createdAt: FieldValue.serverTimestamp(),
-        };
+      const baseDocData = {
+        codeHash: generated.codeHash,
+        codePreview: generated.codePreview,
+        plan: generated.proPlan,
+        tier: generated.tier,
+        planTier: generated.planTier,
+        cycle: generated.cycle,
+        targetEmail,
+        status: 'unused' as const,
+        used: false,
+        usedBy: null,
+        usedOrgId: null,
+        usedAt: null,
+        createdByUid: authUser.uid,
+        createdByEmail,
+        createdAtMs: now,
+      };
 
-        await adminDb.collection('licenseCodes').doc(generated.codeHash).set(docData);
+      const responseRecord = {
+        codeHash: generated.codeHash,
+        codePreview: generated.codePreview,
+        tier: generated.tier,
+        planTier: generated.planTier,
+        cycle: generated.cycle,
+        status: 'unused' as const,
+        used: false,
+        usedBy: null,
+        usedOrgId: null,
+        usedAt: null,
+        createdByUid: authUser.uid,
+        createdByEmail,
+        createdAtMs: now,
+      };
 
-        res.json({
-          ok: true,
-          code: generated.code,
-          record: {
-            codeHash: generated.codeHash,
-            codePreview: generated.codePreview,
-            tier: generated.tier,
-            planTier: generated.planTier,
-            cycle: generated.cycle,
-            status: 'unused' as const,
-            used: false,
-            usedBy: null,
-            usedOrgId: null,
-            usedAt: null,
-            createdByUid: authUser.uid,
-            createdByEmail,
-            createdAtMs: now,
-          },
-        });
-      } catch (err) {
-        if (isFirestorePermissionDeniedError(err)) {
-          adminDbReady = false;
-          respondCloudAdminUnavailable(res);
+      if (adminDbReady) {
+        try {
+          await adminDb.collection('licenseCodes').doc(generated.codeHash).set({
+            ...baseDocData,
+            createdAt: FieldValue.serverTimestamp(),
+          });
+          res.json({ ok: true, code: generated.code, record: responseRecord });
+          return;
+        } catch (err) {
+          if (isFirestorePermissionDeniedError(err)) {
+            adminDbReady = false;
+          } else {
+            console.error('Admin create license code error:', err);
+            res.status(500).json({ error: 'CREATE_LICENSE_CODE_FAILED' });
+            return;
+          }
+        }
+      }
+
+      const idToken = extractBearerToken(req);
+      const restWrite = await commitFirestoreWriteWithToken({
+        projectId: firebaseConfig.projectId,
+        databaseId: firebaseConfig.firestoreDatabaseId,
+        documentPath: `licenseCodes/${generated.codeHash}`,
+        idToken,
+        data: baseDocData,
+        serverTimestampFields: ['createdAt'],
+        currentDocumentExists: false,
+      });
+
+      if (!restWrite.ok) {
+        if (restWrite.forbidden) {
+          res.status(403).json({
+            error: 'FORBIDDEN',
+            message: 'تم رفض حفظ الكود في Firestore. تأكد من الصلاحيات.',
+          });
           return;
         }
-        console.error('Admin create license code error:', err);
-        res.status(500).json({ error: 'CREATE_LICENSE_CODE_FAILED' });
+        respondCloudAdminUnavailable(res);
+        return;
       }
+
+      res.json({ ok: true, code: generated.code, record: responseRecord });
     }
   );
+
+  const mapAdminUserRow = (docId: string, data: Record<string, unknown>) => {
+    const ent = resolveUserEntitlement(data);
+    const rowUid = String(data.uid || docId);
+    const rowEmail = String(data.email || '');
+    return {
+      uid: rowUid,
+      email: rowEmail,
+      displayName: typeof data.displayName === 'string' ? data.displayName : undefined,
+      isAdmin: isPrimarySystemAdminEmail(rowEmail),
+      isPro: ent.isPro,
+      proActive: ent.isPro,
+      planTier: ent.planTier,
+      billingCycle: ent.billingCycle,
+      startedAt: typeof data.startedAt === 'number' ? data.startedAt : null,
+      expiresAt: ent.expiresAt,
+      proExpiresAt: ent.expiresAt,
+      lastSyncedAt: typeof data.lastSyncedAt === 'number' ? data.lastSyncedAt : undefined,
+    };
+  };
 
   app.get(
     '/api/admin/users',
@@ -1327,7 +1738,7 @@ Return JSON matching the schema with:
     async (req: AuthenticatedRequest, res: Response) => {
       const authUser = req.authUser!;
       if (!isAdminRequestUser(authUser)) {
-        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات المدير مطلوبة.' });
+        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات مالك النظام مطلوبة.' });
         return;
       }
       if (!verifyAdminSessionToken(req.headers['x-admin-session'], authUser.uid)) {
@@ -1338,37 +1749,7 @@ Return JSON matching the schema with:
         return;
       }
 
-      if (!adminDbReady) {
-        respondCloudAdminUnavailable(res);
-        return;
-      }
-
-      try {
-        const allowlistedAdmins = parseAdminEmailsEnv(process.env.ADMIN_EMAILS);
-        const snap = await adminDb.collection('users').limit(200).get();
-        const users = snap.docs.map((d) => {
-          const data = d.data() as Record<string, unknown>;
-          const ent = resolveUserEntitlement(data);
-          const rowUid = String(data.uid || d.id);
-          const rowEmail = String(data.email || '');
-          const isRowAdmin =
-            rowUid === authUser.uid ||
-            (rowEmail.trim() ? allowlistedAdmins.has(rowEmail.trim().toLowerCase()) : false);
-          return {
-            uid: rowUid,
-            email: rowEmail,
-            displayName: typeof data.displayName === 'string' ? data.displayName : undefined,
-            isAdmin: isRowAdmin,
-            isPro: ent.isPro,
-            proActive: ent.isPro,
-            planTier: ent.planTier,
-            billingCycle: ent.billingCycle,
-            startedAt: typeof data.startedAt === 'number' ? data.startedAt : null,
-            expiresAt: ent.expiresAt,
-            proExpiresAt: ent.expiresAt,
-            lastSyncedAt: typeof data.lastSyncedAt === 'number' ? data.lastSyncedAt : undefined,
-          };
-        });
+      const sortUsers = (users: ReturnType<typeof mapAdminUserRow>[]) =>
         users.sort((a, b) => {
           if (a.isPro !== b.isPro) return a.isPro ? -1 : 1;
           const aTime = a.lastSyncedAt || a.startedAt || 0;
@@ -1376,16 +1757,44 @@ Return JSON matching the schema with:
           if (aTime !== bTime) return bTime - aTime;
           return (a.email || '').localeCompare(b.email || '');
         });
-        res.json({ ok: true, users });
-      } catch (err) {
-        if (isFirestorePermissionDeniedError(err)) {
-          adminDbReady = false;
-          respondCloudAdminUnavailable(res);
+
+      if (adminDbReady) {
+        try {
+          const snap = await adminDb.collection('users').limit(200).get();
+          const users = sortUsers(
+            snap.docs.map((d) => mapAdminUserRow(d.id, d.data() as Record<string, unknown>))
+          );
+          res.json({ ok: true, users });
+          return;
+        } catch (err) {
+          if (isFirestorePermissionDeniedError(err)) {
+            adminDbReady = false;
+          } else {
+            console.error('Admin list users error:', err);
+            res.status(500).json({ error: 'ADMIN_USERS_LIST_FAILED' });
+            return;
+          }
+        }
+      }
+
+      const idToken = extractBearerToken(req);
+      const restUsers = await listFirestoreDocumentsWithToken({
+        projectId: firebaseConfig.projectId,
+        databaseId: firebaseConfig.firestoreDatabaseId,
+        collectionPath: 'users',
+        idToken,
+        pageSize: 200,
+      });
+      if (!restUsers.ok) {
+        if (restUsers.forbidden) {
+          res.status(403).json({ error: 'FORBIDDEN', message: 'تم رفض قراءة قائمة الحسابات من Firestore.' });
           return;
         }
-        console.error('Admin list users error:', err);
-        res.status(500).json({ error: 'ADMIN_USERS_LIST_FAILED' });
+        respondCloudAdminUnavailable(res);
+        return;
       }
+      const users = sortUsers(restUsers.docs.map((d) => mapAdminUserRow(d.id, d.data)));
+      res.json({ ok: true, users });
     }
   );
 
@@ -1396,7 +1805,7 @@ Return JSON matching the schema with:
     async (req: AuthenticatedRequest, res: Response) => {
       const authUser = req.authUser!;
       if (!isAdminRequestUser(authUser)) {
-        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات المدير مطلوبة.' });
+        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات مالك النظام مطلوبة.' });
         return;
       }
       if (!verifyAdminSessionToken(req.headers['x-admin-session'], authUser.uid)) {
@@ -1410,11 +1819,6 @@ Return JSON matching the schema with:
       const targetUid = typeof req.params?.uid === 'string' ? req.params.uid.trim() : '';
       if (!targetUid || !VALID_ORG_ID_REGEX.test(targetUid)) {
         res.status(400).json({ error: 'INVALID_UID' });
-        return;
-      }
-
-      if (!adminDbReady) {
-        respondCloudAdminUnavailable(res);
         return;
       }
 
@@ -1467,29 +1871,63 @@ Return JSON matching the schema with:
         };
       }
 
-      try {
-        await adminDb
-          .collection('users')
-          .doc(targetUid)
-          .update({
+      if (adminDbReady) {
+        try {
+          await adminDb
+            .collection('users')
+            .doc(targetUid)
+            .update({
+              ...jsonFields,
+              updatedAt: FieldValue.serverTimestamp(),
+            });
+          res.json({
+            ok: true,
+            uid: targetUid,
             ...jsonFields,
-            updatedAt: FieldValue.serverTimestamp(),
+            updatedAt: new Date(now).toISOString(),
           });
-        res.json({
-          ok: true,
-          uid: targetUid,
-          ...jsonFields,
-          updatedAt: new Date(now).toISOString(),
-        });
-      } catch (err) {
-        if (isFirestorePermissionDeniedError(err)) {
-          adminDbReady = false;
-          respondCloudAdminUnavailable(res);
+          return;
+        } catch (err) {
+          if (isFirestorePermissionDeniedError(err)) {
+            adminDbReady = false;
+          } else {
+            console.error('Admin update subscription error:', err);
+            res.status(500).json({ error: 'ADMIN_UPDATE_SUBSCRIPTION_FAILED' });
+            return;
+          }
+        }
+      }
+
+      const idToken = extractBearerToken(req);
+      const restUpdate = await commitFirestoreWriteWithToken({
+        projectId: firebaseConfig.projectId,
+        databaseId: firebaseConfig.firestoreDatabaseId,
+        documentPath: `users/${targetUid}`,
+        idToken,
+        data: jsonFields,
+        updateMaskFields: [...Object.keys(jsonFields), 'updatedAt'],
+        serverTimestampFields: ['updatedAt'],
+        currentDocumentExists: true,
+      });
+
+      if (!restUpdate.ok) {
+        if (restUpdate.forbidden) {
+          res.status(403).json({
+            error: 'FORBIDDEN',
+            message: 'تم رفض تحديث اشتراك المستخدم من Firestore.',
+          });
           return;
         }
-        console.error('Admin update subscription error:', err);
-        res.status(500).json({ error: 'ADMIN_UPDATE_SUBSCRIPTION_FAILED' });
+        respondCloudAdminUnavailable(res);
+        return;
       }
+
+      res.json({
+        ok: true,
+        uid: targetUid,
+        ...jsonFields,
+        updatedAt: new Date(now).toISOString(),
+      });
     }
   );
 

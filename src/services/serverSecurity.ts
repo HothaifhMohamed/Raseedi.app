@@ -1,6 +1,10 @@
 import crypto from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { DAY_MS } from './entitlements';
+import {
+  isPrimarySystemAdminEmail,
+  PRIMARY_SYSTEM_ADMIN_EMAIL,
+} from './licenseCodes';
 
 const ALLOWED_SCAN_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MAX_SCAN_DECODED_BYTES = 2_200_000; // ~2.2MB decoded image
@@ -320,6 +324,14 @@ export function parseAdminEmailsEnv(raw?: string): Set<string> {
   return out;
 }
 
+export function getEffectiveAdminAllowlist(raw?: string): Set<string> {
+  const parsed = parseAdminEmailsEnv(raw);
+  if (parsed.size === 0 || parsed.has(PRIMARY_SYSTEM_ADMIN_EMAIL)) {
+    return new Set([PRIMARY_SYSTEM_ADMIN_EMAIL]);
+  }
+  return new Set([PRIMARY_SYSTEM_ADMIN_EMAIL]);
+}
+
 export function isServerAdminUser(
   decoded?: {
     email?: unknown;
@@ -329,11 +341,65 @@ export function isServerAdminUser(
   adminEmailsEnv?: string
 ): boolean {
   if (!decoded || decoded.email_verified !== true) return false;
-  if (decoded.admin === true) return true;
   const email = typeof decoded.email === 'string' ? decoded.email.trim().toLowerCase() : '';
-  if (!email) return false;
-  const allowlist = parseAdminEmailsEnv(adminEmailsEnv);
-  return allowlist.has(email);
+  if (!email || !isPrimarySystemAdminEmail(email)) return false;
+
+  const allowlist = getEffectiveAdminAllowlist(adminEmailsEnv);
+  return allowlist.has(email) || decoded.admin === true;
+}
+
+export function validateNewAdminPin(pin: unknown):
+  | { ok: true; pin: string }
+  | { ok: false; error: string; message: string } {
+  if (typeof pin !== 'string') {
+    return {
+      ok: false,
+      error: 'INVALID_PIN_FORMAT',
+      message: 'الرمز السري يجب أن يكون نصاً مكوناً من 4 إلى 32 حرفاً أو رقماً.',
+    };
+  }
+  const trimmed = pin.trim();
+  if (trimmed.length < 4 || trimmed.length > 32) {
+    return {
+      ok: false,
+      error: 'INVALID_PIN_LENGTH',
+      message: 'يجب أن يتكون الرمز السري من 4 إلى 32 حرفاً أو رقماً.',
+    };
+  }
+  return { ok: true, pin: trimmed };
+}
+
+export function hashAdminPinServer(pin: string): string {
+  const cleanPin = pin.trim();
+  if (cleanPin.length < 4 || cleanPin.length > 32) {
+    throw new Error('INVALID_PIN_LENGTH');
+  }
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(cleanPin, salt, 64).toString('hex');
+  return `scrypt$${salt}$${derived}`;
+}
+
+export function verifyAdminPinHashServer(pin: string, storedHash?: string | null): boolean {
+  if (typeof pin !== 'string' || typeof storedHash !== 'string') return false;
+  const cleanPin = pin.trim();
+  const cleanHash = storedHash.trim();
+  if (!cleanPin || !cleanHash) return false;
+
+  const parts = cleanHash.split('$');
+  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+  const [, salt, expectedHex] = parts;
+  if (!/^[0-9a-f]{32}$/i.test(salt) || !/^[0-9a-f]{128}$/i.test(expectedHex)) {
+    return false;
+  }
+
+  try {
+    const derived = crypto.scryptSync(cleanPin, salt, 64);
+    const expected = Buffer.from(expectedHex, 'hex');
+    if (derived.length !== expected.length) return false;
+    return crypto.timingSafeEqual(derived, expected);
+  } catch {
+    return false;
+  }
 }
 
 export function buildAdminCustomClaims(

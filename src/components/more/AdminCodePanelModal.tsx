@@ -16,24 +16,33 @@ import {
   Loader2,
   CheckCircle2,
   AlertTriangle,
+  Settings,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { AdminCouponCycle, AdminCouponTier } from '../../services/licenseCodes';
+import {
+  AdminCouponCycle,
+  AdminCouponTier,
+  isPrimarySystemAdminEmail,
+  PRIMARY_SYSTEM_ADMIN_EMAIL,
+} from '../../services/licenseCodes';
 import {
   adminCancelUserSubscription,
   adminUpdateUserSubscription,
+  changeAdminPinOnServer,
   CloudUserProfile,
   createLicenseCodeOnServer,
+  fetchAdminStatusFromServer,
   fetchAllUsersForAdmin,
   fetchLicenseCodesFromServer,
   ServerApiError,
   ServerLicenseCodeRecord,
+  setupAdminPinOnServer,
   verifyAdminPasscodeOnServer,
 } from '../../services/firebase';
 import { SUBSCRIPTION_DAY_MS } from '../../services/subscriptionHelpers';
 import type { PlanTier } from '../../types';
 
-type AdminTab = 'users' | 'coupons';
+type AdminTab = 'users' | 'coupons' | 'security';
 type AdminEditCycle = 'monthly' | 'yearly' | 'lifetime' | 'free';
 
 function parseReadableError(err: unknown, fallback: string): string {
@@ -58,11 +67,26 @@ export const AdminCodePanelModal: React.FC = () => {
   } = useApp();
 
   const [passcodeInput, setPasscodeInput] = useState('');
+  const [setupConfirmPin, setSetupConfirmPin] = useState('');
   const [passcodeError, setPasscodeError] = useState<string | null>(null);
   const [isVerifyingPasscode, setIsVerifyingPasscode] = useState(false);
+  const [isCheckingPinStatus, setIsCheckingPinStatus] = useState(false);
+  const [pinConfigured, setPinConfigured] = useState<boolean>(true);
+  const [pinSource, setPinSource] = useState<'firestore' | 'env' | 'unset'>('unset');
+  const [pinUpdatedAtMs, setPinUpdatedAtMs] = useState<number | null>(null);
   const [adminSessionToken, setAdminSessionToken] = useState<string | null>(null);
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [activeTab, setActiveTab] = useState<AdminTab>('users');
+
+  // Change PIN State (Security Tab)
+  const [currentPinInput, setCurrentPinInput] = useState('');
+  const [newPinInput, setNewPinInput] = useState('');
+  const [confirmNewPinInput, setConfirmNewPinInput] = useState('');
+  const [isChangingPin, setIsChangingPin] = useState(false);
+  const [pinChangeFeedback, setPinChangeFeedback] = useState<{
+    type: 'ok' | 'err';
+    text: string;
+  } | null>(null);
 
   // Users & Subscriptions Management State
   const [usersList, setUsersList] = useState<CloudUserProfile[]>([]);
@@ -93,7 +117,7 @@ export const AdminCodePanelModal: React.FC = () => {
   const [isLoadingCoupons, setIsLoadingCoupons] = useState(false);
   const [copiedAdminCode, setCopiedAdminCode] = useState(false);
 
-  const isAuthorizedAdmin = Boolean(isAdminUser);
+  const isAuthorizedAdmin = Boolean(isAdminUser && isPrimarySystemAdminEmail(user?.email));
 
   // Reset passcode gate, ephemeral session token & transient editor state every time modal closes
   useEffect(() => {
@@ -101,8 +125,15 @@ export const AdminCodePanelModal: React.FC = () => {
       setIsUnlocked(false);
       setAdminSessionToken(null);
       setPasscodeInput('');
+      setSetupConfirmPin('');
       setPasscodeError(null);
       setIsVerifyingPasscode(false);
+      setIsCheckingPinStatus(false);
+      setCurrentPinInput('');
+      setNewPinInput('');
+      setConfirmNewPinInput('');
+      setIsChangingPin(false);
+      setPinChangeFeedback(null);
       setAdminCodeError(null);
       setAdminCodeSyncStatus('idle');
       setCopiedAdminCode(false);
@@ -110,8 +141,30 @@ export const AdminCodePanelModal: React.FC = () => {
       setUsersError(null);
       setUsersActionMsg(null);
       setSearchQuery('');
+      return;
     }
-  }, [isAdminCodeModalOpen]);
+
+    if (!isAuthorizedAdmin) return;
+    let active = true;
+    setIsCheckingPinStatus(true);
+    fetchAdminStatusFromServer()
+      .then((status) => {
+        if (!active) return;
+        setPinConfigured(status.pinConfigured);
+        setPinSource(status.pinSource);
+        setPinUpdatedAtMs(status.pinUpdatedAtMs);
+      })
+      .catch(() => {
+        // Keep default state on network error
+      })
+      .finally(() => {
+        if (active) setIsCheckingPinStatus(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [isAdminCodeModalOpen, isAuthorizedAdmin]);
 
   const handleSessionExpiry = (err: unknown): boolean => {
     if (err instanceof ServerApiError && err.code === 'ADMIN_SESSION_REQUIRED') {
@@ -194,27 +247,162 @@ export const AdminCodePanelModal: React.FC = () => {
 
   const handleUnlockSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!passcodeInput.trim() || isVerifyingPasscode) return;
+    const cleanPin = passcodeInput.trim();
+    if (!cleanPin || isVerifyingPasscode) return;
+
+    if (!pinConfigured) {
+      if (cleanPin.length < 4 || cleanPin.length > 32) {
+        setPasscodeError(
+          isRTL
+            ? 'يجب أن يتكون الرمز السري من 4 إلى 32 حرفاً أو رقماً.'
+            : 'Admin PIN must be between 4 and 32 characters.'
+        );
+        return;
+      }
+      if (cleanPin !== setupConfirmPin.trim()) {
+        setPasscodeError(
+          isRTL ? 'تأكيد الرمز السري غير متطابق.' : 'PIN confirmation does not match.'
+        );
+        return;
+      }
+
+      setIsVerifyingPasscode(true);
+      setPasscodeError(null);
+      try {
+        const res = await setupAdminPinOnServer(cleanPin);
+        setAdminSessionToken(res.adminSessionToken);
+        setPinConfigured(true);
+        setPinSource('firestore');
+        setPinUpdatedAtMs(res.pinUpdatedAtMs);
+        setPasscodeInput('');
+        setSetupConfirmPin('');
+        setIsUnlocked(true);
+      } catch (err) {
+        if (err instanceof ServerApiError && err.code === 'PIN_ALREADY_CONFIGURED') {
+          setPinConfigured(true);
+          setPasscodeError(
+            isRTL
+              ? 'الرمز السري مضبوط مسبقاً. يرجى إدخاله لفتح لوحة الإدارة.'
+              : 'Admin PIN is already configured. Please enter it to unlock.'
+          );
+        } else {
+          setPasscodeError(
+            parseReadableError(
+              err,
+              isRTL ? 'تعذر حفظ الرمز السري حالياً.' : 'Failed to configure admin PIN.'
+            )
+          );
+        }
+      } finally {
+        setIsVerifyingPasscode(false);
+      }
+      return;
+    }
+
     setIsVerifyingPasscode(true);
     setPasscodeError(null);
     try {
-      const { adminSessionToken: token } = await verifyAdminPasscodeOnServer(passcodeInput);
-      setAdminSessionToken(token);
+      const res = await verifyAdminPasscodeOnServer(cleanPin);
+      setAdminSessionToken(res.adminSessionToken);
+      setPinSource(res.pinSource);
+      setPinUpdatedAtMs(res.pinUpdatedAtMs);
       setPasscodeInput('');
       setIsUnlocked(true);
     } catch (err) {
-      const msg =
-        err instanceof ServerApiError && err.code === 'ADMIN_PASSCODE_NOT_CONFIGURED'
-          ? isRTL
-            ? 'لم يتم ضبط رمز مرور الإدارة (ADMIN_PASSCODE) على الخادم.'
-            : 'ADMIN_PASSCODE is not configured on the server.'
-          : parseReadableError(
-              err,
-              isRTL ? 'كلمة مرور الإدارة غير صحيحة.' : 'Incorrect admin passcode.'
-            );
-      setPasscodeError(msg);
+      if (
+        err instanceof ServerApiError &&
+        (err.code === 'ADMIN_PIN_NOT_SET' || err.code === 'ADMIN_PASSCODE_NOT_CONFIGURED')
+      ) {
+        setPinConfigured(false);
+        setPinSource('unset');
+        setPasscodeError(
+          isRTL
+            ? 'لم يتم تعيين رمز سري بعد — قم بتعيين رمزك السري الجديد الآن.'
+            : 'No Admin PIN configured yet — please create your new PIN now.'
+        );
+      } else {
+        setPasscodeError(
+          parseReadableError(
+            err,
+            isRTL ? 'الرمز السري للوحة الإدارة غير صحيح.' : 'Incorrect admin passcode.'
+          )
+        );
+      }
     } finally {
       setIsVerifyingPasscode(false);
+    }
+  };
+
+  const handleChangeAdminPin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminSessionToken || isChangingPin) return;
+    const cleanCurrent = currentPinInput.trim();
+    const cleanNext = newPinInput.trim();
+    const cleanConfirm = confirmNewPinInput.trim();
+
+    if (!cleanCurrent) {
+      setPinChangeFeedback({
+        type: 'err',
+        text: isRTL ? 'يرجى إدخال الرمز السري الحالي.' : 'Please enter your current PIN.',
+      });
+      return;
+    }
+    if (cleanNext.length < 4 || cleanNext.length > 32) {
+      setPinChangeFeedback({
+        type: 'err',
+        text: isRTL
+          ? 'يجب أن يتكون الرمز السري الجديد من 4 إلى 32 حرفاً أو رقماً.'
+          : 'New PIN must be 4 to 32 characters.',
+      });
+      return;
+    }
+    if (cleanNext !== cleanConfirm) {
+      setPinChangeFeedback({
+        type: 'err',
+        text: isRTL ? 'الرمز السري الجديد وتأكيده غير متطابقين.' : 'New PIN and confirmation do not match.',
+      });
+      return;
+    }
+    if (cleanNext === cleanCurrent) {
+      setPinChangeFeedback({
+        type: 'err',
+        text: isRTL ? 'يجب أن يختلف الرمز الجديد عن الرمز الحالي.' : 'New PIN must differ from the current PIN.',
+      });
+      return;
+    }
+
+    setIsChangingPin(true);
+    setPinChangeFeedback(null);
+    try {
+      const updated = await changeAdminPinOnServer({
+        currentPin: cleanCurrent,
+        newPin: cleanNext,
+        adminSessionToken,
+      });
+      setAdminSessionToken(updated.adminSessionToken);
+      setPinSource('firestore');
+      setPinConfigured(true);
+      setPinUpdatedAtMs(updated.updatedAtMs);
+      setCurrentPinInput('');
+      setNewPinInput('');
+      setConfirmNewPinInput('');
+      setPinChangeFeedback({
+        type: 'ok',
+        text: isRTL
+          ? 'تم تحديث الرمز السري وحفظه بتشفير scrypt الآمن في السحابة بنجاح.'
+          : 'Admin PIN updated and securely stored with salted scrypt hashing.',
+      });
+    } catch (err) {
+      if (handleSessionExpiry(err)) return;
+      setPinChangeFeedback({
+        type: 'err',
+        text: parseReadableError(
+          err,
+          isRTL ? 'تعذر تغيير الرمز السري. تحقق من الرمز الحالي.' : 'Failed to update admin PIN.'
+        ),
+      });
+    } finally {
+      setIsChangingPin(false);
     }
   };
 
@@ -427,12 +615,26 @@ export const AdminCodePanelModal: React.FC = () => {
                   <Lock className="w-5 h-5" />
                 </div>
                 <h3 className="text-sm font-bold text-[var(--color-ink)]">
-                  {isRTL ? 'أدخل رمز المرور الإداري للمتابعة' : 'Enter Admin Passcode'}
+                  {isCheckingPinStatus
+                    ? isRTL
+                      ? 'جاري التحقق من حالة الأمان...'
+                      : 'Checking security status...'
+                    : !pinConfigured
+                    ? isRTL
+                      ? 'تعيين الرمز السري للوحة الإدارة لأول مرة'
+                      : 'Set Up Admin Panel PIN'
+                    : isRTL
+                    ? 'أدخل الرمز السري الإداري للمتابعة'
+                    : 'Enter Admin Passcode'}
                 </h3>
                 <p className="text-xs text-[var(--color-muted)]">
-                  {isRTL
-                    ? 'لأغراض الأمان، يرجى إدخال كلمة مرور لوحة إدارة الحسابات والاشتراكات.'
-                    : 'Security gate required to manage accounts and license coupons.'}
+                  {!pinConfigured
+                    ? isRTL
+                      ? 'اختر رمزاً سرياً خاصاً بلوحة الإدارة (4-32 حرفاً/رقماً). يتم تشفيره بـ scrypt وحفظه بسرية تامة.'
+                      : 'Create a confidential Admin PIN (4-32 chars). It is cryptographically hashed with scrypt.'
+                    : isRTL
+                    ? 'بوابة تحقق حصرية لمالك النظام لإدارة الحسابات والأكواد والاشتراكات.'
+                    : 'Exclusive system admin gate to manage accounts, licenses, and security.'}
                 </p>
               </div>
 
@@ -441,72 +643,139 @@ export const AdminCodePanelModal: React.FC = () => {
                   htmlFor="admin-passcode-field"
                   className="block text-xs font-semibold text-[var(--color-muted)] mb-1.5"
                 >
-                  {isRTL ? 'كلمة المرور' : 'Passcode'}
+                  {!pinConfigured
+                    ? isRTL
+                      ? 'الرمز السري الجديد'
+                      : 'New Admin PIN'
+                    : isRTL
+                    ? 'الرمز السري'
+                    : 'Passcode'}
                 </label>
                 <input
                   id="admin-passcode-field"
                   type="password"
                   autoFocus
                   required
+                  minLength={4}
+                  maxLength={32}
                   dir="ltr"
                   value={passcodeInput}
                   onChange={(e) => {
                     setPasscodeInput(e.target.value);
                     setPasscodeError(null);
                   }}
-                  placeholder="••••"
+                  placeholder="••••••"
                   data-testid="admin-passcode-input"
                   className="w-full px-3 py-2.5 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-sm font-mono text-center tracking-widest text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px]"
                 />
-                {passcodeError && (
-                  <p
-                    data-testid="admin-passcode-error"
-                    className="text-xs text-[var(--color-expense)] font-medium mt-1.5"
-                  >
-                    {passcodeError}
-                  </p>
-                )}
               </div>
+
+              {!pinConfigured && (
+                <div>
+                  <label
+                    htmlFor="admin-setup-confirm-pin"
+                    className="block text-xs font-semibold text-[var(--color-muted)] mb-1.5"
+                  >
+                    {isRTL ? 'تأكيد الرمز السري' : 'Confirm Admin PIN'}
+                  </label>
+                  <input
+                    id="admin-setup-confirm-pin"
+                    type="password"
+                    required
+                    minLength={4}
+                    maxLength={32}
+                    dir="ltr"
+                    value={setupConfirmPin}
+                    onChange={(e) => {
+                      setSetupConfirmPin(e.target.value);
+                      setPasscodeError(null);
+                    }}
+                    placeholder="••••••"
+                    data-testid="admin-setup-confirm-pin-input"
+                    className="w-full px-3 py-2.5 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-sm font-mono text-center tracking-widest text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px]"
+                  />
+                </div>
+              )}
+
+              {passcodeError && (
+                <p
+                  data-testid="admin-passcode-error"
+                  className="text-xs text-[var(--color-expense)] font-medium"
+                >
+                  {passcodeError}
+                </p>
+              )}
 
               <button
                 type="submit"
-                disabled={isVerifyingPasscode || !passcodeInput.trim()}
+                disabled={
+                  isCheckingPinStatus ||
+                  isVerifyingPasscode ||
+                  !passcodeInput.trim() ||
+                  (!pinConfigured && !setupConfirmPin.trim())
+                }
                 data-testid="admin-passcode-submit"
                 className="w-full py-2.5 px-4 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[44px] hover:opacity-95 transition-opacity disabled:opacity-60 flex items-center justify-center gap-2"
               >
-                {isVerifyingPasscode && <Loader2 className="w-4 h-4 animate-spin" />}
-                <span>{isRTL ? 'فتح لوحة الإدارة' : 'Unlock Admin Panel'}</span>
+                {(isVerifyingPasscode || isCheckingPinStatus) && (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                )}
+                <span>
+                  {!pinConfigured
+                    ? isRTL
+                      ? 'حفظ الرمز السري وفتح لوحة الإدارة'
+                      : 'Save PIN & Unlock Panel'
+                    : isRTL
+                    ? 'فتح لوحة الإدارة'
+                    : 'Unlock Admin Panel'}
+                </span>
               </button>
             </form>
           ) : (
             <div className="space-y-4">
               {/* Admin Navigation Tabs */}
-              <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)]">
+              <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)]">
                 <button
                   type="button"
                   data-testid="admin-tab-users"
                   onClick={() => setActiveTab('users')}
-                  className={`py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors min-h-[40px] ${
+                  className={`py-2 px-2 rounded-lg text-[11px] sm:text-xs font-bold flex items-center justify-center gap-1.5 transition-colors min-h-[40px] ${
                     activeTab === 'users'
                       ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-sm'
                       : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
                   }`}
                 >
                   <Users className="w-3.5 h-3.5 shrink-0" />
-                  <span>{isRTL ? 'الحسابات والاشتراكات' : 'Accounts & Plans'}</span>
+                  <span className="truncate">{isRTL ? 'الحسابات' : 'Accounts'}</span>
                 </button>
                 <button
                   type="button"
                   data-testid="admin-tab-coupons"
                   onClick={() => setActiveTab('coupons')}
-                  className={`py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors min-h-[40px] ${
+                  className={`py-2 px-2 rounded-lg text-[11px] sm:text-xs font-bold flex items-center justify-center gap-1.5 transition-colors min-h-[40px] ${
                     activeTab === 'coupons'
                       ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-sm'
                       : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
                   }`}
                 >
                   <KeyRound className="w-3.5 h-3.5 shrink-0" />
-                  <span>{isRTL ? 'أكواد التفعيل' : 'License Coupons'}</span>
+                  <span className="truncate">{isRTL ? 'أكواد التفعيل' : 'Licenses'}</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="admin-tab-security"
+                  onClick={() => {
+                    setActiveTab('security');
+                    setPinChangeFeedback(null);
+                  }}
+                  className={`py-2 px-2 rounded-lg text-[11px] sm:text-xs font-bold flex items-center justify-center gap-1.5 transition-colors min-h-[40px] ${
+                    activeTab === 'security'
+                      ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-sm'
+                      : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+                  }`}
+                >
+                  <Settings className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">{isRTL ? 'الأمان والرمز' : 'Security'}</span>
                 </button>
               </div>
 
@@ -930,8 +1199,8 @@ export const AdminCodePanelModal: React.FC = () => {
                       <p className="text-[11px] text-[var(--color-muted)]">
                         {adminCodeSyncStatus === 'cloud_synced'
                           ? isRTL
-                            ? 'تم حفظ الكود في مجموعة coupons بحالة: غير مستخدم.'
-                            : 'Saved to Firestore coupons collection (Status: Unused).'
+                            ? 'تم حفظ الكود مشفراً بـ SHA-256 في Firestore بحالة: غير مستخدم.'
+                            : 'Saved as SHA-256 hash in Firestore (Status: Unused).'
                           : isRTL
                           ? 'الكود جاهز للنسخ والمشاركة.'
                           : 'Code ready to copy.'}
@@ -942,7 +1211,7 @@ export const AdminCodePanelModal: React.FC = () => {
                   {recentCoupons.length > 0 && (
                     <div className="pt-2 border-t border-[var(--color-line)] space-y-2">
                       <div className="text-xs font-semibold text-[var(--color-muted)]">
-                        {isRTL ? 'الأكواد المحفوظة في coupons' : 'Saved Coupons in Firestore'}
+                        {isRTL ? 'سجل الأكواد الصادرة في Firestore' : 'Issued License Codes in Firestore'}
                       </div>
                       <div className="space-y-1.5 max-h-48 overflow-y-auto">
                         {recentCoupons.map((rec) => (
@@ -987,6 +1256,165 @@ export const AdminCodePanelModal: React.FC = () => {
                       </div>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* TAB 3: EXCLUSIVE SYSTEM ADMIN SECURITY & PIN ROTATION */}
+              {activeTab === 'security' && (
+                <div className="space-y-4" data-testid="admin-security-panel">
+                  <div className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-1.5 text-xs font-bold text-[var(--color-ink)]">
+                        <ShieldCheck className="w-4 h-4 text-[var(--color-income)] shrink-0" />
+                        <span>{isRTL ? 'مالك النظام الحصري' : 'Exclusive System Admin'}</span>
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-[var(--color-income)]/15 border border-[var(--color-income)]/35 text-[10px] font-bold text-[var(--color-income)]">
+                        {isRTL ? 'محمي بـ scrypt' : 'scrypt Hashed'}
+                      </span>
+                    </div>
+                    <p className="text-xs font-mono text-[var(--color-ink)]" dir="ltr">
+                      {PRIMARY_SYSTEM_ADMIN_EMAIL}
+                    </p>
+                    <p className="text-[11px] text-[var(--color-muted)] leading-relaxed">
+                      {isRTL
+                        ? 'الوصول للوحة التحكم، توليد أكواد التفعيل، وتعديل الاشتراكات محصور بهذا البريد الإلكتروني الموثّق عبر Firebase Auth ID Token فقط. يُحفظ الرمز السري مشفراً بملح عشوائي (scrypt) ولا يُخزن أبداً كنص صريح.'
+                        : 'Admin panel access, license issuance, and subscription overrides are strictly locked to this verified account via Firebase Auth ID Token. Your PIN is stored exclusively as a salted scrypt hash.'}
+                    </p>
+                    {pinUpdatedAtMs && (
+                      <p className="text-[10px] text-[var(--color-muted)]">
+                        {isRTL ? 'آخر تحديث للرمز السري: ' : 'Last PIN update: '}
+                        <span className="font-semibold text-[var(--color-ink)]">
+                          {new Date(pinUpdatedAtMs).toLocaleString(isRTL ? 'ar-EG' : 'en-US')}
+                        </span>
+                      </p>
+                    )}
+                    {pinSource === 'env' && (
+                      <p className="text-[10px] text-amber-600 dark:text-amber-400 font-medium">
+                        {isRTL
+                          ? 'تستخدم حالياً رمز البيئة الافتراضي — يمكنك تغييره أدناه لحفظ رمز خاص بك مشفراً في السحابة.'
+                          : 'Currently using server environment bootstrap passcode — change it below to store a cloud scrypt-hashed PIN.'}
+                      </p>
+                    )}
+                  </div>
+
+                  <form
+                    onSubmit={handleChangeAdminPin}
+                    className="p-4 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-3"
+                    data-testid="admin-change-pin-form"
+                  >
+                    <div className="flex items-center gap-2 text-xs font-bold text-[var(--color-ink)]">
+                      <Lock className="w-3.5 h-3.5 text-[var(--color-accent)] shrink-0" />
+                      <span>{isRTL ? 'تغيير الرمز السري للوحة الإدارة' : 'Change Admin Panel PIN'}</span>
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="admin-current-pin"
+                        className="block text-[11px] font-semibold text-[var(--color-muted)] mb-1"
+                      >
+                        {isRTL ? 'الرمز السري الحالي' : 'Current PIN'}
+                      </label>
+                      <input
+                        id="admin-current-pin"
+                        type="password"
+                        required
+                        dir="ltr"
+                        value={currentPinInput}
+                        onChange={(e) => {
+                          setCurrentPinInput(e.target.value);
+                          setPinChangeFeedback(null);
+                        }}
+                        placeholder="••••••"
+                        data-testid="admin-current-pin-input"
+                        className="w-full px-3 py-2 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] text-xs font-mono tracking-widest text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[42px]"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div>
+                        <label
+                          htmlFor="admin-new-pin"
+                          className="block text-[11px] font-semibold text-[var(--color-muted)] mb-1"
+                        >
+                          {isRTL ? 'الرمز السري الجديد (4-32)' : 'New PIN (4-32 chars)'}
+                        </label>
+                        <input
+                          id="admin-new-pin"
+                          type="password"
+                          required
+                          minLength={4}
+                          maxLength={32}
+                          dir="ltr"
+                          value={newPinInput}
+                          onChange={(e) => {
+                            setNewPinInput(e.target.value);
+                            setPinChangeFeedback(null);
+                          }}
+                          placeholder="••••••"
+                          data-testid="admin-new-pin-input"
+                          className="w-full px-3 py-2 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] text-xs font-mono tracking-widest text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[42px]"
+                        />
+                      </div>
+
+                      <div>
+                        <label
+                          htmlFor="admin-confirm-new-pin"
+                          className="block text-[11px] font-semibold text-[var(--color-muted)] mb-1"
+                        >
+                          {isRTL ? 'تأكيد الرمز الجديد' : 'Confirm New PIN'}
+                        </label>
+                        <input
+                          id="admin-confirm-new-pin"
+                          type="password"
+                          required
+                          minLength={4}
+                          maxLength={32}
+                          dir="ltr"
+                          value={confirmNewPinInput}
+                          onChange={(e) => {
+                            setConfirmNewPinInput(e.target.value);
+                            setPinChangeFeedback(null);
+                          }}
+                          placeholder="••••••"
+                          data-testid="admin-confirm-new-pin-input"
+                          className="w-full px-3 py-2 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] text-xs font-mono tracking-widest text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[42px]"
+                        />
+                      </div>
+                    </div>
+
+                    {pinChangeFeedback && (
+                      <div
+                        data-testid="admin-pin-change-feedback"
+                        className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
+                          pinChangeFeedback.type === 'ok'
+                            ? 'bg-[var(--color-income)]/12 border-[var(--color-income)]/35 text-[var(--color-income)]'
+                            : 'bg-[var(--color-expense)]/12 border-[var(--color-expense)]/35 text-[var(--color-expense)]'
+                        }`}
+                      >
+                        {pinChangeFeedback.type === 'ok' ? (
+                          <CheckCircle2 className="w-4 h-4 shrink-0" />
+                        ) : (
+                          <AlertTriangle className="w-4 h-4 shrink-0" />
+                        )}
+                        <span>{pinChangeFeedback.text}</span>
+                      </div>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={
+                        isChangingPin ||
+                        !currentPinInput.trim() ||
+                        !newPinInput.trim() ||
+                        !confirmNewPinInput.trim()
+                      }
+                      data-testid="admin-change-pin-submit"
+                      className="w-full py-2.5 px-4 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold min-h-[44px] hover:opacity-95 transition-opacity disabled:opacity-60 flex items-center justify-center gap-2"
+                    >
+                      {isChangingPin && <Loader2 className="w-4 h-4 animate-spin" />}
+                      <span>{isRTL ? 'تحديث وحفظ الرمز السري المشفر' : 'Update Encrypted Admin PIN'}</span>
+                    </button>
+                  </form>
                 </div>
               )}
             </div>

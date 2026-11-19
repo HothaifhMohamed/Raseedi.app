@@ -585,9 +585,18 @@ export class ServerApiError extends Error {
   }
 }
 
-export async function fetchAdminStatusFromServer(): Promise<{ isAdmin: boolean }> {
+export interface ServerAdminStatus {
+  isAdmin: boolean;
+  pinConfigured: boolean;
+  pinSource: 'firestore' | 'env' | 'unset';
+  pinUpdatedAtMs: number | null;
+}
+
+export async function fetchAdminStatusFromServer(): Promise<ServerAdminStatus> {
   const currentUser = auth.currentUser;
-  if (!currentUser) return { isAdmin: false };
+  if (!currentUser) {
+    return { isAdmin: false, pinConfigured: false, pinSource: 'unset', pinUpdatedAtMs: null };
+  }
   try {
     const idToken = await currentUser.getIdToken();
     const response = await fetch('/api/admin/status', {
@@ -596,23 +605,89 @@ export async function fetchAdminStatusFromServer(): Promise<{ isAdmin: boolean }
         Authorization: `Bearer ${idToken}`,
       },
     });
-    if (!response.ok) return { isAdmin: false };
+    if (!response.ok) {
+      return { isAdmin: false, pinConfigured: false, pinSource: 'unset', pinUpdatedAtMs: null };
+    }
     const payload = (await response.json().catch(() => ({}))) as {
       isAdmin?: boolean;
+      pinConfigured?: boolean;
+      pinSource?: 'firestore' | 'env' | 'unset';
+      pinUpdatedAtMs?: number | null;
       claimsUpdated?: boolean;
     };
     if (payload.isAdmin && payload.claimsUpdated && auth.currentUser) {
       await auth.currentUser.getIdToken(true).catch(() => undefined);
     }
-    return { isAdmin: Boolean(payload.isAdmin) };
+    return {
+      isAdmin: Boolean(payload.isAdmin),
+      pinConfigured: Boolean(payload.pinConfigured),
+      pinSource:
+        payload.pinSource === 'firestore' || payload.pinSource === 'env'
+          ? payload.pinSource
+          : 'unset',
+      pinUpdatedAtMs:
+        typeof payload.pinUpdatedAtMs === 'number' && Number.isFinite(payload.pinUpdatedAtMs)
+          ? payload.pinUpdatedAtMs
+          : null,
+    };
   } catch {
-    return { isAdmin: false };
+    return { isAdmin: false, pinConfigured: false, pinSource: 'unset', pinUpdatedAtMs: null };
   }
+}
+
+export async function setupAdminPinOnServer(
+  newPin: string
+): Promise<{
+  adminSessionToken: string;
+  expiresAt: number;
+  pinUpdatedAtMs: number | null;
+}> {
+  const idToken = await getRequiredIdToken();
+  const response = await fetch('/api/admin/pin/setup', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({ newPin: newPin.trim() }),
+  });
+
+  const payload = (await response.json().catch(() => ({}))) as {
+    adminSessionToken?: string;
+    expiresAt?: number;
+    pinUpdatedAtMs?: number | null;
+    claimsUpdated?: boolean;
+    error?: string;
+    message?: string;
+  };
+
+  if (!response.ok || !payload.adminSessionToken) {
+    throw new ServerApiError(
+      payload.error || 'PIN_SETUP_FAILED',
+      payload.message || payload.error || 'PIN_SETUP_FAILED',
+      response.status
+    );
+  }
+
+  if (payload.claimsUpdated && auth.currentUser) {
+    await auth.currentUser.getIdToken(true).catch(() => undefined);
+  }
+
+  return {
+    adminSessionToken: payload.adminSessionToken,
+    expiresAt: Number(payload.expiresAt || 0),
+    pinUpdatedAtMs: typeof payload.pinUpdatedAtMs === 'number' ? payload.pinUpdatedAtMs : Date.now(),
+  };
 }
 
 export async function verifyAdminPasscodeOnServer(
   passcode: string
-): Promise<{ adminSessionToken: string; expiresAt: number }> {
+): Promise<{
+  adminSessionToken: string;
+  expiresAt: number;
+  pinSource: 'firestore' | 'env' | 'unset';
+  pinUpdatedAtMs: number | null;
+}> {
   const idToken = await getRequiredIdToken();
   const response = await fetch('/api/admin/verify-passcode', {
     method: 'POST',
@@ -626,6 +701,8 @@ export async function verifyAdminPasscodeOnServer(
   const payload = (await response.json().catch(() => ({}))) as {
     adminSessionToken?: string;
     expiresAt?: number;
+    pinSource?: 'firestore' | 'env' | 'unset';
+    pinUpdatedAtMs?: number | null;
     claimsUpdated?: boolean;
     error?: string;
     message?: string;
@@ -646,6 +723,60 @@ export async function verifyAdminPasscodeOnServer(
   return {
     adminSessionToken: payload.adminSessionToken,
     expiresAt: Number(payload.expiresAt || 0),
+    pinSource:
+      payload.pinSource === 'firestore' || payload.pinSource === 'env'
+        ? payload.pinSource
+        : 'unset',
+    pinUpdatedAtMs: typeof payload.pinUpdatedAtMs === 'number' ? payload.pinUpdatedAtMs : null,
+  };
+}
+
+export async function changeAdminPinOnServer(params: {
+  currentPin: string;
+  newPin: string;
+  adminSessionToken: string;
+}): Promise<{
+  adminSessionToken: string;
+  expiresAt: number;
+  updatedAtMs: number;
+}> {
+  if (!params.adminSessionToken) {
+    throw new ServerApiError('ADMIN_SESSION_REQUIRED', 'ADMIN_SESSION_REQUIRED', 403);
+  }
+  const idToken = await getRequiredIdToken();
+  const response = await fetch('/api/admin/pin/change', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+      'X-Admin-Session': params.adminSessionToken,
+    },
+    body: JSON.stringify({
+      currentPin: params.currentPin.trim(),
+      newPin: params.newPin.trim(),
+    }),
+  });
+
+  const payload = (await response.json().catch(() => ({}))) as {
+    adminSessionToken?: string;
+    expiresAt?: number;
+    updatedAtMs?: number;
+    error?: string;
+    message?: string;
+  };
+
+  if (!response.ok || !payload.adminSessionToken) {
+    throw new ServerApiError(
+      payload.error || 'PIN_CHANGE_FAILED',
+      payload.message || payload.error || 'PIN_CHANGE_FAILED',
+      response.status
+    );
+  }
+
+  return {
+    adminSessionToken: payload.adminSessionToken,
+    expiresAt: Number(payload.expiresAt || 0),
+    updatedAtMs: Number(payload.updatedAtMs || Date.now()),
   };
 }
 

@@ -7,6 +7,12 @@ export type AdminCouponCycle = 'monthly' | 'yearly' | 'lifetime';
 
 export const LICENSE_CODE_PREFIX = 'RSD-PRO-';
 export const BUSINESS_LICENSE_CODE_PREFIX = 'RSD-BIZ-';
+export const PRIMARY_SYSTEM_ADMIN_EMAIL = 'hapaypal2003@gmail.com';
+
+export function isPrimarySystemAdminEmail(email?: string | null): boolean {
+  if (typeof email !== 'string') return false;
+  return email.trim().toLowerCase() === PRIMARY_SYSTEM_ADMIN_EMAIL;
+}
 
 export function getLicensePrefixForTier(tier: AdminCouponTier): string {
   return tier === 'business' ? BUSINESS_LICENSE_CODE_PREFIX : LICENSE_CODE_PREFIX;
