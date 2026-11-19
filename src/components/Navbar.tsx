@@ -40,6 +40,8 @@ import {
   formatWorkspaceDeleteConfirmMessage,
   resolveWorkspaceOrgPermissions,
 } from '../services/workspaceCleanup';
+import { auth, resolveFirebaseUserEmail } from '../services/firebase';
+import { canUserAccessAdminPanelUi } from '../services/adminAuth';
 
 export const Navbar: React.FC = () => {
   const {
@@ -653,7 +655,18 @@ export const Navbar: React.FC = () => {
 
                   {/* Section 4: PRO / Admin & Settings */}
                   <div className="py-1">
-                    {isAdminUser ? (
+                    {canUserAccessAdminPanelUi({
+                      isAdminUser,
+                      authUser: auth.currentUser
+                        ? {
+                            uid: auth.currentUser.uid,
+                            email: resolveFirebaseUserEmail(auth.currentUser),
+                            emailVerified: auth.currentUser.emailVerified,
+                            providerData: auth.currentUser.providerData,
+                          }
+                        : null,
+                      appUser: user,
+                    }) ? (
                       <button
                         type="button"
                         data-testid="navbar-admin-panel-btn"

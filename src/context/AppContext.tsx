@@ -179,7 +179,10 @@ import {
   resolvePostGoogleSignInAction,
 } from '../services/subscriptionHelpers';
 import { extractAccountDeleteErrorCode, shouldFallbackAccountDeleteError } from '../services/accountDeletion';
-import { isAuthorizedPrimaryAdminUser } from '../services/adminAuth';
+import {
+  canUserAccessAdminPanelUi,
+  isAuthorizedPrimaryAdminUser,
+} from '../services/adminAuth';
 import { EntitlementProvider, EntitlementContextValue, useEntitlement } from './EntitlementContext';
 import { OrgProvider, OrgContextValue, useOrg } from './OrgContext';
 import {
@@ -934,81 +937,79 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     async (userOverride?: typeof auth.currentUser): Promise<boolean> => {
       const seq = ++adminCheckSeqRef.current;
       const targetUser = userOverride ?? auth.currentUser;
-      if (!targetUser) {
-        if (seq === adminCheckSeqRef.current) {
-          setIsAdminUser(false);
-        }
-        return false;
-      }
-
-      const resolvedEmail = resolveFirebaseUserEmail(targetUser);
-      const isVerifiedPrimaryAdmin = isAuthorizedPrimaryAdminUser({
-        uid: targetUser.uid,
+      const resolvedEmail =
+        resolveFirebaseUserEmail(targetUser) ||
+        (user?.isLoggedIn && typeof user.email === 'string' ? user.email.trim() : '');
+      const isPrimaryAdmin = isAuthorizedPrimaryAdminUser({
+        uid: targetUser?.uid || (user?.isLoggedIn ? user.id : null),
         email: resolvedEmail,
-        emailVerified: targetUser.emailVerified,
+        isLoggedIn: Boolean(targetUser?.uid || user?.isLoggedIn),
+        providerData: targetUser?.providerData,
       });
 
-      if (!isVerifiedPrimaryAdmin) {
+      if (!isPrimaryAdmin) {
         if (seq === adminCheckSeqRef.current) {
           setIsAdminUser(false);
         }
         return false;
       }
 
-      // Immediately expose admin UI for the verified primary system admin
-      // so static hosting (e.g. Vercel where /api/admin/* is absent) never hides the panel.
+      // Immediately expose admin UI for the primary system admin regardless of
+      // Custom Claims, emailVerified hydration timing, workspace, or /api/admin/* availability on Vercel.
       if (seq === adminCheckSeqRef.current) {
         setIsAdminUser(true);
       }
 
+      if (!targetUser) {
+        return true;
+      }
+
       try {
-        const [tokenResult, serverAdmin] = await Promise.all([
+        await Promise.all([
           targetUser.getIdTokenResult().catch(() => null),
-          bootstrapAdminStatusOnServer(targetUser).catch(() => ({
-            isAdmin: true,
-            pinConfigured: false,
-            pinSource: 'unset' as const,
-            pinUpdatedAtMs: null,
-          })),
+          bootstrapAdminStatusOnServer(targetUser).catch(() => null),
         ]);
         if (seq !== adminCheckSeqRef.current) return isAdminUserRef.current;
-
-        const granted = Boolean(
-          isVerifiedPrimaryAdmin &&
-            (serverAdmin.isAdmin || tokenResult?.claims?.admin === true || isVerifiedPrimaryAdmin)
-        );
-        setIsAdminUser(granted);
-        return granted;
+        setIsAdminUser(true);
+        return true;
       } catch {
         if (seq === adminCheckSeqRef.current) {
-          setIsAdminUser(isVerifiedPrimaryAdmin);
+          setIsAdminUser(true);
         }
-        return isVerifiedPrimaryAdmin;
+        return true;
       }
     },
-    []
+    [user?.isLoggedIn, user?.id, user?.email]
   );
 
   useEffect(() => {
-    const resolvedEmail =
-      resolveFirebaseUserEmail(auth.currentUser) ||
-      (typeof firebaseAuthUser?.email === 'string' ? firebaseAuthUser.email.trim() : '');
-    const isVerifiedPrimaryAdmin = isAuthorizedPrimaryAdminUser({
-      uid: auth.currentUser?.uid || firebaseAuthUser?.uid,
-      email: resolvedEmail,
-      emailVerified: auth.currentUser ? auth.currentUser.emailVerified : firebaseAuthUser?.emailVerified,
+    const allowed = canUserAccessAdminPanelUi({
+      authUser: auth.currentUser
+        ? {
+            uid: auth.currentUser.uid,
+            email: resolveFirebaseUserEmail(auth.currentUser),
+            emailVerified: auth.currentUser.emailVerified,
+            providerData: auth.currentUser.providerData,
+          }
+        : firebaseAuthUser,
+      appUser: user,
     });
-    if (!isVerifiedPrimaryAdmin) {
+    if (!allowed) {
       setIsAdminUser(false);
       return;
     }
     setIsAdminUser(true);
-    void refreshAdminStatus();
+    if (auth.currentUser) {
+      void refreshAdminStatus(auth.currentUser);
+    }
   }, [
     firebaseAuthUser,
     firebaseAuthUser?.uid,
     firebaseAuthUser?.email,
     firebaseAuthUser?.emailVerified,
+    user?.isLoggedIn,
+    user?.id,
+    user?.email,
     refreshAdminStatus,
   ]);
 
@@ -1044,21 +1045,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, []);
 
   const openAdminPanel = useCallback(() => {
-    const currentAuthUser = auth.currentUser;
-    const allowed =
-      isAdminUserRef.current ||
-      isAuthorizedPrimaryAdminUser({
-        uid: currentAuthUser?.uid,
-        email: resolveFirebaseUserEmail(currentAuthUser),
-        emailVerified: currentAuthUser?.emailVerified,
-      });
+    const allowed = canUserAccessAdminPanelUi({
+      isAdminUser: isAdminUserRef.current,
+      authUser: auth.currentUser
+        ? {
+            uid: auth.currentUser.uid,
+            email: resolveFirebaseUserEmail(auth.currentUser),
+            emailVerified: auth.currentUser.emailVerified,
+            providerData: auth.currentUser.providerData,
+          }
+        : null,
+      appUser: user,
+    });
     if (!allowed) return;
     if (!isAdminUserRef.current) {
       setIsAdminUser(true);
     }
     setIsUpgradeModalOpen(false);
     setIsAdminCodeModalOpen(true);
-  }, []);
+  }, [user]);
 
   const openAdminSettingsPanel = openAdminPanel;
 

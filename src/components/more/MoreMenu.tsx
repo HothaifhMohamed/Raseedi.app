@@ -52,7 +52,7 @@ import {
 } from '../../services/calculations';
 import { isPrimarySystemAdminEmail } from '../../services/licenseCodes';
 import { auth, resolveFirebaseUserEmail } from '../../services/firebase';
-import { isAuthorizedPrimaryAdminUser } from '../../services/adminAuth';
+import { canUserAccessAdminPanelUi } from '../../services/adminAuth';
 
 export const MoreMenu: React.FC = () => {
   const {
@@ -95,11 +95,24 @@ export const MoreMenu: React.FC = () => {
     isRTL,
   } = useApp();
 
+  const canAccessAdminPanel = canUserAccessAdminPanelUi({
+    isAdminUser,
+    authUser: auth.currentUser
+      ? {
+          uid: auth.currentUser.uid,
+          email: resolveFirebaseUserEmail(auth.currentUser),
+          emailVerified: auth.currentUser.emailVerified,
+          providerData: auth.currentUser.providerData,
+        }
+      : null,
+    appUser: user,
+  });
+
   React.useEffect(() => {
-    if (user?.isLoggedIn && isPrimarySystemAdminEmail(user.email) && !isAdminUser) {
+    if (canAccessAdminPanel && !isAdminUser) {
       void refreshAdminStatus();
     }
-  }, [user?.isLoggedIn, user?.email, isAdminUser, refreshAdminStatus]);
+  }, [canAccessAdminPanel, isAdminUser, refreshAdminStatus]);
 
   const [reportsOpen, setReportsOpen] = useState(false);
   const [categoriesOpen, setCategoriesOpen] = useState(false);
@@ -190,13 +203,8 @@ export const MoreMenu: React.FC = () => {
         </button>
       </div>
 
-      {/* 1. HERO CARD: Admin Code Panel for Admin, Active Subscriber Summary, or Free Upgrade */}
-      {isAdminUser ||
-      isAuthorizedPrimaryAdminUser({
-        uid: auth.currentUser?.uid || (user?.isLoggedIn ? user.id : null),
-        email: resolveFirebaseUserEmail(auth.currentUser) || user?.email,
-        emailVerified: auth.currentUser ? auth.currentUser.emailVerified : Boolean(user?.isLoggedIn),
-      }) ? (
+      {/* 1. HERO CARD: Admin Code Panel for Admin (all workspaces), Active Subscriber Summary, or Free Upgrade */}
+      {canAccessAdminPanel ? (
         <div
           onClick={() => openAdminPanel()}
           data-testid="more-admin-hero-card"
@@ -867,14 +875,7 @@ export const MoreMenu: React.FC = () => {
             <ArrowIcon className="w-4 h-4 text-[var(--color-muted)]" />
           </button>
 
-          {(isAdminUser ||
-            isAuthorizedPrimaryAdminUser({
-              uid: auth.currentUser?.uid || (user?.isLoggedIn ? user.id : null),
-              email: resolveFirebaseUserEmail(auth.currentUser) || user?.email,
-              emailVerified: auth.currentUser
-                ? auth.currentUser.emailVerified
-                : Boolean(user?.isLoggedIn),
-            })) && (
+          {canAccessAdminPanel && (
             <button
               type="button"
               data-testid="more-admin-panel-btn"

@@ -42,7 +42,7 @@ import {
   setupAdminPinOnServer,
   verifyAdminPasscodeOnServer,
 } from '../../services/firebase';
-import { isAuthorizedPrimaryAdminUser } from '../../services/adminAuth';
+import { canUserAccessAdminPanelUi } from '../../services/adminAuth';
 import { SUBSCRIPTION_DAY_MS } from '../../services/subscriptionHelpers';
 import type { PlanTier } from '../../types';
 
@@ -126,15 +126,18 @@ export const AdminCodePanelModal: React.FC = () => {
   const [reauthConfirmPin, setReauthConfirmPin] = useState('');
   const [isReauthingPin, setIsReauthingPin] = useState(false);
 
-  const effectiveAdminEmail = resolveFirebaseUserEmail(auth.currentUser) || user?.email || '';
-  const isAuthorizedAdmin = Boolean(
-    (isAdminUser && isPrimarySystemAdminEmail(effectiveAdminEmail)) ||
-      isAuthorizedPrimaryAdminUser({
-        uid: auth.currentUser?.uid || (user?.isLoggedIn ? user.id : null),
-        email: effectiveAdminEmail,
-        emailVerified: auth.currentUser ? auth.currentUser.emailVerified : Boolean(user?.isLoggedIn),
-      })
-  );
+  const isAuthorizedAdmin = canUserAccessAdminPanelUi({
+    isAdminUser,
+    authUser: auth.currentUser
+      ? {
+          uid: auth.currentUser.uid,
+          email: resolveFirebaseUserEmail(auth.currentUser),
+          emailVerified: auth.currentUser.emailVerified,
+          providerData: auth.currentUser.providerData,
+        }
+      : null,
+    appUser: user,
+  });
 
   // Reset passcode gate, ephemeral session token & transient editor state every time modal closes
   useEffect(() => {

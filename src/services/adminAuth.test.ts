@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import {
   ADMIN_PBKDF2_HASH_REGEX,
   buildDirectAdminSubscriptionPatch,
+  canUserAccessAdminPanelUi,
   generateRandomLicenseCodeBrowser,
   hashAdminPinBrowser,
   hashLicenseCodeBrowser,
   isApiEndpointUnavailableResponse,
   isAuthorizedPrimaryAdminUser,
+  isVerifiedPrimaryAdminForSensitiveAction,
   verifyAdminPinBrowser,
 } from './adminAuth';
 import {
@@ -18,7 +20,7 @@ import {
 import { stripSensitivePinFromSettings, stripSensitivePinsFromWallets } from './security';
 
 describe('Vercel & Server Primary Admin Access (adminAuth)', () => {
-  it('immediately authorizes verified primary admin regardless of email casing or whitespace', () => {
+  it('immediately authorizes primary admin UI regardless of casing, whitespace, emailVerified, Custom Claims, or providerData', () => {
     assert.equal(
       isAuthorizedPrimaryAdminUser({
         uid: 'admin-uid-1',
@@ -31,34 +33,39 @@ describe('Vercel & Server Primary Admin Access (adminAuth)', () => {
       isAuthorizedPrimaryAdminUser({
         uid: 'admin-uid-1',
         email: '  HAPAYPAL2003@GMAIL.COM  ',
-        emailVerified: true,
+        emailVerified: false,
       }),
       true
     );
     assert.equal(
       isAuthorizedPrimaryAdminUser({
         uid: 'admin-uid-1',
-        email: 'hapaypal2003@gmail.com',
+        email: null,
+        providerData: [{ email: 'Hapaypal2003@gmail.com' }],
+      }),
+      true
+    );
+    assert.equal(
+      canUserAccessAdminPanelUi({
+        isAdminUser: false,
+        authUser: null,
+        appUser: {
+          id: 'admin-uid-1',
+          email: '  Hapaypal2003@gmail.com ',
+          isLoggedIn: true,
+        },
       }),
       true
     );
   });
 
-  it('strictly rejects unverified, guest, null, or non-admin accounts', () => {
+  it('strictly rejects guest, logged-out, null, or non-admin accounts and enforces emailVerified on sensitive direct actions', () => {
     assert.equal(isAuthorizedPrimaryAdminUser(null), false);
     assert.equal(
       isAuthorizedPrimaryAdminUser({
         uid: '',
         email: 'hapaypal2003@gmail.com',
-        emailVerified: true,
-      }),
-      false
-    );
-    assert.equal(
-      isAuthorizedPrimaryAdminUser({
-        uid: 'admin-uid-1',
-        email: 'hapaypal2003@gmail.com',
-        emailVerified: false,
+        isLoggedIn: false,
       }),
       false
     );
@@ -69,6 +76,32 @@ describe('Vercel & Server Primary Admin Access (adminAuth)', () => {
         emailVerified: true,
       }),
       false
+    );
+    assert.equal(
+      canUserAccessAdminPanelUi({
+        isAdminUser: false,
+        authUser: { uid: 'guest-1', email: 'other@example.com', emailVerified: true },
+        appUser: { id: 'guest-1', email: 'other@example.com', isLoggedIn: true },
+      }),
+      false
+    );
+
+    // Sensitive direct-Firestore actions still strictly require verified email + uid
+    assert.equal(
+      isVerifiedPrimaryAdminForSensitiveAction({
+        uid: 'admin-uid-1',
+        email: 'hapaypal2003@gmail.com',
+        emailVerified: false,
+      }),
+      false
+    );
+    assert.equal(
+      isVerifiedPrimaryAdminForSensitiveAction({
+        uid: 'admin-uid-1',
+        email: 'Hapaypal2003@gmail.com',
+        emailVerified: true,
+      }),
+      true
     );
   });
 

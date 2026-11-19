@@ -14,23 +14,90 @@ const BIZ_CODE_PREFIX = 'RSD-BIZ-';
 
 export interface AdminIdentityCandidate {
   uid?: string | null;
+  id?: string | null;
   email?: string | null;
   emailVerified?: boolean | null;
+  isLoggedIn?: boolean | null;
+  providerData?: ReadonlyArray<{ email?: string | null } | null> | null;
+}
+
+function resolveCandidateEmails(candidate?: AdminIdentityCandidate | null): string[] {
+  if (!candidate) return [];
+  const emails: string[] = [];
+  if (typeof candidate.email === 'string' && candidate.email.trim()) {
+    emails.push(candidate.email.trim());
+  }
+  if (Array.isArray(candidate.providerData)) {
+    for (const provider of candidate.providerData) {
+      if (provider && typeof provider.email === 'string' && provider.email.trim()) {
+        emails.push(provider.email.trim());
+      }
+    }
+  }
+  return emails;
 }
 
 /**
  * Pure check determining whether a signed-in Firebase Auth user is the exclusive
- * verified system admin (`hapaypal2003@gmail.com`).
- * Case-insensitive and whitespace-tolerant; requires non-empty uid and verified email.
+ * system admin (`hapaypal2003@gmail.com`) for UI visibility and opening the
+ * PIN-protected Admin Panel gate.
+ *
+ * Intentionally does NOT require Custom Claims, `/api/admin/*` reachability,
+ * `emailVerified === true`, or a specific workspace, so static Vercel deployments
+ * never hide the Admin Panel button from the system owner.
  */
 export function isAuthorizedPrimaryAdminUser(
+  candidate?: AdminIdentityCandidate | null
+): boolean {
+  if (!candidate) return false;
+  const uid =
+    (typeof candidate.uid === 'string' && candidate.uid.trim()) ||
+    (typeof candidate.id === 'string' && candidate.id.trim()) ||
+    '';
+  const hasAuthenticatedSession = Boolean(uid) || candidate.isLoggedIn === true;
+  if (!hasAuthenticatedSession) return false;
+  return resolveCandidateEmails(candidate).some((email) => isPrimarySystemAdminEmail(email));
+}
+
+/**
+ * Stricter identity guard used before executing sensitive direct-Firestore
+ * admin writes (matches Firestore Security Rules `isAdmin()` requiring
+ * verified Firebase Auth email + non-empty uid).
+ */
+export function isVerifiedPrimaryAdminForSensitiveAction(
   candidate?: AdminIdentityCandidate | null
 ): boolean {
   if (!candidate) return false;
   const uid = typeof candidate.uid === 'string' ? candidate.uid.trim() : '';
   if (!uid) return false;
   if (candidate.emailVerified === false) return false;
-  return isPrimarySystemAdminEmail(candidate.email);
+  return resolveCandidateEmails(candidate).some((email) => isPrimarySystemAdminEmail(email));
+}
+
+/**
+ * Single source of truth for displaying the Admin Panel trigger and mounting
+ * the AdminCodePanelModal PIN gate across MoreMenu, SettingsModal, Navbar, and
+ * all workspaces (Personal & Organization).
+ */
+export function canUserAccessAdminPanelUi(params: {
+  isAdminUser?: boolean;
+  authUser?: AdminIdentityCandidate | null;
+  appUser?: AdminIdentityCandidate | null;
+}): boolean {
+  if (isAuthorizedPrimaryAdminUser(params.authUser)) {
+    return true;
+  }
+  if (params.appUser?.isLoggedIn === true && isAuthorizedPrimaryAdminUser(params.appUser)) {
+    return true;
+  }
+  if (
+    params.isAdminUser === true &&
+    (resolveCandidateEmails(params.authUser).some((e) => isPrimarySystemAdminEmail(e)) ||
+      resolveCandidateEmails(params.appUser).some((e) => isPrimarySystemAdminEmail(e)))
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /**

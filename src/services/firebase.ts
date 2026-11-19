@@ -86,6 +86,7 @@ import { sortTransactionsDescending } from './orgTransactionQuery';
 import {
   AdminCouponCycle,
   AdminCouponTier,
+  isPrimarySystemAdminEmail,
   PRIMARY_SYSTEM_ADMIN_EMAIL,
 } from './licenseCodes';
 import {
@@ -97,6 +98,7 @@ import {
   isAuthorizedPrimaryAdminUser,
   isDirectAdminSessionToken,
   isValidAdminPinLength,
+  isVerifiedPrimaryAdminForSensitiveAction,
   verifyAdminPinBrowser,
 } from './adminAuth';
 import {
@@ -615,13 +617,19 @@ export interface ServerAdminStatus {
 
 export function resolveFirebaseUserEmail(firebaseUser?: User | null): string {
   if (!firebaseUser) return '';
+  const candidates: string[] = [];
   if (typeof firebaseUser.email === 'string' && firebaseUser.email.trim()) {
-    return firebaseUser.email.trim();
+    candidates.push(firebaseUser.email.trim());
   }
-  const fromProvider = firebaseUser.providerData?.find(
-    (p) => typeof p?.email === 'string' && p.email.trim().length > 0
-  )?.email;
-  return typeof fromProvider === 'string' ? fromProvider.trim() : '';
+  if (Array.isArray(firebaseUser.providerData)) {
+    for (const provider of firebaseUser.providerData) {
+      if (typeof provider?.email === 'string' && provider.email.trim()) {
+        candidates.push(provider.email.trim());
+      }
+    }
+  }
+  const primaryAdminMatch = candidates.find((email) => isPrimarySystemAdminEmail(email));
+  return primaryAdminMatch || candidates[0] || '';
 }
 
 class AdminApiUnavailableError extends Error {
@@ -640,15 +648,16 @@ function assertDirectPrimaryAdminUser(userOverride?: User | null): {
   const email = resolveFirebaseUserEmail(targetUser).trim().toLowerCase();
   if (
     !targetUser ||
-    !isAuthorizedPrimaryAdminUser({
+    !isVerifiedPrimaryAdminForSensitiveAction({
       uid: targetUser.uid,
       email,
       emailVerified: targetUser.emailVerified,
+      providerData: targetUser.providerData,
     })
   ) {
     throw new ServerApiError(
       'FORBIDDEN',
-      'فقط مالك النظام المخول يمكنه تنفيذ هذا الإجراء.',
+      'فقط مالك النظام المخول بحساب موثّق يمكنه تنفيذ هذا الإجراء.',
       403
     );
   }

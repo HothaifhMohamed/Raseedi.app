@@ -24,7 +24,7 @@ import { useApp } from '../../context/AppContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { hashPin } from '../../services/security';
 import { auth, resolveFirebaseUserEmail } from '../../services/firebase';
-import { isAuthorizedPrimaryAdminUser } from '../../services/adminAuth';
+import { canUserAccessAdminPanelUi } from '../../services/adminAuth';
 import {
   CURRENCIES,
   getCurrency,
@@ -74,14 +74,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     isRTL,
   } = useApp();
 
-  const canAccessAdminPanel = Boolean(
-    isAdminUser ||
-      isAuthorizedPrimaryAdminUser({
-        uid: auth.currentUser?.uid || (user?.isLoggedIn ? user.id : null),
-        email: resolveFirebaseUserEmail(auth.currentUser) || user?.email,
-        emailVerified: auth.currentUser ? auth.currentUser.emailVerified : Boolean(user?.isLoggedIn),
-      })
-  );
+  const canAccessAdminPanel = canUserAccessAdminPanelUi({
+    isAdminUser,
+    authUser: auth.currentUser
+      ? {
+          uid: auth.currentUser.uid,
+          email: resolveFirebaseUserEmail(auth.currentUser),
+          emailVerified: auth.currentUser.emailVerified,
+          providerData: auth.currentUser.providerData,
+        }
+      : null,
+    appUser: user,
+  });
 
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
   const [confirmDeleteAccount, setConfirmDeleteAccount] = useState(false);
