@@ -50,6 +50,7 @@ import {
   doesTransactionAffectAccounting,
   getEffectiveTransactionAmount,
 } from '../../services/calculations';
+import { isPrimarySystemAdminEmail } from '../../services/licenseCodes';
 
 export const MoreMenu: React.FC = () => {
   const {
@@ -86,10 +87,17 @@ export const MoreMenu: React.FC = () => {
     user,
     signInWithGoogleAccount,
     isAdminUser,
+    refreshAdminStatus,
     openAdminPanel,
     t,
     isRTL,
   } = useApp();
+
+  React.useEffect(() => {
+    if (user?.isLoggedIn && isPrimarySystemAdminEmail(user.email) && !isAdminUser) {
+      void refreshAdminStatus();
+    }
+  }, [user?.isLoggedIn, user?.email, isAdminUser, refreshAdminStatus]);
 
   const [reportsOpen, setReportsOpen] = useState(false);
   const [categoriesOpen, setCategoriesOpen] = useState(false);
@@ -192,7 +200,7 @@ export const MoreMenu: React.FC = () => {
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 flex-wrap">
                 <h2 className="font-title text-sm font-bold text-[var(--color-ink)]">
-                  {isRTL ? 'لوحة الإدارة وتوليد الأكواد' : 'Admin Panel & Code Generator'}
+                  {isRTL ? 'لوحة إدارة الأكواد والاشتراكات' : 'Admin Codes & Subscriptions'}
                 </h2>
                 <span className="text-[10px] px-1.5 py-0.2 rounded font-semibold bg-[var(--color-income)]/15 text-[var(--color-income)]">
                   {isRTL ? 'إدارة' : 'Admin'}
@@ -863,12 +871,12 @@ export const MoreMenu: React.FC = () => {
                 <KeyRound className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
                 <div>
                   <div className="font-semibold text-[var(--color-ink)]">
-                    {isRTL ? 'لوحة الإدارة وتوليد الأكواد' : 'Admin Panel & Coupons'}
+                    {isRTL ? 'لوحة إدارة الأكواد والاشتراكات' : 'Admin Codes & Subscriptions'}
                   </div>
                   <div className="text-[11px] text-[var(--color-muted)]">
                     {isRTL
-                      ? 'توليد أكواد التفعيل وحفظها في قاعدة البيانات (محمي برمز مرور)'
-                      : 'Generate & manage license coupons in Firestore (passcode protected)'}
+                      ? 'إدارة الحسابات، توليد أكواد التفعيل، وتغيير الرمز السري (محمي على الخادم)'
+                      : 'Manage accounts, license coupons & server-protected Admin PIN'}
                   </div>
                 </div>
               </div>

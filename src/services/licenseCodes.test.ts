@@ -63,7 +63,21 @@ describe('licenseCodes format helpers and serverSecurity hardening', () => {
     assert.equal(isPrimarySystemAdminEmail('other@gmail.com'), false);
     assert.equal(isPrimarySystemAdminEmail(null), false);
 
-    // Verified primary system admin passes (case-insensitive)
+    // Verified primary system admin passes (case-insensitive, whitespace-trimmed, default when ADMIN_EMAILS unset/empty)
+    assert.equal(
+      isServerAdminUser(
+        { email: '  Hapaypal2003@gmail.com  ', email_verified: true },
+        undefined
+      ),
+      true
+    );
+    assert.equal(
+      isServerAdminUser(
+        { email: 'HAPAYPAL2003@GMAIL.COM', email_verified: true },
+        ''
+      ),
+      true
+    );
     assert.equal(
       isServerAdminUser(
         { email: 'Hapaypal2003@gmail.com', email_verified: true },
@@ -143,8 +157,14 @@ describe('licenseCodes format helpers and serverSecurity hardening', () => {
     assert.deepEqual(decoded, input);
   });
 
-  it('enforces strict CORS origin allowlist checks', () => {
+  it('enforces strict CORS origin allowlist checks including reverse-proxy forwardedHost', () => {
     assert.equal(isAllowedCorsOrigin('http://localhost:3000', 'localhost:3000', 'http'), true);
+    assert.equal(
+      isAllowedCorsOrigin('https://ais-dev-example.run.app', 'localhost:3000', 'http', {
+        forwardedHost: 'ais-dev-example.run.app',
+      }),
+      true
+    );
     assert.equal(
       isAllowedCorsOrigin('https://app.raseedi.example', 'localhost:3000', 'https', {
         appUrl: 'https://app.raseedi.example',
@@ -154,6 +174,7 @@ describe('licenseCodes format helpers and serverSecurity hardening', () => {
     assert.equal(
       isAllowedCorsOrigin('https://evil-attacker.example', 'localhost:3000', 'http', {
         appUrl: 'https://app.raseedi.example',
+        forwardedHost: 'ais-dev-example.run.app',
       }),
       false
     );

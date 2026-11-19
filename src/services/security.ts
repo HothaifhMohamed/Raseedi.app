@@ -60,6 +60,8 @@ export async function hashPin(pin: string, providedSalt?: string): Promise<{ has
   return { hash, salt };
 }
 
+export const MIN_PIN_PBKDF2_ITERATIONS = PIN_PBKDF2_ITERATIONS;
+
 export async function verifyPin(pin: string, storedHash?: string, storedSalt?: string): Promise<boolean> {
   if (!storedHash) return false;
 
@@ -69,7 +71,12 @@ export async function verifyPin(pin: string, storedHash?: string, storedSalt?: s
 
   if (storedHash.startsWith('pbkdf2$')) {
     const parts = storedHash.split('$');
-    const iter = Number(parts[1]) || PIN_PBKDF2_ITERATIONS;
+    if (parts.length !== 3) return false;
+    const iter = Number(parts[1]);
+    // Security: strictly reject downgraded or malformed PBKDF2 iteration counts
+    if (!Number.isInteger(iter) || iter < MIN_PIN_PBKDF2_ITERATIONS || iter > 2_000_000) {
+      return false;
+    }
     const expected = await pbkdf2PinHash(pin, storedSalt, iter);
     return timingSafeStringEqual(expected, storedHash);
   }
@@ -77,6 +84,43 @@ export async function verifyPin(pin: string, storedHash?: string, storedSalt?: s
   // Legacy single-SHA-256 fallback
   const legacyHash = await legacySha256Pin(pin, storedSalt);
   return timingSafeStringEqual(legacyHash, storedHash);
+}
+
+/**
+ * Strip local-only App Lock PIN hashes/salts before uploading settings to Firestore.
+ * PIN hashes must remain strictly local on the user's device.
+ */
+export function stripSensitivePinFromSettings<
+  T extends { appPin?: string; appPinSalt?: string; isAppLockEnabled?: boolean }
+>(settings: T): T {
+  const copy = { ...settings };
+  delete copy.appPin;
+  delete copy.appPinSalt;
+  if ('isAppLockEnabled' in copy) {
+    copy.isAppLockEnabled = false;
+  }
+  return copy;
+}
+
+/**
+ * Strip local-only Wallet PIN hashes/salts before uploading a wallet to Firestore.
+ */
+export function stripSensitivePinFromWallet<
+  T extends { pin?: string; pinSalt?: string; isLocked?: boolean }
+>(wallet: T): T {
+  const copy = { ...wallet };
+  delete copy.pin;
+  delete copy.pinSalt;
+  if ('isLocked' in copy) {
+    copy.isLocked = false;
+  }
+  return copy;
+}
+
+export function stripSensitivePinsFromWallets<
+  T extends { pin?: string; pinSalt?: string; isLocked?: boolean }
+>(wallets: T[]): T[] {
+  return wallets.map((w) => stripSensitivePinFromWallet(w));
 }
 
 export interface VerifyPinResult {
@@ -97,7 +141,7 @@ export async function verifyAndUpgradePin(
   if (!storedHash) return { valid: false, needsUpgrade: false };
 
   // 1. Modern PBKDF2-SHA256 hash
-  if (storedSalt && storedHash.startsWith(PIN_PBKDF2_PREFIX)) {
+  if (storedSalt && storedHash.startsWith('pbkdf2$')) {
     const valid = await verifyPin(pin, storedHash, storedSalt);
     return { valid, needsUpgrade: false };
   }

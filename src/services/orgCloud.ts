@@ -42,6 +42,7 @@ import {
 import { convertCurrency, fromMinor, toMinor } from './currency';
 import { getEffectiveTransactionAmount } from './calculations';
 import { normalizeApprovalStatus } from './entitlements';
+import { stripSensitivePinFromWallet } from './security';
 import {
   filterTransactionsByDateRange,
   isFirestoreMissingIndexError,
@@ -241,12 +242,14 @@ function buildOrgWalletPayloadForCloud(orgId: string, wallet: Wallet): Record<st
     typeof wallet.initialBalanceMinor === 'number'
       ? wallet.initialBalanceMinor
       : toMinor(wallet.initialBalance, wallet.currency);
-  const cleanWallet: Wallet = stripUndefinedDeep({
-    ...wallet,
-    balanceMinor,
-    initialBalanceMinor,
-    balance: fromMinor(balanceMinor, wallet.currency),
-  });
+  const cleanWallet: Wallet = stripUndefinedDeep(
+    stripSensitivePinFromWallet({
+      ...wallet,
+      balanceMinor,
+      initialBalanceMinor,
+      balance: fromMinor(balanceMinor, wallet.currency),
+    })
+  );
   return {
     id: wallet.id,
     orgId,
@@ -747,11 +750,13 @@ function applyWalletDeltasToBatch(
     const currentMinor =
       typeof w.balanceMinor === 'number' ? w.balanceMinor : toMinor(w.balance, w.currency);
     const nextMinor = currentMinor + deltaMinor;
-    const nextWallet: Wallet = stripUndefinedDeep({
-      ...w,
-      balanceMinor: nextMinor,
-      balance: fromMinor(nextMinor, w.currency),
-    });
+    const nextWallet: Wallet = stripUndefinedDeep(
+      stripSensitivePinFromWallet({
+        ...w,
+        balanceMinor: nextMinor,
+        balance: fromMinor(nextMinor, w.currency),
+      })
+    );
     batch.update(doc(db, 'organizations', orgId, 'wallets', walletId), {
       balanceMinor: nextMinor,
       payload: nextWallet,
@@ -1044,11 +1049,13 @@ export async function moveOrgTransactionsCloud(
     const currentMinor =
       typeof w.balanceMinor === 'number' ? w.balanceMinor : toMinor(w.balance, w.currency);
     const nextMinor = currentMinor + deltaMinor;
-    const nextWallet: Wallet = stripUndefinedDeep({
-      ...w,
-      balanceMinor: nextMinor,
-      balance: fromMinor(nextMinor, w.currency),
-    });
+    const nextWallet: Wallet = stripUndefinedDeep(
+      stripSensitivePinFromWallet({
+        ...w,
+        balanceMinor: nextMinor,
+        balance: fromMinor(nextMinor, w.currency),
+      })
+    );
     ops.push((batch) => {
       batch.update(doc(db, 'organizations', orgId, 'wallets', walletId), {
         balanceMinor: nextMinor,
@@ -1175,11 +1182,13 @@ export async function recalculateOrgBalancesFromApproved(
   const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
   for (const w of wallets) {
     const nextMinor = walletMinorTotals.get(w.id) ?? 0;
-    const updatedWallet: Wallet = stripUndefinedDeep({
-      ...w,
-      balanceMinor: nextMinor,
-      balance: fromMinor(nextMinor, w.currency),
-    });
+    const updatedWallet: Wallet = stripUndefinedDeep(
+      stripSensitivePinFromWallet({
+        ...w,
+        balanceMinor: nextMinor,
+        balance: fromMinor(nextMinor, w.currency),
+      })
+    );
     ops.push((batch) => {
       batch.update(doc(db, 'organizations', orgId, 'wallets', w.id), {
         balanceMinor: nextMinor,

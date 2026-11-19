@@ -28,12 +28,14 @@ import {
 import {
   adminCancelUserSubscription,
   adminUpdateUserSubscription,
+  auth,
   changeAdminPinOnServer,
   CloudUserProfile,
   createLicenseCodeOnServer,
   fetchAdminStatusFromServer,
   fetchAllUsersForAdmin,
   fetchLicenseCodesFromServer,
+  resolveFirebaseUserEmail,
   ServerApiError,
   ServerLicenseCodeRecord,
   setupAdminPinOnServer,
@@ -117,7 +119,8 @@ export const AdminCodePanelModal: React.FC = () => {
   const [isLoadingCoupons, setIsLoadingCoupons] = useState(false);
   const [copiedAdminCode, setCopiedAdminCode] = useState(false);
 
-  const isAuthorizedAdmin = Boolean(isAdminUser && isPrimarySystemAdminEmail(user?.email));
+  const effectiveAdminEmail = user?.email || resolveFirebaseUserEmail(auth.currentUser);
+  const isAuthorizedAdmin = Boolean(isAdminUser && isPrimarySystemAdminEmail(effectiveAdminEmail));
 
   // Reset passcode gate, ephemeral session token & transient editor state every time modal closes
   useEffect(() => {
@@ -1277,8 +1280,8 @@ export const AdminCodePanelModal: React.FC = () => {
                     </p>
                     <p className="text-[11px] text-[var(--color-muted)] leading-relaxed">
                       {isRTL
-                        ? 'الوصول للوحة التحكم، توليد أكواد التفعيل، وتعديل الاشتراكات محصور بهذا البريد الإلكتروني الموثّق عبر Firebase Auth ID Token فقط. يُحفظ الرمز السري مشفراً بملح عشوائي (scrypt) ولا يُخزن أبداً كنص صريح.'
-                        : 'Admin panel access, license issuance, and subscription overrides are strictly locked to this verified account via Firebase Auth ID Token. Your PIN is stored exclusively as a salted scrypt hash.'}
+                        ? 'الوصول للوحة التحكم، توليد أكواد التفعيل، وتعديل الاشتراكات محصور بهذا البريد الإلكتروني الموثّق عبر Firebase Auth ID Token فقط. يُحفظ الرمز السري مشفراً بملح عشوائي (scrypt) داخل مستند محمي على الخادم (adminConfig/security) ولا يُخزن أبداً كنص صريح.'
+                        : 'Admin panel access, license issuance, and subscription overrides are strictly locked to this verified account via Firebase Auth ID Token. Your PIN is stored exclusively as a salted scrypt hash in adminConfig/security on the server.'}
                     </p>
                     {pinUpdatedAtMs && (
                       <p className="text-[10px] text-[var(--color-muted)]">

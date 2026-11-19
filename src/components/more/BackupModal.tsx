@@ -322,11 +322,23 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     }, 1000);
   };
 
+  const MAX_IMPORT_FILE_BYTES = 25 * 1024 * 1024; // 25MB safety cap
+
   // Import full JSON (detects encrypted payload automatically)
   const handleImportJSON = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = '';
+
+    if (file.size > MAX_IMPORT_FILE_BYTES) {
+      setMessage({
+        text: isRTL
+          ? 'حجم الملف يتجاوز الحد الأقصى المسموح به (25 ميجابايت). يرجى اختيار ملف أصغر.'
+          : 'File size exceeds the 25MB maximum limit. Please select a smaller file.',
+        error: true,
+      });
+      return;
+    }
 
     const reader = new FileReader();
     reader.onload = async (event) => {
@@ -422,6 +434,17 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = '';
+
+    if (file.size > MAX_IMPORT_FILE_BYTES) {
+      resetImportPreviewState();
+      setMessage({
+        text: isRTL
+          ? 'حجم ملف Excel/CSV يتجاوز الحد الأقصى المسموح به (25 ميجابايت). يرجى تقسيم الملف والمحاولة مجدداً.'
+          : 'Excel/CSV file size exceeds the 25MB maximum limit. Please split the file and try again.',
+        error: true,
+      });
+      return;
+    }
 
     try {
       const buffer = await file.arrayBuffer();

@@ -444,7 +444,7 @@ export function isAllowedCorsOrigin(
   origin: string | undefined,
   requestHost: string | undefined,
   protocol: string | undefined,
-  env?: { appUrl?: string; allowedOrigins?: string }
+  env?: { appUrl?: string; allowedOrigins?: string; forwardedHost?: string }
 ): boolean {
   if (!origin) return true;
   const normalizedOrigin = normalizeOriginString(origin);
@@ -457,13 +457,20 @@ export function isAllowedCorsOrigin(
     'http://127.0.0.1:5173',
   ]);
 
-  if (requestHost && requestHost.trim()) {
-    const cleanHost = requestHost.trim().toLowerCase();
-    const proto = (protocol || 'http').toLowerCase() === 'https' ? 'https' : 'http';
-    allowed.add(`${proto}://${cleanHost}`);
-    allowed.add(`https://${cleanHost}`);
-    allowed.add(`http://${cleanHost}`);
-  }
+  const addHostVariants = (rawHost?: string) => {
+    if (!rawHost) return;
+    for (const part of rawHost.split(',')) {
+      const cleanHost = part.trim().toLowerCase();
+      if (!cleanHost) continue;
+      const proto = (protocol || 'http').toLowerCase() === 'https' ? 'https' : 'http';
+      allowed.add(`${proto}://${cleanHost}`);
+      allowed.add(`https://${cleanHost}`);
+      allowed.add(`http://${cleanHost}`);
+    }
+  };
+
+  addHostVariants(requestHost);
+  addHostVariants(env?.forwardedHost);
 
   if (env?.appUrl) {
     const parsedApp = normalizeOriginString(env.appUrl);
@@ -542,3 +549,60 @@ export function generateRandomLicenseCodeServer(params: {
     cycle,
   };
 }
+
+// =============================================================================
+// Server Hardening Pure Helpers (Unit-Testable)
+// =============================================================================
+
+export const SAFE_WEBHOOK_ID_REGEX = /^[A-Za-z0-9_-]{1,120}$/;
+
+export function isSafeWebhookId(value: unknown): value is string {
+  return typeof value === 'string' && SAFE_WEBHOOK_ID_REGEX.test(value);
+}
+
+export function resolveAdminSessionSecret(envSecret?: string): Buffer {
+  const trimmed = typeof envSecret === 'string' ? envSecret.trim() : '';
+  if (trimmed.length >= 32) {
+    return Buffer.from(trimmed, 'utf8');
+  }
+  return crypto.randomBytes(32);
+}
+
+export function isSensitiveRevocationPath(originalUrl: string): boolean {
+  return /^\/api\/(admin|delete-account|org\/(delete|transfer-ownership))(\/|\?|$)/.test(
+    String(originalUrl || '')
+  );
+}
+
+const ALLOWED_ORG_SCANNER_ROLES = new Set(['owner', 'admin', 'accountant', 'employee']);
+
+export function isOrgReceiptScannerRole(role: unknown): boolean {
+  return typeof role === 'string' && ALLOWED_ORG_SCANNER_ROLES.has(role);
+}
+
+export type SameUserCodeReuseDecision =
+  | 'other_org'
+  | 'idempotent_active'
+  | 'expired_reject';
+
+/**
+ * Evaluate what happens when the same user attempts to redeem a license code
+ * they already redeemed previously:
+ * - Different targetOrgId (including personal vs org mismatch) -> reject 409 CODE_ALREADY_USED_OTHER_ORG
+ * - Currently active entitlement -> idempotent 200 success
+ * - Expired entitlement -> reject 409 CODE_ALREADY_USED (never allow infinite free renewal!)
+ */
+export function evaluateSameUserCodeReuse(params: {
+  usedOrgId?: string | null;
+  targetOrgId?: string | null;
+  currentIsPro: boolean;
+}): SameUserCodeReuseDecision {
+  if ((params.usedOrgId || '') !== (params.targetOrgId || '')) {
+    return 'other_org';
+  }
+  if (params.currentIsPro) {
+    return 'idempotent_active';
+  }
+  return 'expired_reject';
+}
+

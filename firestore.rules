@@ -33,7 +33,8 @@ service cloud.firestore {
     function isAdmin() {
       return isVerifiedUser()
         && ('email' in request.auth.token)
-        && request.auth.token.email.lower() == 'hapaypal2003@gmail.com';
+        && request.auth.token.email is string
+        && request.auth.token.email.trim().lower() == 'hapaypal2003@gmail.com';
     }
 
     function isValidAdminPanelConfig(data) {
@@ -47,7 +48,7 @@ service cloud.firestore {
         && data.updatedByUid == request.auth.uid
         && isValidId(data.updatedByUid)
         && data.updatedByEmail is string
-        && data.updatedByEmail.lower() == 'hapaypal2003@gmail.com'
+        && data.updatedByEmail.trim().lower() == 'hapaypal2003@gmail.com'
         && data.updatedAtMs is number
         && data.updatedAtMs > 0
         && (!('createdAt' in data) || data.createdAt is timestamp)
@@ -107,7 +108,7 @@ service cloud.firestore {
         && data.createdByUid == request.auth.uid
         && isValidId(data.createdByUid)
         && data.createdByEmail is string
-        && data.createdByEmail.lower() == 'hapaypal2003@gmail.com'
+        && data.createdByEmail.trim().lower() == 'hapaypal2003@gmail.com'
         && data.createdAtMs is number
         && data.createdAtMs > 0
         && data.createdAt is timestamp;
@@ -161,14 +162,37 @@ service cloud.firestore {
         && (!('lockedUntilDate' in o.data) || o.data.lockedUntilDate == null || o.data.lockedUntilDate == '' || dateStr > o.data.lockedUntilDate);
     }
 
+    function currencyMinorFactor(currencyCode) {
+      return currencyCode in ['KWD', 'BHD', 'OMR', 'JOD', 'TND', 'LYD', 'IQD'] ? 1000 : 100;
+    }
+
+    function isConsistentAmountMinor(orgId, data) {
+      let o = orgDoc(orgId);
+      let curr = ('currency' in data.payload && data.payload.currency is string)
+        ? data.payload.currency
+        : (o != null ? o.data.get('currency', 'EGP') : 'EGP');
+      let factor = currencyMinorFactor(curr);
+      return data.payload.amount is number
+        && data.payload.amount >= 0
+        && math.abs(data.amountMinor - math.round(data.payload.amount * factor)) <= 1;
+    }
+
     function isWithinEmployeeSpendingLimit(orgId, data) {
       let m = memberDoc(orgId);
       return !('spendingLimit' in m.data)
         || m.data.spendingLimit == null
         || m.data.spendingLimit <= 0
         || (
-          ('amountMinor' in data && 'spendingLimitMinor' in m.data && data.amountMinor <= m.data.spendingLimitMinor)
-          || ('payload' in data && 'amount' in data.payload && data.payload.amount is number && data.payload.amount <= m.data.spendingLimit)
+          'spendingLimitMinor' in m.data
+          && m.data.spendingLimitMinor is int
+          && m.data.spendingLimitMinor > 0
+          && 'amountMinor' in data
+          && data.amountMinor is int
+          && data.amountMinor <= m.data.spendingLimitMinor
+          && 'payload' in data
+          && 'amount' in data.payload
+          && data.payload.amount is number
+          && data.payload.amount <= m.data.spendingLimit
         );
     }
 
@@ -495,7 +519,12 @@ service cloud.firestore {
         && data.id is string && data.id == docId && isValidId(data.id)
         && data.orgId is string && data.orgId == orgId
         && (!('date' in data) || (data.date is string && data.date.size() <= 16))
-        && (!('amountMinor' in data) || (data.amountMinor is int && data.amountMinor >= 0))
+        && (!('amountMinor' in data) || (
+          data.amountMinor is int
+          && data.amountMinor >= 0
+          && 'amount' in data.payload
+          && isConsistentAmountMinor(orgId, data)
+        ))
         && (!('balanceMinor' in data) || data.balanceMinor is int)
         && (!('submittedBy' in data) || (data.submittedBy is string && data.submittedBy.size() <= 128))
         && (!('approvedBy' in data) || data.approvedBy == null || (data.approvedBy is string && data.approvedBy.size() <= 128))
@@ -524,16 +553,23 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
-    // Encrypted admin panel PIN config accessible solely by exclusive system admin
-    match /adminSecurity/{docId} {
-      allow get: if isAdmin() && isValidId(docId) && docId == 'panelConfig';
+    // Primary encrypted admin panel PIN config (adminConfig/security) accessible solely by exclusive system admin
+    match /adminConfig/{docId} {
+      allow get: if isAdmin() && isValidId(docId) && docId == 'security';
       allow list: if false;
       allow create, update: if isAdmin()
         && isValidId(docId)
-        && docId == 'panelConfig'
+        && docId == 'security'
         && isValidAdminPanelConfig(incoming())
         && incoming().updatedAt == request.time;
       allow delete: if false;
+    }
+
+    // Legacy encrypted admin panel PIN path (read-only fallback for seamless migration)
+    match /adminSecurity/{docId} {
+      allow get: if isAdmin() && isValidId(docId) && docId == 'panelConfig';
+      allow list: if false;
+      allow create, update, delete: if false;
     }
 
     // Server-only collections: never accessible from normal clients

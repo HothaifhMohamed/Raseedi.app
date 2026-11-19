@@ -605,9 +605,13 @@
       "schema": { "$ref": "#/entities/ActivationCode" },
       "description": "Server-only PRO activation code hashes"
     },
+    "/adminConfig/{docId}": {
+      "schema": { "$ref": "#/entities/AdminPanelConfig" },
+      "description": "Primary encrypted salted scrypt Admin Panel PIN configuration (adminConfig/security) restricted exclusively to hapaypal2003@gmail.com"
+    },
     "/adminSecurity/{docId}": {
       "schema": { "$ref": "#/entities/AdminPanelConfig" },
-      "description": "Encrypted salted scrypt Admin Panel PIN configuration restricted exclusively to hapaypal2003@gmail.com"
+      "description": "Legacy encrypted salted scrypt Admin Panel PIN configuration (read-only fallback) restricted exclusively to hapaypal2003@gmail.com"
     },
     "/licenseCodes/{codeHash}": {
       "schema": { "$ref": "#/entities/LicenseCode" },

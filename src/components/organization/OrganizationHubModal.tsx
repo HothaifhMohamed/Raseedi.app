@@ -220,7 +220,7 @@ export const OrganizationHubModal: React.FC = () => {
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [recalcMessage, setRecalcMessage] = useState<string | null>(null);
 
-  // Keep org inputs in sync when switching org
+  // Keep org inputs and transient modal/form states clean when switching org
   React.useEffect(() => {
     if (!activeOrganization) return;
     setOrgVatInput(String(activeOrganization.vatRate ?? 14));
@@ -232,6 +232,19 @@ export const OrganizationHubModal: React.FC = () => {
     setConfirmQuickDeleteOpen(false);
     setQuickDeleteError(null);
     setDeleteOrgConfirmName('');
+    setConfirmRemoveUid(null);
+    setEditingMemberLimit(null);
+    setConfirmTransferOpen(false);
+    setTransferTargetUid('');
+    setRejectTargetId(null);
+    setRejectReason('');
+    setSettleParty(null);
+    setCcFormOpen(false);
+    setPartyFormOpen(false);
+    setPettyFormOpen(false);
+    setConfirmRecalc(false);
+    setRecalcMessage(null);
+    setSettingsSavedBanner(false);
   }, [activeOrganization?.id]);
 
   // Load invites when Team tab is active for owner/admin
@@ -674,7 +687,7 @@ export const OrganizationHubModal: React.FC = () => {
     setIsDeletingOrg(true);
     setTeamFeedback(null);
     try {
-      await deleteOrganization(deleteOrgConfirmName.trim());
+      await deleteOrganization(deleteOrgConfirmName.trim(), activeOrganization.id);
       setDeleteOrgConfirmName('');
       setIsOrgHubOpen(false);
     } catch (err: any) {

@@ -1,5 +1,9 @@
 import type { OrgWorkspaceData, Transaction } from '../types';
 import type { AppDatabaseData } from './db';
+import {
+  stripSensitivePinFromSettings,
+  stripSensitivePinsFromWallets,
+} from './security';
 
 export const MAX_AUTO_CLOUD_BACKUPS = 7;
 
@@ -76,6 +80,7 @@ export function buildCompactBackupHistorySnapshotJson(
             id,
             {
               ...ws,
+              wallets: stripSensitivePinsFromWallets(ws.wallets || []),
               transactions: (ws.transactions || []).slice(0, 150).map((t) => {
                 if (!t.attachments?.length) return t;
                 const { attachments: _att, ...rest } = t;
@@ -87,12 +92,18 @@ export function buildCompactBackupHistorySnapshotJson(
       )
     : undefined;
 
+  const cloudSafeWallets = stripSensitivePinsFromWallets((data.wallets || []).slice(0, 200));
+  const cloudSafeSettings = stripSensitivePinFromSettings({
+    ...data.settings,
+    isPro: false,
+  });
+
   const makePayload = (txSlice: typeof sortedTx) =>
     JSON.stringify({
       schemaVersion: 2,
       updatedAtMs: data.updatedAtMs || Date.now(),
       transactions: txSlice,
-      wallets: (data.wallets || []).slice(0, 200),
+      wallets: cloudSafeWallets,
       categories: (data.categories || []).slice(0, 300),
       budgets: (data.budgets || []).slice(0, 200),
       debts: (data.debts || []).slice(0, 500),
@@ -101,7 +112,7 @@ export function buildCompactBackupHistorySnapshotJson(
       moneyCircles: (data.moneyCircles || []).slice(0, 200),
       ...(compactOrgs ? { orgWorkspaces: compactOrgs } : {}),
       ...(data.activeWorkspace ? { activeWorkspace: data.activeWorkspace } : {}),
-      settings: { ...data.settings, isPro: false },
+      settings: cloudSafeSettings,
       hasCompletedOnboarding: Boolean(data.hasCompletedOnboarding),
     });
 

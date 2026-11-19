@@ -44,9 +44,14 @@ import {
   hashAdminPinServer,
   hashLicenseCodeServer,
   isAllowedCorsOrigin,
+  isOrgReceiptScannerRole,
+  isSafeWebhookId,
+  isSensitiveRevocationPath,
   isServerAdminUser,
   normalizeScannedReceiptResult,
   resolveActivationPlanDetails,
+  resolveAdminSessionSecret,
+  evaluateSameUserCodeReuse,
   ServerActivationPlan,
   ServerSupportedBillingCycle,
   ServerSupportedPlanTier,
@@ -64,8 +69,9 @@ const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
 const GEMINI_SCAN_MODEL = process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash';
-const ADMIN_SESSION_SECRET = crypto.randomBytes(32);
+const ADMIN_SESSION_SECRET = resolveAdminSessionSecret(process.env.ADMIN_SESSION_SECRET);
 const ADMIN_SESSION_TTL_MS = 30 * 60 * 1000;
+let revocationLookupWarned = false;
 const VALID_ORG_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
 const VALID_INDUSTRIES = new Set<OrganizationIndustry>([
   'retail',
@@ -194,20 +200,63 @@ function getBootstrapEnvPasscode(): string {
   return (process.env.ADMIN_PASSCODE || process.env.ADMIN_PANEL_PASSCODE || '').trim();
 }
 
+const ADMIN_CONFIG_COLLECTION = 'adminConfig';
+const ADMIN_CONFIG_DOC_ID = 'security';
+const ADMIN_CONFIG_PATH = `${ADMIN_CONFIG_COLLECTION}/${ADMIN_CONFIG_DOC_ID}`;
+const LEGACY_ADMIN_SECURITY_COLLECTION = 'adminSecurity';
+const LEGACY_ADMIN_SECURITY_DOC_ID = 'panelConfig';
+const LEGACY_ADMIN_SECURITY_PATH = `${LEGACY_ADMIN_SECURITY_COLLECTION}/${LEGACY_ADMIN_SECURITY_DOC_ID}`;
+
+function extractPinFromRecord(data?: Record<string, unknown> | null): {
+  pinHash: string;
+  updatedAtMs: number | null;
+} | null {
+  if (!data) return null;
+  const pinHash = typeof data.pinHash === 'string' ? data.pinHash.trim() : '';
+  if (!pinHash) return null;
+  const updatedAtMs =
+    typeof data.updatedAtMs === 'number' && Number.isFinite(data.updatedAtMs)
+      ? data.updatedAtMs
+      : null;
+  return { pinHash, updatedAtMs };
+}
+
 async function loadAdminPanelPinState(adminIdToken?: string): Promise<AdminPanelPinState> {
   if (adminDbReady) {
     try {
-      const snap = await adminDb.collection('adminSecurity').doc('panelConfig').get();
+      const snap = await adminDb.collection(ADMIN_CONFIG_COLLECTION).doc(ADMIN_CONFIG_DOC_ID).get();
       if (snap.exists) {
-        const data = snap.data() as Record<string, unknown> | undefined;
-        const pinHash = typeof data?.pinHash === 'string' ? data.pinHash.trim() : '';
-        const updatedAtMs =
-          typeof data?.updatedAtMs === 'number' && Number.isFinite(data.updatedAtMs)
-            ? data.updatedAtMs
-            : null;
-        if (pinHash) {
-          cachedAdminPinState = { pinHash, updatedAtMs: updatedAtMs || Date.now() };
-          return { pinHash, source: 'firestore', updatedAtMs };
+        const extracted = extractPinFromRecord(snap.data() as Record<string, unknown> | undefined);
+        if (extracted) {
+          cachedAdminPinState = {
+            pinHash: extracted.pinHash,
+            updatedAtMs: extracted.updatedAtMs || Date.now(),
+          };
+          return {
+            pinHash: extracted.pinHash,
+            source: 'firestore',
+            updatedAtMs: extracted.updatedAtMs,
+          };
+        }
+      }
+      const legacySnap = await adminDb
+        .collection(LEGACY_ADMIN_SECURITY_COLLECTION)
+        .doc(LEGACY_ADMIN_SECURITY_DOC_ID)
+        .get();
+      if (legacySnap.exists) {
+        const extracted = extractPinFromRecord(
+          legacySnap.data() as Record<string, unknown> | undefined
+        );
+        if (extracted) {
+          cachedAdminPinState = {
+            pinHash: extracted.pinHash,
+            updatedAtMs: extracted.updatedAtMs || Date.now(),
+          };
+          return {
+            pinHash: extracted.pinHash,
+            source: 'firestore',
+            updatedAtMs: extracted.updatedAtMs,
+          };
         }
       }
     } catch (err) {
@@ -218,21 +267,26 @@ async function loadAdminPanelPinState(adminIdToken?: string): Promise<AdminPanel
   }
 
   if (!adminDbReady && adminIdToken) {
-    const restDoc = await fetchFirestoreDocumentWithToken({
-      projectId: firebaseConfig.projectId,
-      databaseId: firebaseConfig.firestoreDatabaseId,
-      documentPath: 'adminSecurity/panelConfig',
-      idToken: adminIdToken,
-    });
-    if (restDoc.exists && restDoc.data) {
-      const pinHash = typeof restDoc.data.pinHash === 'string' ? restDoc.data.pinHash.trim() : '';
-      const updatedAtMs =
-        typeof restDoc.data.updatedAtMs === 'number' && Number.isFinite(restDoc.data.updatedAtMs)
-          ? restDoc.data.updatedAtMs
-          : null;
-      if (pinHash) {
-        cachedAdminPinState = { pinHash, updatedAtMs: updatedAtMs || Date.now() };
-        return { pinHash, source: 'firestore', updatedAtMs };
+    for (const candidatePath of [ADMIN_CONFIG_PATH, LEGACY_ADMIN_SECURITY_PATH]) {
+      const restDoc = await fetchFirestoreDocumentWithToken({
+        projectId: firebaseConfig.projectId,
+        databaseId: firebaseConfig.firestoreDatabaseId,
+        documentPath: candidatePath,
+        idToken: adminIdToken,
+      });
+      if (restDoc.exists && restDoc.data) {
+        const extracted = extractPinFromRecord(restDoc.data);
+        if (extracted) {
+          cachedAdminPinState = {
+            pinHash: extracted.pinHash,
+            updatedAtMs: extracted.updatedAtMs || Date.now(),
+          };
+          return {
+            pinHash: extracted.pinHash,
+            source: 'firestore',
+            updatedAtMs: extracted.updatedAtMs,
+          };
+        }
       }
     }
   }
@@ -264,7 +318,7 @@ async function saveAdminPanelPinHash(params: {
 
   if (adminDbReady) {
     try {
-      const ref = adminDb.collection('adminSecurity').doc('panelConfig');
+      const ref = adminDb.collection(ADMIN_CONFIG_COLLECTION).doc(ADMIN_CONFIG_DOC_ID);
       const existingSnap = await ref.get();
       await ref.set(
         {
@@ -292,14 +346,14 @@ async function saveAdminPanelPinHash(params: {
     const existingRest = await fetchFirestoreDocumentWithToken({
       projectId: firebaseConfig.projectId,
       databaseId: firebaseConfig.firestoreDatabaseId,
-      documentPath: 'adminSecurity/panelConfig',
+      documentPath: ADMIN_CONFIG_PATH,
       idToken: params.adminIdToken,
     });
     const isNew = !existingRest.exists;
     const writeRes = await commitFirestoreWriteWithToken({
       projectId: firebaseConfig.projectId,
       databaseId: firebaseConfig.firestoreDatabaseId,
-      documentPath: 'adminSecurity/panelConfig',
+      documentPath: ADMIN_CONFIG_PATH,
       idToken: params.adminIdToken,
       data: {
         pinHash: params.pinHash,
@@ -362,7 +416,7 @@ async function ensureAdminCustomClaim(authUser?: DecodedIdToken): Promise<{
     return { synced: true, claimsUpdated: false };
   }
 
-  try {
+  const syncTask = (async () => {
     const userRecord = await adminAuth.getUser(authUser.uid);
     const { changed, claims } = buildAdminCustomClaims(
       userRecord.customClaims as Record<string, unknown> | undefined
@@ -371,12 +425,24 @@ async function ensureAdminCustomClaim(authUser?: DecodedIdToken): Promise<{
       await adminAuth.setCustomUserClaims(authUser.uid, claims);
     }
     return { synced: true, claimsUpdated: true };
+  })();
+
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const timeoutTask = new Promise<{ synced: boolean; claimsUpdated: boolean }>((resolve) => {
+    timeoutId = setTimeout(() => resolve({ synced: false, claimsUpdated: false }), 2500);
+  });
+
+  try {
+    return await Promise.race([syncTask, timeoutTask]);
   } catch (err) {
     console.warn(
       'Unable to auto-sync admin custom claim (check roles/firebaseauth.admin IAM permission):',
       err instanceof Error ? err.message : err
     );
     return { synced: false, claimsUpdated: false };
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+    void syncTask.catch(() => {});
   }
 }
 
@@ -574,7 +640,41 @@ async function requireFirebaseAuth(
   }
 
   try {
-    const decoded = await adminAuth.verifyIdToken(token);
+    const checkRevoked = isSensitiveRevocationPath(req.originalUrl);
+    let decoded: DecodedIdToken;
+    try {
+      decoded = await adminAuth.verifyIdToken(token, checkRevoked);
+    } catch (verifyErr) {
+      const errCode = String((verifyErr as { code?: string })?.code || '');
+      const errMsg = String(
+        verifyErr instanceof Error ? verifyErr.message : verifyErr
+      ).toLowerCase();
+      const isGenuineAuthFailure =
+        errCode === 'auth/id-token-revoked' ||
+        errCode === 'auth/user-disabled' ||
+        errCode === 'auth/id-token-expired' ||
+        errCode === 'auth/argument-error';
+      const isIamLookupUnavailable =
+        checkRevoked &&
+        !isGenuineAuthFailure &&
+        (errCode === 'auth/internal-error' ||
+          errMsg.includes('permission') ||
+          errMsg.includes('identitytoolkit') ||
+          errMsg.includes('service account') ||
+          errMsg.includes('credential') ||
+          errMsg.includes('metadata'));
+
+      if (!isIamLookupUnavailable) {
+        throw verifyErr;
+      }
+      if (!revocationLookupWarned) {
+        revocationLookupWarned = true;
+        console.warn(
+          'Token revocation check unavailable in current IAM environment; falling back to signature verification.'
+        );
+      }
+      decoded = await adminAuth.verifyIdToken(token, false);
+    }
     req.authUser = decoded;
     next();
   } catch (err) {
@@ -593,14 +693,76 @@ async function createApp() {
 
   app.use(
     helmet({
-      contentSecurityPolicy: false,
+      contentSecurityPolicy: {
+        useDefaults: false,
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: [
+            "'self'",
+            "'unsafe-inline'",
+            'https://apis.google.com',
+            'https://accounts.google.com',
+            'https://www.gstatic.com',
+            'https://www.google.com',
+            'https://*.firebaseapp.com',
+            'https://pagead2.googlesyndication.com',
+            'https://*.googlesyndication.com',
+            'https://googleads.g.doubleclick.net',
+            'https://*.adtrafficquality.google',
+            'https://adservice.google.com',
+          ],
+          styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+          fontSrc: ["'self'", 'data:', 'https://fonts.gstatic.com'],
+          imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
+          connectSrc: [
+            "'self'",
+            'https://*.googleapis.com',
+            'https://*.firebaseio.com',
+            'https://*.firebaseapp.com',
+            'https://*.firebasestorage.app',
+            'https://*.gstatic.com',
+            'https://apis.google.com',
+            'https://accounts.google.com',
+            'https://open.er-api.com',
+            'https://cdn.jsdelivr.net',
+            'https://api.frankfurter.dev',
+            'https://pagead2.googlesyndication.com',
+            'https://*.googlesyndication.com',
+            'https://googleads.g.doubleclick.net',
+            'https://*.doubleclick.net',
+            'https://*.adtrafficquality.google',
+            'wss:',
+            'ws:',
+          ],
+          frameSrc: [
+            "'self'",
+            'https://*.firebaseapp.com',
+            'https://accounts.google.com',
+            'https://www.google.com',
+            'https://googleads.g.doubleclick.net',
+            'https://tpc.googlesyndication.com',
+            'https://*.googlesyndication.com',
+            'https://*.adtrafficquality.google',
+          ],
+          workerSrc: ["'self'", 'blob:'],
+          manifestSrc: ["'self'"],
+          objectSrc: ["'none'"],
+          baseUri: ["'self'"],
+          formAction: ["'self'"],
+        },
+      },
       crossOriginEmbedderPolicy: false,
+      frameguard: false,
     })
   );
 
   app.use('/api', (req: Request, res: Response, next: NextFunction) => {
     const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
     const host = req.get('host') || undefined;
+    const forwardedHost =
+      typeof req.headers['x-forwarded-host'] === 'string'
+        ? req.headers['x-forwarded-host']
+        : undefined;
     const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http')
       .split(',')[0]
       .trim();
@@ -609,6 +771,7 @@ async function createApp() {
       !isAllowedCorsOrigin(origin, host, proto, {
         appUrl: process.env.APP_URL,
         allowedOrigins: process.env.ALLOWED_ORIGINS,
+        forwardedHost,
       })
     ) {
       res.status(403).json({
@@ -669,6 +832,30 @@ async function createApp() {
     message: {
       error: 'RATE_LIMITED',
       message: 'محاولات كثيرة. يرجى المحاولة بعد عدة دقائق.',
+    },
+  });
+
+  const redeemUidLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) =>
+      (req as AuthenticatedRequest).authUser?.uid || ipKeyGenerator(req.ip || '127.0.0.1'),
+    message: {
+      error: 'RATE_LIMITED',
+      message: 'تم تجاوز عدد محاولات التفعيل المسموح بها لحسابك. انتظر قليلاً.',
+    },
+  });
+
+  const adminStatusLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+      error: 'RATE_LIMITED',
+      message: 'طلبات تحقق كثيرة خلال فترة قصيرة. انتظر قليلاً وحاول مجدداً.',
     },
   });
 
@@ -869,13 +1056,13 @@ async function createApp() {
     }
   );
 
-  // Strict 3mb JSON limit on receipt scan endpoint
+  // Strict 3mb JSON limit on receipt scan endpoint — authenticate BEFORE parsing 3MB JSON body
   app.post(
     '/api/scan-receipt',
     scanIpLimiter,
-    express.json({ limit: '3mb' }),
     requireFirebaseAuth,
     scanUidLimiter,
+    express.json({ limit: '3mb' }),
     async (req: AuthenticatedRequest, res: Response) => {
       const uid = req.authUser!.uid;
       const monthKey = getUtcMonthKey();
@@ -919,7 +1106,7 @@ async function createApp() {
             .doc(monthKey);
         }
 
-        // Atomic monthly quota check & increment
+        // Atomic monthly quota check & increment (writes strictly to scanQuotas subcollection to avoid org-doc contention)
         const quotaState = await adminDb.runTransaction(async (tx) => {
           if (targetOrgId) {
             const orgRef = adminDb.collection('organizations').doc(targetOrgId);
@@ -930,7 +1117,12 @@ async function createApp() {
               tx.get(activeQuotaRef),
             ]);
 
-            if (!orgSnap.exists || !memberSnap.exists || memberSnap.data()?.status !== 'active') {
+            if (
+              !orgSnap.exists ||
+              !memberSnap.exists ||
+              memberSnap.data()?.status !== 'active' ||
+              !isOrgReceiptScannerRole(memberSnap.data()?.role)
+            ) {
               return { forbidden: true as const };
             }
             const subState = computeOrgSubscriptionState(orgSnap.data() as Record<string, unknown>);
@@ -960,10 +1152,6 @@ async function createApp() {
               },
               { merge: true }
             );
-            tx.update(orgRef, {
-              aiScansUsed: nextCount,
-              aiScansMonth: monthKey,
-            });
 
             return {
               allowed: true as const,
@@ -1128,17 +1316,6 @@ Return JSON matching the schema with:
                 },
                 { merge: true }
               );
-              if (targetOrgId) {
-                const orgRef = adminDb.collection('organizations').doc(targetOrgId);
-                const orgSnap = await tx.get(orgRef);
-                if (orgSnap.exists) {
-                  const prevOrgUsed = Math.max(0, Number(orgSnap.data()?.aiScansUsed || 0));
-                  tx.update(orgRef, {
-                    aiScansUsed: Math.max(0, prevOrgUsed - 1),
-                    aiScansMonth: monthKey,
-                  });
-                }
-              }
             })
             .catch(() => {});
         }
@@ -1192,7 +1369,22 @@ Return JSON matching the schema with:
       return;
     }
 
-    if (!event || typeof event !== 'object' || !event.eventId || (!event.uid && !event.orgId) || event.status !== 'paid') {
+    if (
+      !event ||
+      typeof event !== 'object' ||
+      !isSafeWebhookId(event.eventId) ||
+      (!event.uid && !event.orgId) ||
+      event.status !== 'paid'
+    ) {
+      res.status(400).json({ error: 'INVALID_WEBHOOK_PAYLOAD' });
+      return;
+    }
+
+    const cleanUid =
+      event.uid !== undefined && event.uid !== null && event.uid !== ''
+        ? String(event.uid).trim().slice(0, 128)
+        : '';
+    if (event.uid !== undefined && event.uid !== null && event.uid !== '' && !isSafeWebhookId(cleanUid)) {
       res.status(400).json({ error: 'INVALID_WEBHOOK_PAYLOAD' });
       return;
     }
@@ -1218,7 +1410,7 @@ Return JSON matching the schema with:
 
     try {
       const extraSeats = Math.max(0, Math.floor(Number(event.extraSeats || 0)));
-      const eventRef = adminDb.collection('paymentWebhooks').doc(event.eventId.slice(0, 120));
+      const eventRef = adminDb.collection('paymentWebhooks').doc(event.eventId);
 
       const outcome = await adminDb.runTransaction(async (tx) => {
         const eventSnap = await tx.get(eventRef);
@@ -1229,20 +1421,26 @@ Return JSON matching the schema with:
         const orgRef = orgId ? adminDb.collection('organizations').doc(orgId) : null;
         const orgSnap = orgRef ? await tx.get(orgRef) : null;
 
+        // Abort before recording webhook idempotency doc if target org does not exist yet
+        // so the payment provider receives 500 and retries instead of silently losing the upgrade.
+        if (orgRef && !orgSnap?.exists) {
+          throw new Error('ORG_NOT_FOUND');
+        }
+
         tx.set(eventRef, {
-          uid: event.uid || null,
+          uid: cleanUid || null,
           orgId: orgId || null,
           plan: planInfo.proPlan,
           extraSeats,
           processedAt: FieldValue.serverTimestamp(),
         });
 
-        if (event.uid) {
-          const userRef = adminDb.collection('users').doc(event.uid.slice(0, 128));
+        if (cleanUid) {
+          const userRef = adminDb.collection('users').doc(cleanUid);
           tx.set(
             userRef,
             {
-              uid: event.uid,
+              uid: cleanUid,
               isPro: true,
               proPlan: planInfo.proPlan,
               planTier: planInfo.planTier,
@@ -1284,41 +1482,64 @@ Return JSON matching the schema with:
   // Small JSON parser for non-scan API routes
   app.use('/api', express.json({ limit: '64kb' }));
 
-  app.get(
-    '/api/admin/status',
-    redeemIpLimiter,
-    requireFirebaseAuth,
-    async (req: AuthenticatedRequest, res: Response) => {
-      const authUser = req.authUser!;
-      const isAdmin = isAdminRequestUser(authUser);
-      if (!isAdmin) {
-        res.json({
-          ok: true,
-          isAdmin: false,
-          pinConfigured: false,
-          pinSource: 'unset',
-          pinUpdatedAtMs: null,
-          customClaimSynced: false,
-          claimsUpdated: false,
-        });
-        return;
-      }
-
-      const idToken = extractBearerToken(req);
-      const [claimSync, pinState] = await Promise.all([
-        ensureAdminCustomClaim(authUser),
-        loadAdminPanelPinState(idToken),
-      ]);
+  const handleAdminStatusOrBootstrap = async (req: AuthenticatedRequest, res: Response) => {
+    const authUser = req.authUser!;
+    const isAdmin = isAdminRequestUser(authUser);
+    if (!isAdmin) {
       res.json({
         ok: true,
-        isAdmin: true,
-        pinConfigured: pinState.source !== 'unset',
-        pinSource: pinState.source,
-        pinUpdatedAtMs: pinState.updatedAtMs,
-        customClaimSynced: claimSync.synced,
-        claimsUpdated: claimSync.claimsUpdated,
+        isAdmin: false,
+        pinConfigured: false,
+        pinSource: 'unset',
+        pinUpdatedAtMs: null,
+        customClaimSynced: false,
+        claimsUpdated: false,
       });
+      return;
     }
+
+    const idToken = extractBearerToken(req);
+    const [claimSync, pinState] = await Promise.all([
+      ensureAdminCustomClaim(authUser).catch(() => ({
+        synced: false,
+        claimsUpdated: false,
+      })),
+      loadAdminPanelPinState(idToken).catch(
+        (): AdminPanelPinState => ({
+          pinHash: cachedAdminPinState?.pinHash || null,
+          source: cachedAdminPinState?.pinHash
+            ? 'firestore'
+            : getBootstrapEnvPasscode()
+            ? 'env'
+            : 'unset',
+          updatedAtMs: cachedAdminPinState?.updatedAtMs || null,
+        })
+      ),
+    ]);
+
+    res.json({
+      ok: true,
+      isAdmin: true,
+      pinConfigured: pinState.source !== 'unset',
+      pinSource: pinState.source,
+      pinUpdatedAtMs: pinState.updatedAtMs,
+      customClaimSynced: claimSync.synced,
+      claimsUpdated: claimSync.claimsUpdated,
+    });
+  };
+
+  app.get(
+    '/api/admin/status',
+    adminStatusLimiter,
+    requireFirebaseAuth,
+    handleAdminStatusOrBootstrap
+  );
+
+  app.post(
+    '/api/admin/bootstrap',
+    adminStatusLimiter,
+    requireFirebaseAuth,
+    handleAdminStatusOrBootstrap
   );
 
   app.post(
@@ -1935,6 +2156,7 @@ Return JSON matching the schema with:
     '/api/redeem-code',
     redeemIpLimiter,
     requireFirebaseAuth,
+    redeemUidLimiter,
     async (req: AuthenticatedRequest, res: Response) => {
       const uid = req.authUser!.uid;
       const email = req.authUser!.email || '';
@@ -2048,15 +2270,20 @@ Return JSON matching the schema with:
                 message: 'تم تفعيل هذا الكود مسبقاً على حسابك.',
               };
             }
-            if (targetOrgId && codeData.usedOrgId && codeData.usedOrgId !== targetOrgId) {
+            const currentEntitlement = resolveUserEntitlement(userSnap.data());
+            const reuseDecision = evaluateSameUserCodeReuse({
+              usedOrgId: codeData.usedOrgId,
+              targetOrgId,
+              currentIsPro: currentEntitlement.isPro,
+            });
+            if (reuseDecision === 'other_org') {
               return {
                 status: 409 as const,
                 error: 'CODE_ALREADY_USED_OTHER_ORG',
                 message: 'تم استخدام هذا الكود مسبقاً لمؤسسة أخرى.',
               };
             }
-            const currentEntitlement = resolveUserEntitlement(userSnap.data());
-            if (currentEntitlement.isPro) {
+            if (reuseDecision === 'idempotent_active') {
               return {
                 status: 200 as const,
                 isPro: true,
@@ -2072,6 +2299,12 @@ Return JSON matching the schema with:
                   : undefined,
               };
             }
+            // Expired subscription: strictly forbid reusing the already-redeemed code
+            return {
+              status: 409 as const,
+              error: 'CODE_ALREADY_USED',
+              message: 'تم استخدام هذا الكود مسبقاً وانتهت صلاحيته.',
+            };
           }
 
           const previewResolved = resolveActivationPlanDetails(codeData.plan, {

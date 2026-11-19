@@ -240,10 +240,49 @@ export async function loadInitialData(): Promise<AppDatabaseData> {
   return initial;
 }
 
+const MAX_LS_CACHE_TRANSACTIONS = 200;
+const DEFAULT_PERSIST_DEBOUNCE_MS = 400;
+
+let pendingPersistData: AppDatabaseData | null = null;
+let pendingPersistTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingPersistErrorHandler: ((err: unknown) => void) | null = null;
+let pagehideFlushRegistered = false;
+
+export function cancelPendingPersistData(): void {
+  if (pendingPersistTimer !== null) {
+    clearTimeout(pendingPersistTimer);
+    pendingPersistTimer = null;
+  }
+  pendingPersistData = null;
+  pendingPersistErrorHandler = null;
+}
+
+export function buildLightweightLegacyCache(data: AppDatabaseData): AppDatabaseData {
+  // Keep at most the latest 200 attachment-stripped transactions in synchronous localStorage
+  // so multi-thousand transaction ledgers never block the main thread or exceed 5MB quota.
+  const recentTransactions =
+    data.transactions.length > MAX_LS_CACHE_TRANSACTIONS
+      ? [...data.transactions]
+          .sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.createdAt || 0) - (a.createdAt || 0))
+          .slice(0, MAX_LS_CACHE_TRANSACTIONS)
+      : data.transactions;
+
+  return {
+    ...data,
+    transactions: recentTransactions.map((t) =>
+      t.attachments?.length ? { ...t, attachments: undefined } : t
+    ),
+  };
+}
+
 /**
  * Persist primary data into IndexedDB (awaiting transaction completion) and store only lightweight cache in localStorage.
+ * Rejects if IndexedDB write fails/aborts so callers can surface errors to the user instead of failing silently.
  */
 export async function persistData(data: AppDatabaseData): Promise<void> {
+  // Cancel any older queued debounced write so it cannot overwrite this newer state
+  cancelPendingPersistData();
+
   const sanitizedData: AppDatabaseData = {
     ...data,
     settings: mergeSettingsWithDefaults(data.settings),
@@ -252,37 +291,84 @@ export async function persistData(data: AppDatabaseData): Promise<void> {
 
   const db = await openDB();
   if (db) {
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       try {
         const tx = db.transaction('app_data', 'readwrite');
         const store = tx.objectStore('app_data');
         store.put({ key: 'root_state', data: sanitizedData, updatedAt: Date.now() });
         tx.oncomplete = () => resolve();
         tx.onerror = () => {
-          console.warn('IndexedDB transaction failed');
-          resolve();
+          const err = tx.error || new Error('INDEXEDDB_TX_FAILED');
+          console.warn('IndexedDB transaction failed', err);
+          reject(err);
         };
-        tx.onabort = () => resolve();
+        tx.onabort = () => {
+          const err = tx.error || new Error('INDEXEDDB_TX_ABORTED');
+          console.warn('IndexedDB transaction aborted', err);
+          reject(err);
+        };
       } catch (err) {
         console.warn('IndexedDB save error', err);
-        resolve();
+        reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
   }
 
-  // Lightweight localStorage cache (settings + attachment-stripped fallback so 5MB limit never breaks)
+  // Lightweight localStorage cache (settings + at most 200 recent attachment-stripped transactions)
   try {
-    localStorage.setItem(SETTINGS_LS_KEY, JSON.stringify(sanitizedData.settings));
-    const lightweightData: AppDatabaseData = {
-      ...sanitizedData,
-      transactions: sanitizedData.transactions.map((t) =>
-        t.attachments?.length ? { ...t, attachments: undefined } : t
-      ),
-    };
-    localStorage.setItem(LEGACY_LS_KEY, JSON.stringify(lightweightData));
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(SETTINGS_LS_KEY, JSON.stringify(sanitizedData.settings));
+      const lightweightData = buildLightweightLegacyCache(sanitizedData);
+      localStorage.setItem(LEGACY_LS_KEY, JSON.stringify(lightweightData));
+    }
   } catch (err) {
     console.warn('LocalStorage cache save skipped (quota)', err);
   }
+}
+
+export function flushPendingPersistData(): Promise<void> {
+  if (!pendingPersistData) return Promise.resolve();
+  const dataToSave = pendingPersistData;
+  const onError = pendingPersistErrorHandler;
+  cancelPendingPersistData();
+  return persistData(dataToSave).catch((err) => {
+    onError?.(err);
+  });
+}
+
+function ensurePagehideFlushRegistered(): void {
+  if (pagehideFlushRegistered || typeof window === 'undefined') return;
+  pagehideFlushRegistered = true;
+  window.addEventListener('pagehide', () => {
+    void flushPendingPersistData();
+  });
+}
+
+/**
+ * Debounced local persistence (400ms default) with automatic pagehide flush
+ * so rapid UI mutations never serialize IndexedDB/localStorage on every keystroke or action.
+ */
+export function persistDataDebounced(
+  data: AppDatabaseData,
+  onError?: (err: unknown) => void,
+  delayMs = DEFAULT_PERSIST_DEBOUNCE_MS
+): void {
+  ensurePagehideFlushRegistered();
+  const sanitizedData: AppDatabaseData = {
+    ...data,
+    settings: mergeSettingsWithDefaults(data.settings),
+  };
+  memoryCache = sanitizedData;
+  pendingPersistData = sanitizedData;
+  pendingPersistErrorHandler = onError ?? null;
+
+  if (pendingPersistTimer !== null) {
+    clearTimeout(pendingPersistTimer);
+  }
+
+  pendingPersistTimer = setTimeout(() => {
+    void flushPendingPersistData();
+  }, Math.max(0, delayMs));
 }
 
 export async function savePreRestoreSnapshot(data: AppDatabaseData): Promise<void> {
@@ -378,13 +464,20 @@ export function validateBackupSchema(raw: unknown): {
   }
   if (Array.isArray(obj.transactions)) {
     for (const tx of obj.transactions) {
+      if (!tx || typeof tx !== 'object' || Array.isArray(tx)) {
+        return { valid: false, reason: 'INVALID_TRANSACTION_ITEM' };
+      }
+      const t = tx as Partial<Transaction>;
       if (
-        !tx ||
-        typeof tx !== 'object' ||
-        Array.isArray(tx) ||
-        typeof (tx as Transaction).id !== 'string' ||
-        typeof (tx as Transaction).amount !== 'number' ||
-        !Number.isFinite((tx as Transaction).amount)
+        typeof t.id !== 'string' ||
+        t.id.trim().length === 0 ||
+        typeof t.amount !== 'number' ||
+        !Number.isFinite(t.amount) ||
+        typeof t.date !== 'string' ||
+        !/^\d{4}-\d{2}-\d{2}/.test(t.date) ||
+        (t.type !== 'expense' && t.type !== 'income' && t.type !== 'transfer') ||
+        typeof t.walletId !== 'string' ||
+        t.walletId.trim().length === 0
       ) {
         return { valid: false, reason: 'INVALID_TRANSACTION_ITEM' };
       }
@@ -689,6 +782,7 @@ export function saveUnsyncedDirtyFlag(dirty: boolean): void {
 }
 
 export async function clearLocalAppStorageAndDb(): Promise<void> {
+  cancelPendingPersistData();
   memoryCache = null;
   try {
     localStorage.removeItem(LEGACY_LS_KEY);

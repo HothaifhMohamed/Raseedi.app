@@ -35,6 +35,7 @@ import {
 import {
   loadInitialData,
   persistData,
+  persistDataDebounced,
   generateDemoSeedData,
   DEFAULT_CATEGORIES,
   DEFAULT_SETTINGS,
@@ -123,7 +124,8 @@ import {
   fetchCloudBackupHistory,
   fetchCloudBackupFromHistory,
   fetchLatestCloudBackupFromHistory,
-  fetchAdminStatusFromServer,
+  bootstrapAdminStatusOnServer,
+  resolveFirebaseUserEmail,
   redeemProCodeWithServer,
   startBusinessTrialWithServer,
   fetchScanQuotaFromServer,
@@ -409,6 +411,7 @@ interface AppContextType {
   openAdminPanelRequested: boolean;
   openAdminSettingsPanel: () => void;
   isAdminUser: boolean;
+  refreshAdminStatus: () => Promise<boolean>;
   isAdminCodeModalOpen: boolean;
   setIsAdminCodeModalOpen: (open: boolean) => void;
   openAdminPanel: () => void;
@@ -852,11 +855,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [isAdminCodeModalOpen, setIsAdminCodeModalOpen] = useState(false);
   const [isLogoutModalOpen, setIsLogoutModalOpen] = useState(false);
   const [firebaseAuthUser, setFirebaseAuthUser] = useState<{
+    uid?: string;
     email?: string | null;
     emailVerified?: boolean;
   } | null>(() =>
     auth.currentUser
-      ? { email: auth.currentUser.email, emailVerified: auth.currentUser.emailVerified }
+      ? {
+          uid: auth.currentUser.uid,
+          email: resolveFirebaseUserEmail(auth.currentUser),
+          emailVerified: auth.currentUser.emailVerified,
+        }
       : null
   );
   const [isFilterOpen, setIsFilterOpen] = useState(false);
@@ -894,6 +902,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setToastMessage(null);
   }, []);
 
+  const lastPersistErrToastRef = React.useRef<number>(0);
+  const handleLocalPersistError = useCallback(
+    (err: unknown) => {
+      console.warn('Local persistence failed:', err);
+      const now = Date.now();
+      if (now - lastPersistErrToastRef.current < 6000) return;
+      lastPersistErrToastRef.current = now;
+      const isAr = (latestPersonalRef.current?.settings?.language || 'ar') === 'ar';
+      showToast(
+        isAr
+          ? 'تعذر حفظ البيانات محلياً على هذا الجهاز. تحقق من مساحة التخزين وأعد المحاولة.'
+          : 'Failed to save data locally on this device. Check storage space and try again.',
+        'error'
+      );
+    },
+    [showToast]
+  );
+
   // Notifications Read State
   const [readNotificationIds, setReadNotificationIds] = useState<Set<string>>(new Set());
 
@@ -901,6 +927,62 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const isAdminUserRef = React.useRef<boolean>(isAdminUser);
   isAdminUserRef.current = isAdminUser;
+  const adminCheckSeqRef = React.useRef<number>(0);
+
+  const refreshAdminStatus = useCallback(
+    async (userOverride?: typeof auth.currentUser): Promise<boolean> => {
+      const seq = ++adminCheckSeqRef.current;
+      const targetUser = userOverride ?? auth.currentUser;
+      if (!targetUser) {
+        if (seq === adminCheckSeqRef.current) {
+          setIsAdminUser(false);
+        }
+        return false;
+      }
+
+      const resolvedEmail = resolveFirebaseUserEmail(targetUser);
+      if (!isPrimarySystemAdminEmail(resolvedEmail)) {
+        if (seq === adminCheckSeqRef.current) {
+          setIsAdminUser(false);
+        }
+        return false;
+      }
+
+      try {
+        const [tokenResult, serverAdmin] = await Promise.all([
+          targetUser.getIdTokenResult().catch(() => null),
+          bootstrapAdminStatusOnServer(targetUser).catch(() => ({
+            isAdmin: false,
+            pinConfigured: false,
+            pinSource: 'unset' as const,
+            pinUpdatedAtMs: null,
+          })),
+        ]);
+        if (seq !== adminCheckSeqRef.current) return isAdminUserRef.current;
+
+        const granted = Boolean(
+          isPrimarySystemAdminEmail(resolvedEmail) &&
+            (serverAdmin.isAdmin || tokenResult?.claims?.admin === true)
+        );
+        setIsAdminUser(granted);
+        return granted;
+      } catch {
+        if (seq === adminCheckSeqRef.current) {
+          setIsAdminUser(false);
+        }
+        return false;
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!firebaseAuthUser?.uid || !firebaseAuthUser.email) {
+      setIsAdminUser(false);
+      return;
+    }
+    void refreshAdminStatus();
+  }, [firebaseAuthUser?.uid, firebaseAuthUser?.email, firebaseAuthUser?.emailVerified, refreshAdminStatus]);
 
   // Unified entitlement summary (recognizes 'business' + 'business_pro' + Admin lifetime override)
   const subscriptionSummary: UserSubscriptionSummary = useMemo(
@@ -1207,9 +1289,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         saveUnsyncedDirtyFlag(true);
         setHasUnsyncedLocalChanges(true);
       }
-      void persistData(nextData);
+      persistDataDebounced(nextData, handleLocalPersistError);
     },
-    []
+    [handleLocalPersistError]
   );
 
   const clearOrgActionError = useCallback(() => setOrgActionError(null), []);
@@ -1400,7 +1482,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 lastCloudSyncAt: syncedAtMs,
                 lastKnownCloudUpdatedAtMs: syncedAtMs,
               };
-              void persistData({ ...latestPersonalRef.current, settings: next });
+              persistDataDebounced(
+                { ...latestPersonalRef.current, settings: next },
+                handleLocalPersistError
+              );
               return next;
             });
           }
@@ -1491,7 +1576,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             ratesLastUpdated: formatted,
             ratesUpdatedAtMs: result.fetchedAtMs,
           };
-          void persistData({ ...latestPersonalRef.current, settings: next });
+          persistDataDebounced(
+            { ...latestPersonalRef.current, settings: next },
+            handleLocalPersistError
+          );
           return next;
         });
 
@@ -1563,22 +1651,55 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     (backup: CloudBackupPayload, currentUser: UserAccount | null) => {
       skipNextAutoSyncRef.current = true;
       const prevSettings = latestPersonalRef.current.settings;
+      const prevWalletsById = new Map(
+        (latestPersonalRef.current.wallets || []).map((w) => [w.id, w])
+      );
       const resolvedOnboarded = Boolean(backup.hasCompletedOnboarding ?? true);
+      const baseMergedSettings = mergeSettingsWithDefaults(backup.settings);
+      // Preserve local device App Lock PIN (PIN hashes are strictly local and stripped from cloud backups)
+      const hasLocalAppPin = Boolean(prevSettings.isAppLockEnabled && prevSettings.appPin);
       const mergedSettings: AppSettings = {
-        ...mergeSettingsWithDefaults(backup.settings),
+        ...baseMergedSettings,
+        ...(hasLocalAppPin
+          ? {
+              isAppLockEnabled: prevSettings.isAppLockEnabled,
+              appPin: prevSettings.appPin,
+              appPinSalt: prevSettings.appPinSalt,
+            }
+          : {
+              isAppLockEnabled: false,
+              appPin: undefined,
+              appPinSalt: undefined,
+            }),
         lastCloudSyncAt: backup.updatedAtMs || Date.now(),
         lastKnownCloudUpdatedAtMs: backup.updatedAtMs || prevSettings.lastKnownCloudUpdatedAtMs || Date.now(),
       };
       // Respect user deletions post-onboarding: never force DEFAULT_* when onboarded
+      const rawResolvedWallets = backup.wallets?.length
+        ? backup.wallets
+        : resolvedOnboarded
+        ? []
+        : DEFAULT_WALLETS;
+      // Preserve local device wallet PIN hashes if present on this device
+      const pinPreservedWallets = rawResolvedWallets.map((w) => {
+        const localW = prevWalletsById.get(w.id);
+        if (localW?.isLocked && localW.pin) {
+          return {
+            ...w,
+            isLocked: localW.isLocked,
+            pin: localW.pin,
+            pinSalt: localW.pinSalt,
+          };
+        }
+        return {
+          ...w,
+          isLocked: false,
+          pin: undefined,
+          pinSalt: undefined,
+        };
+      });
       const resolvedWallets = sortWalletsByOrder(
-        tagWalletsWithWorkspace(
-          backup.wallets?.length
-            ? backup.wallets
-            : resolvedOnboarded
-            ? []
-            : DEFAULT_WALLETS,
-          'personal'
-        )
+        tagWalletsWithWorkspace(pinPreservedWallets, 'personal')
       );
       const resolvedCategories = backup.categories?.length
         ? backup.categories
@@ -1649,21 +1770,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
       }
 
-      void persistData({
-        transactions: resolvedTransactions,
-        wallets: resolvedWallets,
-        categories: resolvedCategories,
-        budgets: resolvedBudgets,
-        debts: resolvedDebts,
-        goals: resolvedGoals,
-        templates: resolvedTemplates,
-        moneyCircles: resolvedMoneyCircles,
-        settings: mergedSettings,
-        user: currentUser,
-        hasCompletedOnboarding: resolvedOnboarded,
-      });
+      persistDataDebounced(
+        {
+          transactions: resolvedTransactions,
+          wallets: resolvedWallets,
+          categories: resolvedCategories,
+          budgets: resolvedBudgets,
+          debts: resolvedDebts,
+          goals: resolvedGoals,
+          templates: resolvedTemplates,
+          moneyCircles: resolvedMoneyCircles,
+          settings: mergedSettings,
+          user: currentUser,
+          hasCompletedOnboarding: resolvedOnboarded,
+        },
+        handleLocalPersistError
+      );
     },
-    []
+    [handleLocalPersistError]
   );
 
   const devActivateProPreview = useCallback((tier: 'personal_pro' | 'business_pro' = 'business_pro') => {
@@ -2041,16 +2165,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setPersonalTransactions(allTx);
         setPersonalWallets(updatedWallets);
         // Preserve loadedData.user rather than setting user: null!
-        void persistData({
-          ...loadedData,
-          transactions: allTx,
-          wallets: updatedWallets,
-          user: loadedData.user || null,
-        });
+        persistDataDebounced(
+          {
+            ...loadedData,
+            transactions: allTx,
+            wallets: updatedWallets,
+            user: loadedData.user || null,
+          },
+          handleLocalPersistError
+        );
         syncWorkspaceTxsBatchImmediately('personal', newTxList);
       }
     },
-    [syncWorkspaceTxsBatchImmediately]
+    [syncWorkspaceTxsBatchImmediately, handleLocalPersistError]
   );
 
   // Load from database on startup
@@ -2360,50 +2487,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       hasCompletedInitialCloudSyncRef.current = false;
       isCloudLoadedRef.current = false;
       setIsCloudLoaded(false);
+      const resolvedEmail = resolveFirebaseUserEmail(firebaseUser);
       const nextUser: UserAccount = {
         id: firebaseUser.uid,
-        name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Raseedi User',
-        email: firebaseUser.email || '',
+        name: firebaseUser.displayName || resolvedEmail.split('@')[0] || 'Raseedi User',
+        email: resolvedEmail,
         avatarUrl: firebaseUser.photoURL || undefined,
         isLoggedIn: true,
       };
       setFirebaseAuthUser({
-        email: firebaseUser.email,
+        uid: firebaseUser.uid,
+        email: resolvedEmail,
         emailVerified: firebaseUser.emailVerified,
       });
       setUser(nextUser);
-
-      void (async () => {
-        try {
-          if (!firebaseUser.emailVerified || !isPrimarySystemAdminEmail(firebaseUser.email)) {
-            if (reqId === syncRequestIdRef.current) {
-              setIsAdminUser(false);
-            }
-            return;
-          }
-          const [tokenResult, serverAdmin] = await Promise.all([
-            firebaseUser.getIdTokenResult().catch(() => null),
-            fetchAdminStatusFromServer().catch(() => ({
-              isAdmin: false,
-              pinConfigured: false,
-              pinSource: 'unset' as const,
-              pinUpdatedAtMs: null,
-            })),
-          ]);
-          if (reqId !== syncRequestIdRef.current) return;
-          setIsAdminUser(
-            Boolean(
-              firebaseUser.emailVerified &&
-                isPrimarySystemAdminEmail(firebaseUser.email) &&
-                (tokenResult?.claims?.admin === true || serverAdmin.isAdmin)
-            )
-          );
-        } catch {
-          if (reqId === syncRequestIdRef.current) {
-            setIsAdminUser(false);
-          }
-        }
-      })();
+      void refreshAdminStatus(firebaseUser);
 
       try {
         const isOnline = typeof navigator === 'undefined' || navigator.onLine;
@@ -2661,7 +2759,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     });
 
     return () => unsubscribe();
-  }, [applyCloudBackupLocally, applyVerifiedProState, refreshScanQuota, savePersonalState]);
+  }, [applyCloudBackupLocally, applyVerifiedProState, refreshAdminStatus, refreshScanQuota, savePersonalState]);
 
   // Unified Real-Time Sync + Cloud-First Hydration for users/{uid}/workspaces/{workspaceId}/transactions
   // Keeps localStorage/IndexedDB strictly as an offline cache and syncs immediately in both directions.
@@ -2791,10 +2889,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (!sameItems) {
           skipNextAutoSyncRef.current = true;
           setPersonalTransactions(reconciled);
-          void persistData({
-            ...latestPersonalRef.current,
-            transactions: reconciled,
-          });
+          persistDataDebounced(
+            {
+              ...latestPersonalRef.current,
+              transactions: reconciled,
+            },
+            handleLocalPersistError
+          );
         }
         return;
       }
@@ -3231,18 +3332,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const wasActiveGuest = isGuestModeRef.current;
     try {
       const { firebaseUser, profile } = await signInWithGoogle();
+      const resolvedEmail = resolveFirebaseUserEmail(firebaseUser);
       const nextUser: UserAccount = {
         id: firebaseUser.uid,
-        name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Raseedi User',
-        email: firebaseUser.email || '',
+        name: firebaseUser.displayName || resolvedEmail.split('@')[0] || 'Raseedi User',
+        email: resolvedEmail,
         avatarUrl: firebaseUser.photoURL || undefined,
         isLoggedIn: true,
       };
       setFirebaseAuthUser({
-        email: firebaseUser.email,
+        uid: firebaseUser.uid,
+        email: resolvedEmail,
         emailVerified: firebaseUser.emailVerified,
       });
       setUser(nextUser);
+      void refreshAdminStatus(firebaseUser);
 
       const active = isEntitlementActive(profile);
       await applyVerifiedProState({
@@ -3343,7 +3447,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     } finally {
       setIsCloudSyncing(false);
     }
-  }, [applyCloudBackupLocally, applyVerifiedProState, refreshScanQuota, savePersonalState]);
+  }, [applyCloudBackupLocally, applyVerifiedProState, refreshAdminStatus, refreshScanQuota, savePersonalState]);
 
   const signOutAndResetDevice = useCallback(
     async (options?: { backupFirst?: boolean }): Promise<{ ok: boolean; error?: string }> => {
@@ -3575,7 +3679,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           lastKnownCloudUpdatedAtMs: updatedAtMs,
           lastBackupAt: syncedAt,
         };
-        void persistData({ ...latestPersonalRef.current, settings: next });
+        persistDataDebounced(
+          { ...latestPersonalRef.current, settings: next },
+          handleLocalPersistError
+        );
         return next;
       });
       return true;
@@ -3639,10 +3746,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         } else {
           skipNextAutoSyncRef.current = true;
           setPersonalTransactions(mergedPersonal);
-          void persistData({
-            ...latestPersonalRef.current,
-            transactions: mergedPersonal,
-          });
+          persistDataDebounced(
+            {
+              ...latestPersonalRef.current,
+              transactions: mergedPersonal,
+            },
+            handleLocalPersistError
+          );
         }
         setLastCloudBackupExists(true);
         return true;
@@ -3842,10 +3952,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             );
           } else {
             setPersonalTransactions(recoveredForWorkspace);
-            void persistData({
-              ...latestPersonalRef.current,
-              transactions: recoveredForWorkspace,
-            });
+            persistDataDebounced(
+              {
+                ...latestPersonalRef.current,
+                transactions: recoveredForWorkspace,
+              },
+              handleLocalPersistError
+            );
           }
           setLastCloudBackupExists(Boolean(cloudBackup || recoveredForWorkspace.length > 0));
         } else {
@@ -4094,7 +4207,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             lastCloudSyncAt: syncedAt,
             lastKnownCloudUpdatedAtMs: updatedAtMs,
           };
-          void persistData({ ...latestPersonalRef.current, settings: next });
+          persistDataDebounced(
+            { ...latestPersonalRef.current, settings: next },
+            handleLocalPersistError
+          );
           return next;
         });
       } catch (err) {
@@ -4247,15 +4363,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           if (result.needsUpgrade && result.newHash && result.newSalt) {
             if (isOrgWorkspace && activeOrganization) {
               const upgraded = { ...wallet, pin: result.newHash, pinSalt: result.newSalt };
+              // PIN hashes remain strictly local (never uploaded to organization Firestore docs)
               if (isUsingLocalOrgMode) {
                 mutateLocalOrgWorkspace(activeOrganization.id, (ws) => ({
                   ...ws,
                   wallets: ws.wallets.map((w) => (w.id === walletId ? upgraded : w)),
                 }));
-              } else {
-                void upsertOrgWalletCloud(activeOrganization.id, upgraded, false, getOrgActor()).catch(
-                  () => {}
-                );
               }
             } else {
               const updatedWallets = personalWallets.map((w) =>
@@ -5889,7 +6002,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               lastKnownCloudUpdatedAtMs: backupRes.updatedAtMs,
               lastBackupAt: backupRes.syncedAt,
             };
-            void persistData({ ...latestPersonalRef.current, settings: next });
+            persistDataDebounced(
+              { ...latestPersonalRef.current, settings: next },
+              handleLocalPersistError
+            );
             return next;
           });
           return { ok: true };
@@ -5953,7 +6069,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             lastKnownCloudUpdatedAtMs: backupRes.updatedAtMs,
             lastBackupAt: backupRes.syncedAt,
           };
-          void persistData({ ...latestPersonalRef.current, settings: next });
+          persistDataDebounced(
+            { ...latestPersonalRef.current, settings: next },
+            handleLocalPersistError
+          );
           return next;
         });
         return { ok: true };
@@ -8096,8 +8215,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setSettings(DEFAULT_SETTINGS);
     setHasCompletedOnboarding(false);
 
-    void persistData(freshData);
-  }, [settings.language]);
+    persistDataDebounced(freshData, handleLocalPersistError);
+  }, [settings.language, handleLocalPersistError]);
 
   const isRTL = settings.language === 'ar';
 
@@ -8277,273 +8396,496 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     ]
   );
 
+  const appValue = useMemo<AppContextType>(
+    () => ({
+      isLoading,
+      transactions,
+      wallets,
+      categories,
+      budgets,
+      debts,
+      goals,
+      templates,
+      moneyCircles: personalMoneyCircles,
+      settings,
+      user,
+      hasCompletedOnboarding,
+      isGuestMode,
+      enterGuestMode,
+
+      activeWorkspace,
+      orgRefs,
+      localOrgWorkspaces,
+      isOrgWorkspace,
+      isOrgLoading,
+      orgSyncPendingWrites,
+      orgActionError,
+      clearOrgActionError,
+      orgTrashTransactions,
+      orgHasMoreTx,
+      loadMoreOrgTransactions,
+      organizationsList,
+      activeOrganization,
+      activeOrgSubscriptionState,
+      isOrgReadOnly,
+      activeOrgMemberStatus,
+      orgMembers,
+      orgCostCenters,
+      orgParties,
+      orgAuditLogs,
+      activeOrgRole,
+      canOrgWrite,
+      canOrgApprove,
+      canOrgManage,
+      pendingApprovalsCount,
+      switchWorkspace,
+      createOrganization,
+      joinOrganizationByCode,
+      pendingJoinCode,
+      clearPendingJoinCode,
+      updateOrganizationSettings,
+      lockAccountingPeriod,
+
+      legacyLocalOrgs,
+      isOrgMigrationModalOpen,
+      orgMigrationSuccessMessage,
+      clearOrgMigrationSuccessMessage,
+      setOrgMigrationSuccessMessage,
+      openOrgMigrationModal,
+      dismissLegacyOrgMigration,
+      completeLegacyOrgMigration,
+      queueLegacyOrgsForMigration,
+
+      approveOrgTransaction,
+      rejectOrgTransaction,
+      markOrgTransactionPaid,
+      restoreOrgTransaction,
+      recalculateOrgBalances,
+      attachOrgReceiptPaths,
+      addCostCenter,
+      updateCostCenter,
+      deleteCostCenter,
+      addBusinessParty,
+      updateBusinessParty,
+      deleteBusinessParty,
+
+      createOrgInvite,
+      listOrgInvites,
+      revokeOrgInvite,
+      manageOrgMember,
+      transferOrgOwnership,
+      deleteOrganization,
+
+      isOrgHubOpen,
+      setIsOrgHubOpen,
+      orgHubTab,
+      setOrgHubTab,
+      openOrgHub,
+      isWorkspaceModalOpen,
+      setIsWorkspaceModalOpen,
+
+      activeNav,
+      setActiveNav,
+      activeWalletId,
+      setActiveWalletId,
+      homeTab,
+      setHomeTab,
+      navigateBackFromWallet,
+      registerModalBackHandler,
+      unregisterModalBackHandler,
+      isAddModalOpen,
+      setIsAddModalOpen: handleSetIsAddModalOpen,
+      editingTransaction,
+      setEditingTransaction,
+      transactionDraft,
+      openTransactionWithPreset,
+      isSettingsOpen,
+      setIsSettingsOpen: handleSetIsSettingsOpen,
+      openAdminPanelRequested,
+      openAdminSettingsPanel,
+      isAdminUser,
+      refreshAdminStatus,
+      isAdminCodeModalOpen,
+      setIsAdminCodeModalOpen,
+      openAdminPanel,
+      isLogoutModalOpen,
+      setIsLogoutModalOpen,
+      hasUnsyncedLocalChanges,
+      signOutAndResetDevice,
+      isFilterOpen,
+      setIsFilterOpen,
+      isBackupOpen,
+      setIsBackupOpen,
+      isReportsOpen,
+      setIsReportsOpen,
+      isCategoriesManagerOpen,
+      setIsCategoriesManagerOpen,
+      isCurrenciesManagerOpen,
+      setIsCurrenciesManagerOpen,
+      isUpgradeModalOpen,
+      setIsUpgradeModalOpen: handleSetIsUpgradeModalOpen,
+
+      currencyPickerOpen,
+      currencyPickerSelectedCode,
+      openCurrencyPicker,
+      closeCurrencyPicker,
+      onCurrencySelectCallback,
+
+      filters,
+      setFilters,
+      resetFilters,
+      selectedTransactionIds,
+      toggleSelectTransaction,
+      selectAllTransactions,
+      clearSelectedTransactions,
+      changeSelectedTransactionsCategory,
+
+      isAppLocked,
+      unlockApp,
+      lockedWalletIds,
+      unlockWallet,
+
+      isPro,
+      isBusinessPro,
+      planTier,
+      proEntitlement: verifiedPro,
+      subscriptionSummary,
+      redeemProCode,
+      startBusinessTrial,
+      devActivateProPreview,
+      restorePurchases,
+      scanQuota,
+      setScanQuota,
+      refreshScanQuota,
+      isCloudSyncing,
+      cloudSyncStatus,
+      cloudSyncError,
+      cloudDiagnosticsError,
+      clearCloudDiagnosticsError,
+      cloudSkippedAttachmentsWarning,
+      cloudConflict,
+      lastCloudBackupExists,
+      isCloudLoaded,
+      cloudBackupHistory,
+      refreshCloudBackupHistory,
+      restoreFromBackupHistoryEntry,
+      signInWithGoogleAccount,
+      signOutGoogleAccount,
+      syncToCloudNow,
+      restoreFromCloudNow,
+      emergencyCloudRecovery,
+      resolveCloudConflictOverwrite,
+      clearCloudConflict,
+      reauthenticateGoogleAccount,
+      deleteAccountAndData,
+
+      preRestoreSnapshotDate,
+      createPreRestoreSnapshot,
+      revertPreRestoreSnapshot,
+
+      notifications,
+      unreadNotificationsCount,
+      markNotificationRead,
+      markAllNotificationsRead,
+
+      ratesLastUpdated,
+      isRefreshingRates,
+      refreshExchangeRates,
+
+      undoAction,
+      setUndoAction,
+      triggerUndo,
+      toastMessage,
+      showToast,
+      clearToast,
+
+      addTransaction,
+      importTransactionsBatch,
+      importSpreadsheetBatchLocally,
+      syncWorkspaceBackupNow,
+      updateTransaction,
+      deleteTransaction,
+      deleteSelectedTransactions,
+      moveSelectedTransactions,
+      duplicateTransaction,
+
+      addWallet,
+      updateWallet,
+      reorderWallets,
+      getWalletDependencies,
+      deleteWallet,
+      migrateAndDeleteWallet,
+
+      addCategory,
+      updateCategory,
+      getCategoryDependencies,
+      deleteCategory,
+      migrateAndDeleteCategory,
+
+      addBudget,
+      updateBudget,
+      deleteBudget,
+
+      addDebt,
+      updateDebt,
+      recordDebtPayment,
+      deleteDebt,
+
+      addGoal,
+      updateGoal,
+      contributeToGoal,
+      deleteGoal,
+
+      addTemplate,
+      updateTemplate,
+      deleteTemplate,
+      applyTemplate,
+
+      addMoneyCircle,
+      updateMoneyCircle,
+      deleteMoneyCircle,
+      toggleMoneyCircleMonthPaid,
+      markMoneyCirclePayoutReceived,
+
+      updateSettings,
+      completeOnboarding,
+      loadDemoData,
+      resetAllData,
+
+      canInstallPWA: pwaInstallState.isInstallable,
+      isPWAInstalled: pwaInstallState.isInstalled,
+      isIOSDevice: pwaInstallState.isIOS,
+      promptPWAInstall,
+
+      t,
+      isRTL,
+    }),
+    [
+      isLoading,
+      transactions,
+      wallets,
+      categories,
+      budgets,
+      debts,
+      goals,
+      templates,
+      personalMoneyCircles,
+      settings,
+      user,
+      hasCompletedOnboarding,
+      isGuestMode,
+      enterGuestMode,
+      activeWorkspace,
+      orgRefs,
+      localOrgWorkspaces,
+      isOrgWorkspace,
+      isOrgLoading,
+      orgSyncPendingWrites,
+      orgActionError,
+      clearOrgActionError,
+      orgTrashTransactions,
+      orgHasMoreTx,
+      loadMoreOrgTransactions,
+      organizationsList,
+      activeOrganization,
+      activeOrgSubscriptionState,
+      isOrgReadOnly,
+      activeOrgMemberStatus,
+      orgMembers,
+      orgCostCenters,
+      orgParties,
+      orgAuditLogs,
+      activeOrgRole,
+      canOrgWrite,
+      canOrgApprove,
+      canOrgManage,
+      pendingApprovalsCount,
+      switchWorkspace,
+      createOrganization,
+      joinOrganizationByCode,
+      pendingJoinCode,
+      clearPendingJoinCode,
+      updateOrganizationSettings,
+      lockAccountingPeriod,
+      legacyLocalOrgs,
+      isOrgMigrationModalOpen,
+      orgMigrationSuccessMessage,
+      clearOrgMigrationSuccessMessage,
+      openOrgMigrationModal,
+      dismissLegacyOrgMigration,
+      completeLegacyOrgMigration,
+      queueLegacyOrgsForMigration,
+      approveOrgTransaction,
+      rejectOrgTransaction,
+      markOrgTransactionPaid,
+      restoreOrgTransaction,
+      recalculateOrgBalances,
+      attachOrgReceiptPaths,
+      addCostCenter,
+      updateCostCenter,
+      deleteCostCenter,
+      addBusinessParty,
+      updateBusinessParty,
+      deleteBusinessParty,
+      createOrgInvite,
+      listOrgInvites,
+      revokeOrgInvite,
+      manageOrgMember,
+      transferOrgOwnership,
+      deleteOrganization,
+      isOrgHubOpen,
+      orgHubTab,
+      openOrgHub,
+      isWorkspaceModalOpen,
+      activeNav,
+      activeWalletId,
+      homeTab,
+      navigateBackFromWallet,
+      registerModalBackHandler,
+      unregisterModalBackHandler,
+      isAddModalOpen,
+      handleSetIsAddModalOpen,
+      editingTransaction,
+      transactionDraft,
+      openTransactionWithPreset,
+      isSettingsOpen,
+      handleSetIsSettingsOpen,
+      openAdminPanelRequested,
+      openAdminSettingsPanel,
+      isAdminUser,
+      refreshAdminStatus,
+      isAdminCodeModalOpen,
+      openAdminPanel,
+      isLogoutModalOpen,
+      hasUnsyncedLocalChanges,
+      signOutAndResetDevice,
+      isFilterOpen,
+      isBackupOpen,
+      isReportsOpen,
+      isCategoriesManagerOpen,
+      isCurrenciesManagerOpen,
+      isUpgradeModalOpen,
+      handleSetIsUpgradeModalOpen,
+      currencyPickerOpen,
+      currencyPickerSelectedCode,
+      openCurrencyPicker,
+      closeCurrencyPicker,
+      onCurrencySelectCallback,
+      filters,
+      resetFilters,
+      selectedTransactionIds,
+      toggleSelectTransaction,
+      selectAllTransactions,
+      clearSelectedTransactions,
+      changeSelectedTransactionsCategory,
+      isAppLocked,
+      unlockApp,
+      lockedWalletIds,
+      unlockWallet,
+      isPro,
+      isBusinessPro,
+      planTier,
+      verifiedPro,
+      subscriptionSummary,
+      redeemProCode,
+      startBusinessTrial,
+      devActivateProPreview,
+      restorePurchases,
+      scanQuota,
+      refreshScanQuota,
+      isCloudSyncing,
+      cloudSyncStatus,
+      cloudSyncError,
+      cloudDiagnosticsError,
+      clearCloudDiagnosticsError,
+      cloudSkippedAttachmentsWarning,
+      cloudConflict,
+      lastCloudBackupExists,
+      isCloudLoaded,
+      cloudBackupHistory,
+      refreshCloudBackupHistory,
+      restoreFromBackupHistoryEntry,
+      signInWithGoogleAccount,
+      signOutGoogleAccount,
+      syncToCloudNow,
+      restoreFromCloudNow,
+      emergencyCloudRecovery,
+      resolveCloudConflictOverwrite,
+      clearCloudConflict,
+      reauthenticateGoogleAccount,
+      deleteAccountAndData,
+      preRestoreSnapshotDate,
+      createPreRestoreSnapshot,
+      revertPreRestoreSnapshot,
+      notifications,
+      unreadNotificationsCount,
+      markNotificationRead,
+      markAllNotificationsRead,
+      ratesLastUpdated,
+      isRefreshingRates,
+      refreshExchangeRates,
+      undoAction,
+      triggerUndo,
+      toastMessage,
+      showToast,
+      clearToast,
+      addTransaction,
+      importTransactionsBatch,
+      importSpreadsheetBatchLocally,
+      syncWorkspaceBackupNow,
+      updateTransaction,
+      deleteTransaction,
+      deleteSelectedTransactions,
+      moveSelectedTransactions,
+      duplicateTransaction,
+      addWallet,
+      updateWallet,
+      reorderWallets,
+      getWalletDependencies,
+      deleteWallet,
+      migrateAndDeleteWallet,
+      addCategory,
+      updateCategory,
+      getCategoryDependencies,
+      deleteCategory,
+      migrateAndDeleteCategory,
+      addBudget,
+      updateBudget,
+      deleteBudget,
+      addDebt,
+      updateDebt,
+      recordDebtPayment,
+      deleteDebt,
+      addGoal,
+      updateGoal,
+      contributeToGoal,
+      deleteGoal,
+      addTemplate,
+      updateTemplate,
+      deleteTemplate,
+      applyTemplate,
+      addMoneyCircle,
+      updateMoneyCircle,
+      deleteMoneyCircle,
+      toggleMoneyCircleMonthPaid,
+      markMoneyCirclePayoutReceived,
+      updateSettings,
+      completeOnboarding,
+      loadDemoData,
+      resetAllData,
+      pwaInstallState.isInstallable,
+      pwaInstallState.isInstalled,
+      pwaInstallState.isIOS,
+      promptPWAInstall,
+      t,
+      isRTL,
+    ]
+  );
+
   return (
     <EntitlementProvider value={entitlementValue}>
       <OrgProvider value={orgValue}>
-        <AppContext.Provider
-          value={{
-        isLoading,
-        transactions,
-        wallets,
-        categories,
-        budgets,
-        debts,
-        goals,
-        templates,
-        moneyCircles: personalMoneyCircles,
-        settings,
-        user,
-        hasCompletedOnboarding,
-        isGuestMode,
-        enterGuestMode,
-
-        activeWorkspace,
-        orgRefs,
-        localOrgWorkspaces,
-        isOrgWorkspace,
-        isOrgLoading,
-        orgSyncPendingWrites,
-        orgActionError,
-        clearOrgActionError,
-        orgTrashTransactions,
-        orgHasMoreTx,
-        loadMoreOrgTransactions,
-        organizationsList,
-        activeOrganization,
-        activeOrgSubscriptionState,
-        isOrgReadOnly,
-        activeOrgMemberStatus,
-        orgMembers,
-        orgCostCenters,
-        orgParties,
-        orgAuditLogs,
-        activeOrgRole,
-        canOrgWrite,
-        canOrgApprove,
-        canOrgManage,
-        pendingApprovalsCount,
-        switchWorkspace,
-        createOrganization,
-        joinOrganizationByCode,
-        pendingJoinCode,
-        clearPendingJoinCode,
-        updateOrganizationSettings,
-        lockAccountingPeriod,
-
-        legacyLocalOrgs,
-        isOrgMigrationModalOpen,
-        orgMigrationSuccessMessage,
-        clearOrgMigrationSuccessMessage,
-        setOrgMigrationSuccessMessage,
-        openOrgMigrationModal,
-        dismissLegacyOrgMigration,
-        completeLegacyOrgMigration,
-        queueLegacyOrgsForMigration,
-
-        approveOrgTransaction,
-        rejectOrgTransaction,
-        markOrgTransactionPaid,
-        restoreOrgTransaction,
-        recalculateOrgBalances,
-        attachOrgReceiptPaths,
-        addCostCenter,
-        updateCostCenter,
-        deleteCostCenter,
-        addBusinessParty,
-        updateBusinessParty,
-        deleteBusinessParty,
-
-        createOrgInvite,
-        listOrgInvites,
-        revokeOrgInvite,
-        manageOrgMember,
-        transferOrgOwnership,
-        deleteOrganization,
-
-        isOrgHubOpen,
-        setIsOrgHubOpen,
-        orgHubTab,
-        setOrgHubTab,
-        openOrgHub,
-        isWorkspaceModalOpen,
-        setIsWorkspaceModalOpen,
-
-        activeNav,
-        setActiveNav,
-        activeWalletId,
-        setActiveWalletId,
-        homeTab,
-        setHomeTab,
-        navigateBackFromWallet,
-        registerModalBackHandler,
-        unregisterModalBackHandler,
-        isAddModalOpen,
-        setIsAddModalOpen: handleSetIsAddModalOpen,
-        editingTransaction,
-        setEditingTransaction,
-        transactionDraft,
-        openTransactionWithPreset,
-        isSettingsOpen,
-        setIsSettingsOpen: handleSetIsSettingsOpen,
-        openAdminPanelRequested,
-        openAdminSettingsPanel,
-        isAdminUser,
-        isAdminCodeModalOpen,
-        setIsAdminCodeModalOpen,
-        openAdminPanel,
-        isLogoutModalOpen,
-        setIsLogoutModalOpen,
-        hasUnsyncedLocalChanges,
-        signOutAndResetDevice,
-        isFilterOpen,
-        setIsFilterOpen,
-        isBackupOpen,
-        setIsBackupOpen,
-        isReportsOpen,
-        setIsReportsOpen,
-        isCategoriesManagerOpen,
-        setIsCategoriesManagerOpen,
-        isCurrenciesManagerOpen,
-        setIsCurrenciesManagerOpen,
-        isUpgradeModalOpen,
-        setIsUpgradeModalOpen: handleSetIsUpgradeModalOpen,
-
-        currencyPickerOpen,
-        currencyPickerSelectedCode,
-        openCurrencyPicker,
-        closeCurrencyPicker,
-        onCurrencySelectCallback,
-
-        filters,
-        setFilters,
-        resetFilters,
-        selectedTransactionIds,
-        toggleSelectTransaction,
-        selectAllTransactions,
-        clearSelectedTransactions,
-        changeSelectedTransactionsCategory,
-
-        isAppLocked,
-        unlockApp,
-        lockedWalletIds,
-        unlockWallet,
-
-        isPro,
-        isBusinessPro,
-        planTier,
-        proEntitlement: verifiedPro,
-        subscriptionSummary,
-        redeemProCode,
-        startBusinessTrial,
-        devActivateProPreview,
-        restorePurchases,
-        scanQuota,
-        setScanQuota,
-        refreshScanQuota,
-        isCloudSyncing,
-        cloudSyncStatus,
-        cloudSyncError,
-        cloudDiagnosticsError,
-        clearCloudDiagnosticsError,
-        cloudSkippedAttachmentsWarning,
-        cloudConflict,
-        lastCloudBackupExists,
-        isCloudLoaded,
-        cloudBackupHistory,
-        refreshCloudBackupHistory,
-        restoreFromBackupHistoryEntry,
-        signInWithGoogleAccount,
-        signOutGoogleAccount,
-        syncToCloudNow,
-        restoreFromCloudNow,
-        emergencyCloudRecovery,
-        resolveCloudConflictOverwrite,
-        clearCloudConflict,
-        reauthenticateGoogleAccount,
-        deleteAccountAndData,
-
-        preRestoreSnapshotDate,
-        createPreRestoreSnapshot,
-        revertPreRestoreSnapshot,
-
-        notifications,
-        unreadNotificationsCount,
-        markNotificationRead,
-        markAllNotificationsRead,
-
-        ratesLastUpdated,
-        isRefreshingRates,
-        refreshExchangeRates,
-
-        undoAction,
-        setUndoAction,
-        triggerUndo,
-        toastMessage,
-        showToast,
-        clearToast,
-
-        addTransaction,
-        importTransactionsBatch,
-        importSpreadsheetBatchLocally,
-        syncWorkspaceBackupNow,
-        updateTransaction,
-        deleteTransaction,
-        deleteSelectedTransactions,
-        moveSelectedTransactions,
-        duplicateTransaction,
-
-        addWallet,
-        updateWallet,
-        reorderWallets,
-        getWalletDependencies,
-        deleteWallet,
-        migrateAndDeleteWallet,
-
-        addCategory,
-        updateCategory,
-        getCategoryDependencies,
-        deleteCategory,
-        migrateAndDeleteCategory,
-
-        addBudget,
-        updateBudget,
-        deleteBudget,
-
-        addDebt,
-        updateDebt,
-        recordDebtPayment,
-        deleteDebt,
-
-        addGoal,
-        updateGoal,
-        contributeToGoal,
-        deleteGoal,
-
-        addTemplate,
-        updateTemplate,
-        deleteTemplate,
-        applyTemplate,
-
-        addMoneyCircle,
-        updateMoneyCircle,
-        deleteMoneyCircle,
-        toggleMoneyCircleMonthPaid,
-        markMoneyCirclePayoutReceived,
-
-        updateSettings,
-        completeOnboarding,
-        loadDemoData,
-        resetAllData,
-
-        canInstallPWA: pwaInstallState.isInstallable,
-        isPWAInstalled: pwaInstallState.isInstalled,
-        isIOSDevice: pwaInstallState.isIOS,
-        promptPWAInstall,
-
-        t,
-        isRTL,
-          }}
-        >
+        <AppContext.Provider value={appValue}>
           {children}
         </AppContext.Provider>
       </OrgProvider>

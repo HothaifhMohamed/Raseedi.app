@@ -779,7 +779,9 @@ test('security hardening: escapeCsvCell blocks formula injection & rowsToRecordO
   assert.equal(validateBackupSchema(nestedPolluted).reason, 'UNSAFE_PROTOTYPE_KEY');
 
   const largeTxs = Array.from({ length: 30 }, (_, idx) =>
-    idx === 29 ? { id: idx, amount: 'bad' } : { id: `tx-${idx}`, amount: 10 }
+    idx === 29
+      ? { id: idx, amount: 'bad' }
+      : { id: `tx-${idx}`, amount: 10, date: '2026-05-01', type: 'expense', walletId: 'w-1' }
   );
   assert.equal(
     validateBackupSchema({ transactions: largeTxs, wallets: [] }).reason,

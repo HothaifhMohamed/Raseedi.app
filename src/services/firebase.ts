@@ -44,6 +44,10 @@ import {
 } from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
 import {
+  stripSensitivePinFromSettings,
+  stripSensitivePinsFromWallets,
+} from './security';
+import {
   AppDatabaseData,
   enqueuePendingAttachmentUpload,
   loadPendingAttachmentUploads,
@@ -590,36 +594,75 @@ export interface ServerAdminStatus {
   pinConfigured: boolean;
   pinSource: 'firestore' | 'env' | 'unset';
   pinUpdatedAtMs: number | null;
+  claimsUpdated?: boolean;
+  customClaimSynced?: boolean;
 }
 
-export async function fetchAdminStatusFromServer(): Promise<ServerAdminStatus> {
-  const currentUser = auth.currentUser;
-  if (!currentUser) {
+export function resolveFirebaseUserEmail(firebaseUser?: User | null): string {
+  if (!firebaseUser) return '';
+  if (typeof firebaseUser.email === 'string' && firebaseUser.email.trim()) {
+    return firebaseUser.email.trim();
+  }
+  const fromProvider = firebaseUser.providerData?.find(
+    (p) => typeof p?.email === 'string' && p.email.trim().length > 0
+  )?.email;
+  return typeof fromProvider === 'string' ? fromProvider.trim() : '';
+}
+
+async function requestAdminStatusEndpoint(
+  endpoint: '/api/admin/bootstrap' | '/api/admin/status',
+  method: 'POST' | 'GET',
+  idToken: string
+): Promise<{ ok: boolean; payload: Record<string, unknown> }> {
+  const response = await fetch(endpoint, {
+    method,
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(method === 'POST' ? { body: '{}' } : {}),
+  });
+  const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  return { ok: response.ok, payload };
+}
+
+export async function bootstrapAdminStatusOnServer(
+  userOverride?: User | null
+): Promise<ServerAdminStatus> {
+  const targetUser = userOverride ?? auth.currentUser;
+  if (!targetUser) {
     return { isAdmin: false, pinConfigured: false, pinSource: 'unset', pinUpdatedAtMs: null };
   }
   try {
-    const idToken = await currentUser.getIdToken();
-    const response = await fetch('/api/admin/status', {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${idToken}`,
-      },
-    });
-    if (!response.ok) {
+    const idToken = await targetUser.getIdToken();
+    let result = await requestAdminStatusEndpoint('/api/admin/bootstrap', 'POST', idToken).catch(
+      () => ({ ok: false, payload: {} as Record<string, unknown> })
+    );
+    if (!result.ok) {
+      result = await requestAdminStatusEndpoint('/api/admin/status', 'GET', idToken).catch(
+        () => ({ ok: false, payload: {} as Record<string, unknown> })
+      );
+    }
+    if (!result.ok) {
       return { isAdmin: false, pinConfigured: false, pinSource: 'unset', pinUpdatedAtMs: null };
     }
-    const payload = (await response.json().catch(() => ({}))) as {
+
+    const payload = result.payload as {
       isAdmin?: boolean;
       pinConfigured?: boolean;
       pinSource?: 'firestore' | 'env' | 'unset';
       pinUpdatedAtMs?: number | null;
       claimsUpdated?: boolean;
+      customClaimSynced?: boolean;
     };
-    if (payload.isAdmin && payload.claimsUpdated && auth.currentUser) {
-      await auth.currentUser.getIdToken(true).catch(() => undefined);
+
+    const isAdmin = Boolean(payload.isAdmin);
+    if (isAdmin) {
+      await targetUser.getIdToken(true).catch(() => undefined);
     }
+
     return {
-      isAdmin: Boolean(payload.isAdmin),
+      isAdmin,
       pinConfigured: Boolean(payload.pinConfigured),
       pinSource:
         payload.pinSource === 'firestore' || payload.pinSource === 'env'
@@ -629,10 +672,18 @@ export async function fetchAdminStatusFromServer(): Promise<ServerAdminStatus> {
         typeof payload.pinUpdatedAtMs === 'number' && Number.isFinite(payload.pinUpdatedAtMs)
           ? payload.pinUpdatedAtMs
           : null,
+      claimsUpdated: Boolean(payload.claimsUpdated),
+      customClaimSynced: Boolean(payload.customClaimSynced),
     };
   } catch {
     return { isAdmin: false, pinConfigured: false, pinSource: 'unset', pinUpdatedAtMs: null };
   }
+}
+
+export async function fetchAdminStatusFromServer(
+  userOverride?: User | null
+): Promise<ServerAdminStatus> {
+  return bootstrapAdminStatusOnServer(userOverride);
 }
 
 export async function setupAdminPinOnServer(
@@ -1192,17 +1243,35 @@ export async function saveCloudBackup(
     !Array.isArray(effectiveData.orgWorkspaces);
 
   let orgWorkspacesToSave = hasOrgWorkspaces
-    ? stripUndefinedDeep(Object.fromEntries(rawOrgEntries))
+    ? stripUndefinedDeep(
+        Object.fromEntries(
+          rawOrgEntries.map(([orgKey, ws]) => [
+            orgKey,
+            {
+              ...ws,
+              wallets: stripSensitivePinsFromWallets(ws.wallets || []),
+            },
+          ])
+        )
+      )
     : hasExplicitOrgWorkspacesMap
     ? {}
     : undefined;
+
+  const cloudSafeSettings = stripSensitivePinFromSettings({
+    ...effectiveData.settings,
+    isPro: false,
+  });
+  const cloudSafeWallets = stripSensitivePinsFromWallets(
+    (effectiveData.wallets || []).slice(0, 200)
+  );
 
   let metaFields = stripUndefinedDeep({
     uid,
     schemaVersion: 2,
     chunkCount: chunks.length,
     totalTransactions: sanitizedTransactions.length,
-    wallets: (effectiveData.wallets || []).slice(0, 200),
+    wallets: cloudSafeWallets,
     categories: (effectiveData.categories || []).slice(0, 300),
     budgets: (effectiveData.budgets || []).slice(0, 200),
     debts: (effectiveData.debts || []).slice(0, 500),
@@ -1211,7 +1280,7 @@ export async function saveCloudBackup(
     moneyCircles: (effectiveData.moneyCircles || []).slice(0, 200),
     ...(orgWorkspacesToSave !== undefined ? { orgWorkspaces: orgWorkspacesToSave } : {}),
     ...(cleanActiveWorkspace ? { activeWorkspace: cleanActiveWorkspace } : {}),
-    settings: { ...effectiveData.settings, isPro: false },
+    settings: cloudSafeSettings,
     hasCompletedOnboarding: Boolean(effectiveData.hasCompletedOnboarding),
     updatedAtMs,
   });

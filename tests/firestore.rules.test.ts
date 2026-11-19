@@ -199,6 +199,32 @@ test('Organization RBAC: outsider blocked, viewer read-only, employee limited by
     })
   );
 
+  // Employee cannot bypass spendingLimit by sending low amountMinor with high payload.amount (or vice versa)
+  await assertFails(
+    setDoc(doc(employeeDb, 'organizations', ORG_ID, 'transactions', 'tx-e-bypass-1'), {
+      id: 'tx-e-bypass-1',
+      orgId: ORG_ID,
+      date: '2026-06-01',
+      amountMinor: 1000,
+      submittedBy: EMPLOYEE_UID,
+      approvalStatus: 'pending',
+      payload: { amount: 5000, date: '2026-06-01' },
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertFails(
+    setDoc(doc(employeeDb, 'organizations', ORG_ID, 'transactions', 'tx-e-bypass-2'), {
+      id: 'tx-e-bypass-2',
+      orgId: ORG_ID,
+      date: '2026-06-01',
+      amountMinor: 500000,
+      submittedBy: EMPLOYEE_UID,
+      approvalStatus: 'pending',
+      payload: { amount: 10, date: '2026-06-01' },
+      updatedAt: serverTimestamp(),
+    })
+  );
+
   // Period lock blocks backdated writes inside lockedUntilDate (2026-04-15 <= 2026-05-01)
   await assertFails(
     setDoc(doc(accountantDb, 'organizations', ORG_ID, 'transactions', 'tx-locked'), {
@@ -270,7 +296,7 @@ test('Expired Business subscription past 7-day grace puts org in read-only mode'
 test('Server-only collections and isAdmin lock exclusively to verified hapaypal2003@gmail.com', async () => {
   const superAdminDb = testEnv
     .authenticatedContext('admin_uid_1', {
-      email: 'Hapaypal2003@gmail.com',
+      email: '  Hapaypal2003@gmail.com  ',
       email_verified: true,
       admin: true,
     })
@@ -295,14 +321,15 @@ test('Server-only collections and isAdmin lock exclusively to verified hapaypal2
   const validCodeHash = 'a'.repeat(64);
   const validPinHash = `scrypt$${'0'.repeat(32)}$${'1'.repeat(128)}`;
 
-  // Normal users and other accounts (even with admin:true) are blocked from adminSecurity, licenseCodes, coupons, adminIssuedCodes, activationCodes, joinRateLimits
+  // Normal users and other accounts (even with admin:true) are blocked from adminConfig, adminSecurity, licenseCodes, coupons, adminIssuedCodes, activationCodes, joinRateLimits
   await assertFails(getDocs(collection(userDb, 'coupons')));
   await assertFails(getDocs(collection(superAdminDb, 'coupons')));
   await assertFails(getDoc(doc(userDb, 'licenseCodes', validCodeHash)));
   await assertFails(getDocs(collection(otherAdminClaimDb, 'licenseCodes')));
+  await assertFails(getDoc(doc(otherAdminClaimDb, 'adminConfig', 'security')));
   await assertFails(getDoc(doc(otherAdminClaimDb, 'adminSecurity', 'panelConfig')));
   await assertFails(
-    setDoc(doc(otherAdminClaimDb, 'adminSecurity', 'panelConfig'), {
+    setDoc(doc(otherAdminClaimDb, 'adminConfig', 'security'), {
       pinHash: validPinHash,
       updatedByUid: 'other_admin_uid',
       updatedByEmail: 'other-admin@raseedi.test',
@@ -313,10 +340,10 @@ test('Server-only collections and isAdmin lock exclusively to verified hapaypal2
   await assertFails(getDoc(doc(userDb, 'adminIssuedCodes', 'hash_1')));
   await assertFails(getDoc(doc(userDb, 'joinRateLimits', OWNER_UID)));
 
-  // Malformed licenseCodes / adminSecurity writes fail even for primary admin
+  // Malformed licenseCodes / adminConfig writes and legacy adminSecurity writes fail even for primary admin
   await assertFails(setDoc(doc(superAdminDb, 'licenseCodes', 'hash_1'), { codeHash: 'hash_1' }));
   await assertFails(
-    setDoc(doc(superAdminDb, 'adminSecurity', 'panelConfig'), {
+    setDoc(doc(superAdminDb, 'adminConfig', 'security'), {
       pinHash: 'plaintext-pin',
       updatedByUid: 'admin_uid_1',
       updatedByEmail: 'hapaypal2003@gmail.com',
@@ -324,9 +351,7 @@ test('Server-only collections and isAdmin lock exclusively to verified hapaypal2
       updatedAt: serverTimestamp(),
     })
   );
-
-  // Exclusive primary admin can persist scrypt-hashed PIN config and create validated license codes
-  await assertSucceeds(
+  await assertFails(
     setDoc(doc(superAdminDb, 'adminSecurity', 'panelConfig'), {
       pinHash: validPinHash,
       updatedByUid: 'admin_uid_1',
@@ -336,6 +361,19 @@ test('Server-only collections and isAdmin lock exclusively to verified hapaypal2
       updatedAt: serverTimestamp(),
     })
   );
+
+  // Exclusive primary admin can persist scrypt-hashed PIN config at adminConfig/security and read legacy fallback
+  await assertSucceeds(
+    setDoc(doc(superAdminDb, 'adminConfig', 'security'), {
+      pinHash: validPinHash,
+      updatedByUid: 'admin_uid_1',
+      updatedByEmail: '  Hapaypal2003@gmail.com ',
+      updatedAtMs: Date.now(),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  );
+  await assertSucceeds(getDoc(doc(superAdminDb, 'adminConfig', 'security')));
   await assertSucceeds(getDoc(doc(superAdminDb, 'adminSecurity', 'panelConfig')));
   await assertSucceeds(
     setDoc(doc(superAdminDb, 'licenseCodes', validCodeHash), {
