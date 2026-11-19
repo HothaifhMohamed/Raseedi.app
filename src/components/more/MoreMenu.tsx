@@ -215,7 +215,7 @@ export const MoreMenu: React.FC = () => {
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 flex-wrap">
                 <h2 className="font-title text-sm font-bold text-[var(--color-ink)]">
-                  {isRTL ? 'لوحة إدارة الأكواد والاشتراكات' : 'Admin Codes & Subscriptions'}
+                  {isRTL ? 'لوحة إدارة الاشتراكات' : 'Admin Subscriptions Panel'}
                 </h2>
                 <span className="text-[10px] px-1.5 py-0.2 rounded font-semibold bg-[var(--color-income)]/15 text-[var(--color-income)]">
                   {isRTL ? 'إدارة' : 'Admin'}
@@ -223,8 +223,8 @@ export const MoreMenu: React.FC = () => {
               </div>
               <p className="text-xs text-[var(--color-muted)] mt-0.5">
                 {isRTL
-                  ? 'حساب المدير مفعّل مدى الحياة (Business PRO) • اضغط لتوليد أكواد التفعيل'
-                  : 'Admin lifetime Business PRO active • Tap to generate coupon codes'}
+                  ? 'حساب المدير مفعّل مدى الحياة (Business PRO) • اضغط لإدارة اشتراكات الحسابات والمؤسسات مباشرة'
+                  : 'Admin lifetime Business PRO active • Tap to manage account & org subscriptions directly'}
               </p>
             </div>
           </div>
@@ -886,12 +886,12 @@ export const MoreMenu: React.FC = () => {
                 <KeyRound className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
                 <div>
                   <div className="font-semibold text-[var(--color-ink)]">
-                    {isRTL ? 'لوحة إدارة الأكواد والاشتراكات' : 'Admin Codes & Subscriptions'}
+                    {isRTL ? 'لوحة إدارة الاشتراكات' : 'Admin Subscriptions Panel'}
                   </div>
                   <div className="text-[11px] text-[var(--color-muted)]">
                     {isRTL
-                      ? 'إدارة الحسابات، توليد أكواد التفعيل، وتغيير الرمز السري (محمي على الخادم)'
-                      : 'Manage accounts, license coupons & server-protected Admin PIN'}
+                      ? 'إدارة اشتراكات الحسابات والمؤسسات مباشرة وتغيير الرمز السري'
+                      : 'Manage account & organization subscriptions directly and update Admin PIN'}
                   </div>
                 </div>
               </div>

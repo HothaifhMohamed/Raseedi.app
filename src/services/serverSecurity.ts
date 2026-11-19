@@ -8,10 +8,6 @@ import {
 
 const ALLOWED_SCAN_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MAX_SCAN_DECODED_BYTES = 2_200_000; // ~2.2MB decoded image
-const UNSAFE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-
-export const LICENSE_CODE_PREFIX = 'RSD-PRO-';
-export const BUSINESS_LICENSE_CODE_PREFIX = 'RSD-BIZ-';
 
 export type ServerSupportedPlanTier = 'free' | 'personal_pro' | 'business_pro';
 export type ServerSupportedBillingCycle = 'free' | 'monthly' | 'yearly' | 'lifetime' | 'trial' | 'code';
@@ -506,69 +502,6 @@ export function isAllowedCorsOrigin(
   return allowed.has(normalizedOrigin);
 }
 
-export function hashLicenseCodeServer(rawCode: string): string {
-  const normalized = String(rawCode || '').trim().toUpperCase().replace(/\s+/g, '');
-  return crypto
-    .createHash('sha256')
-    .update(`raseedi-license:${normalized}`)
-    .digest('hex');
-}
-
-function randomAlphabetSegment(length: number): string {
-  const bytes = crypto.randomBytes(length);
-  let out = '';
-  for (let i = 0; i < length; i++) {
-    out += UNSAFE_ALPHABET[bytes[i] % UNSAFE_ALPHABET.length];
-  }
-  return out;
-}
-
-export function generateRandomLicenseCodeServer(params: {
-  tier: 'pro' | 'business';
-  cycle: 'monthly' | 'yearly' | 'lifetime';
-}): {
-  code: string;
-  codeHash: string;
-  codePreview: string;
-  tier: 'pro' | 'business';
-  planTier: 'personal_pro' | 'business_pro';
-  proPlan: ServerActivationPlan;
-  cycle: 'monthly' | 'yearly' | 'lifetime';
-} {
-  const tier = params.tier === 'business' ? 'business' : 'pro';
-  const cycle =
-    params.cycle === 'monthly' || params.cycle === 'yearly' || params.cycle === 'lifetime'
-      ? params.cycle
-      : 'yearly';
-  const prefix = tier === 'business' ? BUSINESS_LICENSE_CODE_PREFIX : LICENSE_CODE_PREFIX;
-  const seg1 = randomAlphabetSegment(4);
-  const seg2 = randomAlphabetSegment(4);
-  const seg3 = randomAlphabetSegment(4);
-  const code = `${prefix}${seg1}-${seg2}-${seg3}`;
-  const codeHash = hashLicenseCodeServer(code);
-  const codePreview = `${prefix}****-${seg3}`;
-  const planTier: 'personal_pro' | 'business_pro' =
-    tier === 'business' ? 'business_pro' : 'personal_pro';
-  const proPlan: ServerActivationPlan =
-    tier === 'business'
-      ? cycle === 'monthly'
-        ? 'business_monthly'
-        : cycle === 'yearly'
-        ? 'business_yearly'
-        : 'code'
-      : cycle;
-
-  return {
-    code,
-    codeHash,
-    codePreview,
-    tier,
-    planTier,
-    proPlan,
-    cycle,
-  };
-}
-
 // =============================================================================
 // Server Hardening Pure Helpers (Unit-Testable)
 // =============================================================================
@@ -670,31 +603,5 @@ const ALLOWED_ORG_SCANNER_ROLES = new Set(['owner', 'admin', 'accountant', 'empl
 
 export function isOrgReceiptScannerRole(role: unknown): boolean {
   return typeof role === 'string' && ALLOWED_ORG_SCANNER_ROLES.has(role);
-}
-
-export type SameUserCodeReuseDecision =
-  | 'other_org'
-  | 'idempotent_active'
-  | 'expired_reject';
-
-/**
- * Evaluate what happens when the same user attempts to redeem a license code
- * they already redeemed previously:
- * - Different targetOrgId (including personal vs org mismatch) -> reject 409 CODE_ALREADY_USED_OTHER_ORG
- * - Currently active entitlement -> idempotent 200 success
- * - Expired entitlement -> reject 409 CODE_ALREADY_USED (never allow infinite free renewal!)
- */
-export function evaluateSameUserCodeReuse(params: {
-  usedOrgId?: string | null;
-  targetOrgId?: string | null;
-  currentIsPro: boolean;
-}): SameUserCodeReuseDecision {
-  if ((params.usedOrgId || '') !== (params.targetOrgId || '')) {
-    return 'other_org';
-  }
-  if (params.currentIsPro) {
-    return 'idempotent_active';
-  }
-  return 'expired_reject';
 }
 

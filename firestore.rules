@@ -55,65 +55,6 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    function isValidLicenseCode(data, codeHash) {
-      return data.keys().hasAll([
-        'codeHash',
-        'codePreview',
-        'plan',
-        'tier',
-        'planTier',
-        'cycle',
-        'status',
-        'used',
-        'createdByUid',
-        'createdByEmail',
-        'createdAtMs',
-        'createdAt'
-      ])
-        && data.keys().hasOnly([
-          'codeHash',
-          'codePreview',
-          'plan',
-          'tier',
-          'planTier',
-          'cycle',
-          'targetEmail',
-          'status',
-          'used',
-          'usedBy',
-          'usedOrgId',
-          'usedAt',
-          'createdByUid',
-          'createdByEmail',
-          'createdAtMs',
-          'createdAt'
-        ])
-        && data.codeHash is string
-        && data.codeHash == codeHash
-        && isValidId(data.codeHash)
-        && data.codePreview is string
-        && data.codePreview.size() > 0
-        && data.codePreview.size() <= 32
-        && data.plan in ['monthly', 'yearly', 'lifetime', 'business_monthly', 'business_yearly', 'code']
-        && data.tier in ['pro', 'business']
-        && data.planTier in ['personal_pro', 'business_pro']
-        && data.cycle in ['monthly', 'yearly', 'lifetime']
-        && (!('targetEmail' in data) || data.targetEmail == null || (data.targetEmail is string && data.targetEmail.size() <= 254))
-        && data.status == 'unused'
-        && data.used == false
-        && (!('usedBy' in data) || data.usedBy == null)
-        && (!('usedOrgId' in data) || data.usedOrgId == null)
-        && (!('usedAt' in data) || data.usedAt == null)
-        && data.createdByUid is string
-        && data.createdByUid == request.auth.uid
-        && isValidId(data.createdByUid)
-        && data.createdByEmail is string
-        && data.createdByEmail.trim().lower() == 'hapaypal2003@gmail.com'
-        && data.createdAtMs is number
-        && data.createdAtMs > 0
-        && data.createdAt is timestamp;
-    }
-
     // Single-read Organization RBAC & Subscription helpers
     function memberDoc(orgId) {
       return get(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid));
@@ -467,6 +408,16 @@ service cloud.firestore {
         && (!('lockedUntilDate' in data) || data.lockedUntilDate == null || (data.lockedUntilDate is string && data.lockedUntilDate.size() <= 16));
     }
 
+    function isValidOrgAdminSubscriptionUpdate(data) {
+      return (!('planTier' in data) || data.planTier in ['free', 'personal_pro', 'business_pro'])
+        && (!('billingCycle' in data) || data.billingCycle in ['free', 'monthly', 'yearly', 'lifetime', 'trial'])
+        && (!('plan' in data) || data.plan in ['trial', 'business_monthly', 'business_yearly'])
+        && (!('expiresAt' in data) || data.expiresAt == null || (data.expiresAt is number && data.expiresAt > 0))
+        && (!('subscriptionEndsAt' in data) || data.subscriptionEndsAt == null || (data.subscriptionEndsAt is number && data.subscriptionEndsAt > 0))
+        && (!('aiScansLimit' in data) || (data.aiScansLimit is int && data.aiScansLimit >= 0 && data.aiScansLimit <= 10000))
+        && data.updatedAt is timestamp;
+    }
+
     function isValidCostCenter(data, orgId, ccId) {
       return data.keys().hasAll(['id', 'orgId', 'code', 'nameAr', 'nameEn', 'budgetAllocated', 'isActive', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly([
@@ -578,12 +529,7 @@ service cloud.firestore {
     }
 
     match /licenseCodes/{codeHash} {
-      allow get, list: if isAdmin();
-      allow create: if isAdmin()
-        && isValidId(codeHash)
-        && isValidLicenseCode(incoming(), codeHash)
-        && incoming().createdAt == request.time;
-      allow update, delete: if false;
+      allow read, write: if false;
     }
 
     match /adminIssuedCodes/{codeHash} {
@@ -821,29 +767,47 @@ service cloud.firestore {
     // Enterprise Organizations & Multi-Role RBAC Subcollections
     // =========================================================================
     match /organizations/{orgId} {
-      allow get: if isValidId(orgId) && isOrgMemberActive(orgId);
-      allow list: if false;
-      // Organization lifecycle (create, billing, delete, ownership) is server-only
+      allow get: if isValidId(orgId) && (isOrgMemberActive(orgId) || isAdmin());
+      allow list: if isAdmin();
+      // Organization lifecycle (create, delete, ownership) is server-only
       allow create, delete: if false;
       allow update: if isValidId(orgId)
-        && isVerifiedUser()
-        && isOrgOwnerOrAdmin(orgId)
-        && isOrgWritable(orgId)
-        && isValidOrgSettingsUpdate(incoming())
         && incoming().id == existing().id
         && incoming().ownerUid == existing().ownerUid
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'name',
-          'currency',
-          'industry',
-          'vatRate',
-          'taxNumber',
-          'approvalThreshold',
-          'lockedUntilDate',
-          'updatedAt'
-        ]);
+        && (
+          (
+            isVerifiedUser()
+            && isOrgOwnerOrAdmin(orgId)
+            && isOrgWritable(orgId)
+            && isValidOrgSettingsUpdate(incoming())
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'name',
+              'currency',
+              'industry',
+              'vatRate',
+              'taxNumber',
+              'approvalThreshold',
+              'lockedUntilDate',
+              'updatedAt'
+            ])
+          )
+          ||
+          (
+            isAdmin()
+            && isValidOrgAdminSubscriptionUpdate(incoming())
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'planTier',
+              'billingCycle',
+              'plan',
+              'expiresAt',
+              'subscriptionEndsAt',
+              'aiScansLimit',
+              'updatedAt'
+            ])
+          )
+        );
 
       match /members/{memberUid} {
         allow get, list: if isValidId(orgId) && isOrgMemberActive(orgId);

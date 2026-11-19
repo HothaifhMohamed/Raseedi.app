@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  evaluateSameUserCodeReuse,
   isOrgReceiptScannerRole,
   isSafeWebhookId,
   isSensitiveRevocationPath,
@@ -23,44 +22,6 @@ import {
 } from './db';
 import { buildCompactBackupHistorySnapshotJson } from './backupHistory';
 import type { Transaction, Wallet } from '../types';
-
-test('evaluateSameUserCodeReuse: blocks expired code reuse and org mismatches while preserving active idempotency', () => {
-  // Active entitlement for same personal workspace -> idempotent 200
-  assert.equal(
-    evaluateSameUserCodeReuse({ usedOrgId: null, targetOrgId: '', currentIsPro: true }),
-    'idempotent_active'
-  );
-
-  // Active entitlement for same organization -> idempotent 200
-  assert.equal(
-    evaluateSameUserCodeReuse({ usedOrgId: 'org-1', targetOrgId: 'org-1', currentIsPro: true }),
-    'idempotent_active'
-  );
-
-  // Expired entitlement for same user -> strictly rejected (never allows infinite renewal)
-  assert.equal(
-    evaluateSameUserCodeReuse({ usedOrgId: null, targetOrgId: '', currentIsPro: false }),
-    'expired_reject'
-  );
-  assert.equal(
-    evaluateSameUserCodeReuse({ usedOrgId: 'org-1', targetOrgId: 'org-1', currentIsPro: false }),
-    'expired_reject'
-  );
-
-  // Different organization (or personal vs org mismatch) -> strictly rejected
-  assert.equal(
-    evaluateSameUserCodeReuse({ usedOrgId: 'org-1', targetOrgId: 'org-2', currentIsPro: true }),
-    'other_org'
-  );
-  assert.equal(
-    evaluateSameUserCodeReuse({ usedOrgId: 'org-1', targetOrgId: '', currentIsPro: true }),
-    'other_org'
-  );
-  assert.equal(
-    evaluateSameUserCodeReuse({ usedOrgId: '', targetOrgId: 'org-1', currentIsPro: true }),
-    'other_org'
-  );
-});
 
 test('isSafeWebhookId: accepts valid IDs and rejects path traversal, spaces, empty, or overlong strings', () => {
   assert.equal(isSafeWebhookId('evt_12345-ABC_xyz'), true);
@@ -94,7 +55,7 @@ test('resolveAdminSessionSecret: uses env secret when >= 32 chars and falls back
 
 test('isSensitiveRevocationPath: enforces checkRevoked on admin, account deletion, org deletion & ownership transfer', () => {
   assert.equal(isSensitiveRevocationPath('/api/admin/status'), true);
-  assert.equal(isSensitiveRevocationPath('/api/admin/codes/generate'), true);
+  assert.equal(isSensitiveRevocationPath('/api/admin/organizations/org-1/subscription'), true);
   assert.equal(isSensitiveRevocationPath('/api/delete-account'), true);
   assert.equal(isSensitiveRevocationPath('/api/org/delete'), true);
   assert.equal(isSensitiveRevocationPath('/api/org/transfer-ownership'), true);

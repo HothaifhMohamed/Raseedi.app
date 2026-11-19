@@ -933,8 +933,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
               <p className="text-[11px] text-[var(--color-muted)] leading-relaxed">
                 {isRTL
-                  ? 'إدارة اشتراكات المستخدمين، توليد أكواد التفعيل، وتحديث الرمز السري للوحة الإدارة.'
-                  : 'Manage user subscriptions, issue license codes, and manage the Admin Panel PIN.'}
+                  ? 'إدارة اشتراكات الحسابات والمؤسسات مباشرة، وتحديث الرمز السري للوحة الإدارة.'
+                  : 'Manage user and organization subscriptions directly, and update the Admin Panel PIN.'}
               </p>
               <button
                 type="button"
@@ -948,8 +948,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <KeyRound className="w-4 h-4 shrink-0" />
                 <span>
                   {isRTL
-                    ? 'فتح لوحة إدارة الأكواد والاشتراكات'
-                    : 'Open Admin Codes & Subscriptions Panel'}
+                    ? 'فتح لوحة إدارة الاشتراكات'
+                    : 'Open Admin Subscriptions Panel'}
                 </span>
               </button>
             </div>

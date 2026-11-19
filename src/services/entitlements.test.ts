@@ -25,6 +25,7 @@ import {
 import { DEFAULT_SETTINGS } from './db';
 import { fromMinor, toMinor, roundCurrency } from './currency';
 import { PRICING_CONFIG } from '../config/pricing';
+import { buildDirectAdminOrgSubscriptionPatch } from './adminAuth';
 import type { Transaction, Wallet } from '../types';
 
 test('VAT minor-unit precision across 2-decimal (EGP) and 3-decimal (KWD, BHD, OMR, JOD, TND) currencies', () => {
@@ -136,6 +137,28 @@ test('Org subscription lifecycle transitions: free never expires; trial >7d sile
   assert.equal(pastGrace.canWrite, false);
   assert.equal(pastGrace.expiryNotificationStage, 'expired');
   assert.equal(pastGrace.monthlyScanLimit, 0);
+
+  // Direct Admin activation patch immediately restores an expired org to active Business PRO
+  const directOrgPatch = buildDirectAdminOrgSubscriptionPatch({
+    planTier: 'business_pro',
+    billingCycle: 'yearly',
+    customDays: 180,
+    nowMs: now,
+  });
+  const restoredOrg = computeOrgSubscriptionState(
+    {
+      planTier: directOrgPatch.planTier,
+      plan: directOrgPatch.plan,
+      billingCycle: directOrgPatch.billingCycle,
+      expiresAt: directOrgPatch.expiresAt,
+      subscriptionEndsAt: directOrgPatch.subscriptionEndsAt ?? undefined,
+    },
+    now
+  );
+  assert.equal(restoredOrg.status, 'active');
+  assert.equal(restoredOrg.canWrite, true);
+  assert.equal(restoredOrg.isReadOnly, false);
+  assert.equal(restoredOrg.daysRemaining, 180);
 });
 
 test('RBAC role helpers enforce owner/admin/accountant/employee/viewer boundaries', () => {

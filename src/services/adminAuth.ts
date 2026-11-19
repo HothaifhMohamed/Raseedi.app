@@ -1,5 +1,4 @@
 import { isPrimarySystemAdminEmail } from './licenseCodes';
-import type { AdminCouponCycle, AdminCouponTier } from './licenseCodes';
 import type { BillingCycle, PlanTier, ProPlanCode } from '../types';
 import { DAY_MS } from './entitlements';
 
@@ -129,10 +128,6 @@ export function clearVerifiedAdminSession(
     // Ignore
   }
 }
-
-const UNSAFE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const PRO_CODE_PREFIX = 'RSD-PRO-';
-const BIZ_CODE_PREFIX = 'RSD-BIZ-';
 
 export interface AdminIdentityCandidate {
   uid?: string | null;
@@ -353,81 +348,46 @@ export async function verifyAdminPinBrowser(
 }
 
 /**
- * Browser-side SHA-256 license code hash — bit-for-bit identical to `hashLicenseCodeServer`.
+ * Parse a YYYY-MM-DD calendar date string into end-of-day UTC epoch milliseconds
+ * so admin-selected expiry dates cover the entire chosen calendar day.
  */
-export async function hashLicenseCodeBrowser(rawCode: string): Promise<string> {
-  const normalized = String(rawCode || '').trim().toUpperCase().replace(/\s+/g, '');
-  const webCrypto = getWebCrypto();
-  const data = new TextEncoder().encode(`raseedi-license:${normalized}`);
-  const digest = await webCrypto.subtle.digest('SHA-256', data);
-  return bytesToHex(new Uint8Array(digest));
-}
-
-function randomAlphabetSegmentBrowser(length: number): string {
-  const webCrypto = getWebCrypto();
-  const bytes = new Uint8Array(length);
-  webCrypto.getRandomValues(bytes);
-  let out = '';
-  for (let i = 0; i < length; i++) {
-    out += UNSAFE_ALPHABET[bytes[i] % UNSAFE_ALPHABET.length];
+export function parseAdminExpiryDateInput(dateStr?: string | null): number | null {
+  if (typeof dateStr !== 'string') return null;
+  const trimmed = dateStr.trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const ms = Date.UTC(year, month - 1, day, 23, 59, 59, 999);
+  const check = new Date(ms);
+  if (
+    !Number.isFinite(ms) ||
+    check.getUTCFullYear() !== year ||
+    check.getUTCMonth() !== month - 1 ||
+    check.getUTCDate() !== day
+  ) {
+    return null;
   }
-  return out;
-}
-
-export async function generateRandomLicenseCodeBrowser(params: {
-  tier: AdminCouponTier;
-  cycle: AdminCouponCycle;
-}): Promise<{
-  code: string;
-  codeHash: string;
-  codePreview: string;
-  tier: AdminCouponTier;
-  planTier: 'personal_pro' | 'business_pro';
-  proPlan: ProPlanCode;
-  cycle: AdminCouponCycle;
-}> {
-  const tier: AdminCouponTier = params.tier === 'business' ? 'business' : 'pro';
-  const cycle: AdminCouponCycle =
-    params.cycle === 'monthly' || params.cycle === 'yearly' || params.cycle === 'lifetime'
-      ? params.cycle
-      : 'yearly';
-  const prefix = tier === 'business' ? BIZ_CODE_PREFIX : PRO_CODE_PREFIX;
-  const seg1 = randomAlphabetSegmentBrowser(4);
-  const seg2 = randomAlphabetSegmentBrowser(4);
-  const seg3 = randomAlphabetSegmentBrowser(4);
-  const code = `${prefix}${seg1}-${seg2}-${seg3}`;
-  const codeHash = await hashLicenseCodeBrowser(code);
-  const codePreview = `${prefix}****-${seg3}`;
-  const planTier: 'personal_pro' | 'business_pro' =
-    tier === 'business' ? 'business_pro' : 'personal_pro';
-  const proPlan: ProPlanCode =
-    tier === 'business'
-      ? cycle === 'monthly'
-        ? 'business_monthly'
-        : cycle === 'yearly'
-        ? 'business_yearly'
-        : 'code'
-      : cycle;
-
-  return {
-    code,
-    codeHash,
-    codePreview,
-    tier,
-    planTier,
-    proPlan,
-    cycle,
-  };
+  return ms;
 }
 
 /**
  * Pure helper computing ONLY the subscription fields permitted by `firestore.rules`
- * (`isAdmin()` branch on `users/{userId}`) for direct admin updates on Vercel.
+ * (`isAdmin()` branch on `users/{userId}`) for direct admin subscription management.
+ * Supports:
+ * - Tier/cycle activation (`monthly`, `yearly`, `lifetime`, or `free` cancellation)
+ * - Custom duration in days (`customDays`)
+ * - Explicit expiry date (`customExpiresAt` epoch ms)
+ * - Cumulative extension (`extendDays` added onto `max(now, existingExpiresAt)`)
  */
 export function buildDirectAdminSubscriptionPatch(params: {
   planTier: PlanTier;
   billingCycle: 'free' | 'monthly' | 'yearly' | 'lifetime';
   customDays?: number | null;
+  customExpiresAt?: number | null;
+  extendDays?: number | null;
+  existingExpiresAt?: number | null;
   nowMs?: number;
 }): {
   isPro: boolean;
@@ -440,7 +400,8 @@ export function buildDirectAdminSubscriptionPatch(params: {
   proExpiresAt: number | null;
   redeemedCouponCode: string | null;
 } {
-  const now = typeof params.nowMs === 'number' && Number.isFinite(params.nowMs) ? params.nowMs : Date.now();
+  const now =
+    typeof params.nowMs === 'number' && Number.isFinite(params.nowMs) ? params.nowMs : Date.now();
   const tier = params.planTier;
   const cycle = params.billingCycle;
 
@@ -469,19 +430,40 @@ export function buildDirectAdminSubscriptionPatch(params: {
         ? 'business_monthly'
         : normalizedCycle === 'yearly'
         ? 'business_yearly'
-        : 'code'
+        : 'lifetime'
       : normalizedCycle;
 
   let expiresAt: number | null = null;
   if (normalizedCycle !== 'lifetime') {
-    const customDays =
-      typeof params.customDays === 'number' &&
-      Number.isFinite(params.customDays) &&
-      params.customDays > 0
-        ? Math.min(3650, Math.round(params.customDays))
-        : null;
-    const durationDays = customDays ?? (normalizedCycle === 'monthly' ? 30 : 365);
-    expiresAt = now + durationDays * DAY_MS;
+    if (
+      typeof params.extendDays === 'number' &&
+      Number.isFinite(params.extendDays) &&
+      params.extendDays > 0
+    ) {
+      const clampedExtend = Math.min(3650, Math.round(params.extendDays));
+      const baseMs =
+        typeof params.existingExpiresAt === 'number' &&
+        Number.isFinite(params.existingExpiresAt) &&
+        params.existingExpiresAt > now
+          ? params.existingExpiresAt
+          : now;
+      expiresAt = baseMs + clampedExtend * DAY_MS;
+    } else if (
+      typeof params.customExpiresAt === 'number' &&
+      Number.isFinite(params.customExpiresAt) &&
+      params.customExpiresAt > now
+    ) {
+      expiresAt = Math.round(params.customExpiresAt);
+    } else {
+      const customDays =
+        typeof params.customDays === 'number' &&
+        Number.isFinite(params.customDays) &&
+        params.customDays > 0
+          ? Math.min(3650, Math.round(params.customDays))
+          : null;
+      const durationDays = customDays ?? (normalizedCycle === 'monthly' ? 30 : 365);
+      expiresAt = now + durationDays * DAY_MS;
+    }
   }
 
   return {
@@ -493,6 +475,90 @@ export function buildDirectAdminSubscriptionPatch(params: {
     startedAt: now,
     expiresAt,
     proExpiresAt: expiresAt,
-    redeemedCouponCode: 'ADMIN_GRANTED',
+    redeemedCouponCode: null,
+  };
+}
+
+/**
+ * Pure helper computing ONLY the organization subscription fields permitted by
+ * `firestore.rules` (`isAdmin()` branch on `organizations/{orgId}`).
+ */
+export function buildDirectAdminOrgSubscriptionPatch(params: {
+  planTier: PlanTier;
+  billingCycle: 'free' | 'monthly' | 'yearly' | 'lifetime';
+  customDays?: number | null;
+  customExpiresAt?: number | null;
+  extendDays?: number | null;
+  existingExpiresAt?: number | null;
+  nowMs?: number;
+}): {
+  planTier: PlanTier;
+  billingCycle: BillingCycle;
+  plan: 'trial' | 'business_monthly' | 'business_yearly';
+  expiresAt: number | null;
+  subscriptionEndsAt: number | null;
+  aiScansLimit: number;
+} {
+  const now =
+    typeof params.nowMs === 'number' && Number.isFinite(params.nowMs) ? params.nowMs : Date.now();
+
+  if (params.planTier === 'free' || params.billingCycle === 'free') {
+    return {
+      planTier: 'free',
+      billingCycle: 'free',
+      plan: 'business_monthly',
+      expiresAt: null,
+      subscriptionEndsAt: null,
+      aiScansLimit: 5,
+    };
+  }
+
+  const normalizedCycle: 'monthly' | 'yearly' | 'lifetime' =
+    params.billingCycle === 'monthly' ||
+    params.billingCycle === 'yearly' ||
+    params.billingCycle === 'lifetime'
+      ? params.billingCycle
+      : 'yearly';
+
+  let expiresAt: number | null = null;
+  if (normalizedCycle !== 'lifetime') {
+    if (
+      typeof params.extendDays === 'number' &&
+      Number.isFinite(params.extendDays) &&
+      params.extendDays > 0
+    ) {
+      const clampedExtend = Math.min(3650, Math.round(params.extendDays));
+      const baseMs =
+        typeof params.existingExpiresAt === 'number' &&
+        Number.isFinite(params.existingExpiresAt) &&
+        params.existingExpiresAt > now
+          ? params.existingExpiresAt
+          : now;
+      expiresAt = baseMs + clampedExtend * DAY_MS;
+    } else if (
+      typeof params.customExpiresAt === 'number' &&
+      Number.isFinite(params.customExpiresAt) &&
+      params.customExpiresAt > now
+    ) {
+      expiresAt = Math.round(params.customExpiresAt);
+    } else {
+      const customDays =
+        typeof params.customDays === 'number' &&
+        Number.isFinite(params.customDays) &&
+        params.customDays > 0
+          ? Math.min(3650, Math.round(params.customDays))
+          : null;
+      const durationDays = customDays ?? (normalizedCycle === 'monthly' ? 30 : 365);
+      expiresAt = now + durationDays * DAY_MS;
+    }
+  }
+
+  return {
+    planTier: 'business_pro',
+    billingCycle: normalizedCycle,
+    plan: normalizedCycle === 'monthly' ? 'business_monthly' : 'business_yearly',
+    expiresAt,
+    subscriptionEndsAt: expiresAt,
+    aiScansLimit: 250,
   };
 }

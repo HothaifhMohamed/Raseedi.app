@@ -5,18 +5,18 @@ import {
   ADMIN_PANEL_SESSION_STORAGE_KEY,
   ADMIN_PANEL_SESSION_TTL_MS,
   ADMIN_PBKDF2_HASH_REGEX,
+  buildDirectAdminOrgSubscriptionPatch,
   buildDirectAdminSubscriptionPatch,
   canUserAccessAdminPanelUi,
   clearVerifiedAdminSession,
-  generateRandomLicenseCodeBrowser,
   hashAdminPinBrowser,
-  hashLicenseCodeBrowser,
   isAdminSessionExpired,
   isApiEndpointUnavailableResponse,
   isAuthorizedPrimaryAdminUser,
   isVerifiedPrimaryAdminForSensitiveAction,
   loadVerifiedAdminSession,
   normalizeAdminSessionExpiry,
+  parseAdminExpiryDateInput,
   saveVerifiedAdminSession,
   verifyAdminPinBrowser,
   type SessionStorageLike,
@@ -24,7 +24,6 @@ import {
 import {
   deriveCrossInstanceAdminSessionKey,
   hashAdminPinServer,
-  hashLicenseCodeServer,
   issueSignedAdminSessionToken,
   verifyAdminPinHashServer,
   verifySignedAdminSessionToken,
@@ -154,20 +153,19 @@ describe('Vercel & Server Primary Admin Access (adminAuth)', () => {
     assert.equal(verifyAdminPinHashServer('ServerPin#99', serverHash), true);
   });
 
-  it('hashes browser-generated license codes identically to server SHA-256 hash', async () => {
-    const generated = await generateRandomLicenseCodeBrowser({
-      tier: 'business',
-      cycle: 'lifetime',
-    });
-    assert.match(generated.code, /^RSD-BIZ-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
-    assert.equal(generated.planTier, 'business_pro');
-    assert.equal(generated.proPlan, 'code');
-    assert.equal(generated.codeHash, hashLicenseCodeServer(generated.code));
-    assert.equal(await hashLicenseCodeBrowser(generated.code), hashLicenseCodeServer(generated.code));
+  it('parses YYYY-MM-DD admin expiry date inputs to end-of-day UTC and rejects invalid dates', () => {
+    const ms = parseAdminExpiryDateInput('2027-03-15');
+    assert.equal(ms, Date.UTC(2027, 2, 15, 23, 59, 59, 999));
+    assert.equal(parseAdminExpiryDateInput('2026-02-30'), null);
+    assert.equal(parseAdminExpiryDateInput('15/03/2027'), null);
+    assert.equal(parseAdminExpiryDateInput(''), null);
+    assert.equal(parseAdminExpiryDateInput(null), null);
   });
 
-  it('builds direct admin subscription patches restricted strictly to Firestore rules allowed keys', () => {
-    const allowedKeys = new Set([
+  it('builds direct admin user & org subscription patches with custom days, explicit expiry date, and extensions', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const now = 1_700_000_000_000;
+    const allowedUserKeys = new Set([
       'isPro',
       'proActive',
       'planTier',
@@ -182,15 +180,57 @@ describe('Vercel & Server Primary Admin Access (adminAuth)', () => {
     const bizYearly = buildDirectAdminSubscriptionPatch({
       planTier: 'business_pro',
       billingCycle: 'yearly',
-      nowMs: 1_700_000_000_000,
+      nowMs: now,
     });
     assert.deepEqual(
-      Object.keys(bizYearly).filter((k) => !allowedKeys.has(k)),
+      Object.keys(bizYearly).filter((k) => !allowedUserKeys.has(k)),
       []
     );
     assert.equal(bizYearly.isPro, true);
     assert.equal(bizYearly.proPlan, 'business_yearly');
-    assert.equal(bizYearly.expiresAt, 1_700_000_000_000 + 365 * 24 * 60 * 60 * 1000);
+    assert.equal(bizYearly.expiresAt, now + 365 * DAY);
+    assert.equal(bizYearly.redeemedCouponCode, null);
+
+    // Explicit expiry date overrides cycle default
+    const customExp = now + 90 * DAY;
+    const withDate = buildDirectAdminSubscriptionPatch({
+      planTier: 'personal_pro',
+      billingCycle: 'monthly',
+      customExpiresAt: customExp,
+      nowMs: now,
+    });
+    assert.equal(withDate.expiresAt, customExp);
+    assert.equal(withDate.proExpiresAt, customExp);
+
+    // Cumulative extension adds onto existing active expiry (not now)
+    const activeExp = now + 20 * DAY;
+    const extendedActive = buildDirectAdminSubscriptionPatch({
+      planTier: 'personal_pro',
+      billingCycle: 'monthly',
+      extendDays: 30,
+      existingExpiresAt: activeExp,
+      nowMs: now,
+    });
+    assert.equal(extendedActive.expiresAt, activeExp + 30 * DAY);
+
+    // Extending an already expired subscription adds from now
+    const extendedExpired = buildDirectAdminSubscriptionPatch({
+      planTier: 'personal_pro',
+      billingCycle: 'monthly',
+      extendDays: 30,
+      existingExpiresAt: now - 10 * DAY,
+      nowMs: now,
+    });
+    assert.equal(extendedExpired.expiresAt, now + 30 * DAY);
+
+    // Business Lifetime sets proPlan to 'lifetime' with null expiry
+    const bizLifetime = buildDirectAdminSubscriptionPatch({
+      planTier: 'business_pro',
+      billingCycle: 'lifetime',
+      nowMs: now,
+    });
+    assert.equal(bizLifetime.proPlan, 'lifetime');
+    assert.equal(bizLifetime.expiresAt, null);
 
     const freeCancel = buildDirectAdminSubscriptionPatch({
       planTier: 'free',
@@ -199,6 +239,42 @@ describe('Vercel & Server Primary Admin Access (adminAuth)', () => {
     assert.equal(freeCancel.isPro, false);
     assert.equal(freeCancel.planTier, 'free');
     assert.equal(freeCancel.expiresAt, null);
+
+    // Direct organization subscription patch strictly matches Firestore rules allowed keys
+    const allowedOrgKeys = new Set([
+      'planTier',
+      'billingCycle',
+      'plan',
+      'expiresAt',
+      'subscriptionEndsAt',
+      'aiScansLimit',
+    ]);
+    const orgExtended = buildDirectAdminOrgSubscriptionPatch({
+      planTier: 'business_pro',
+      billingCycle: 'yearly',
+      extendDays: 365,
+      existingExpiresAt: now + 15 * DAY,
+      nowMs: now,
+    });
+    assert.deepEqual(
+      Object.keys(orgExtended).filter((k) => !allowedOrgKeys.has(k)),
+      []
+    );
+    assert.equal(orgExtended.planTier, 'business_pro');
+    assert.equal(orgExtended.plan, 'business_yearly');
+    assert.equal(orgExtended.expiresAt, now + 380 * DAY);
+    assert.equal(orgExtended.subscriptionEndsAt, now + 380 * DAY);
+    assert.equal(orgExtended.aiScansLimit, 250);
+
+    const orgCancelled = buildDirectAdminOrgSubscriptionPatch({
+      planTier: 'free',
+      billingCycle: 'free',
+      nowMs: now,
+    });
+    assert.equal(orgCancelled.planTier, 'free');
+    assert.equal(orgCancelled.billingCycle, 'free');
+    assert.equal(orgCancelled.expiresAt, null);
+    assert.equal(orgCancelled.aiScansLimit, 5);
   });
 
   it('never leaks app PIN or wallet PINs into backup/meta settings or wallets payloads', () => {

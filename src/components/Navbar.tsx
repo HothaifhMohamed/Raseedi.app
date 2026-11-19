@@ -678,7 +678,7 @@ export const Navbar: React.FC = () => {
                       >
                         <div className="flex items-center gap-2">
                           <KeyRound className="w-4 h-4 shrink-0" />
-                          <span>{isRTL ? 'لوحة إدارة الأكواد والاشتراكات' : 'Admin Codes & Subscriptions'}</span>
+                          <span>{isRTL ? 'لوحة إدارة الاشتراكات' : 'Admin Subscriptions Panel'}</span>
                         </div>
                       </button>
                     ) : (

@@ -1,18 +1,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  BUSINESS_LICENSE_CODE_PREFIX,
-  LICENSE_CODE_PREFIX,
   PRIMARY_SYSTEM_ADMIN_EMAIL,
-  getLicensePrefixForTier,
   isPrimarySystemAdminEmail,
-  isSignedLicenseFormat,
 } from './licenseCodes';
 import {
   buildAdminCustomClaims,
-  generateRandomLicenseCodeServer,
   hashAdminPinServer,
-  hashLicenseCodeServer,
   isAllowedCorsOrigin,
   isServerAdminUser,
   resolveActivationPlanDetails,
@@ -26,28 +20,7 @@ import {
   encodeFirestoreDocumentFields,
 } from './firestoreRest';
 
-describe('licenseCodes format helpers and serverSecurity hardening', () => {
-  it('detects RSD-PRO-* and RSD-BIZ-* formats and resolves tier prefixes', () => {
-    assert.equal(getLicensePrefixForTier('pro'), LICENSE_CODE_PREFIX);
-    assert.equal(getLicensePrefixForTier('business'), BUSINESS_LICENSE_CODE_PREFIX);
-    assert.equal(isSignedLicenseFormat('rsd-pro-abcd-efgh-ijkl'), true);
-    assert.equal(isSignedLicenseFormat('RSD-BIZ-1234-5678-90AB'), true);
-    assert.equal(isSignedLicenseFormat('LEGACY-CODE-123'), false);
-  });
-
-  it('generates server-side random license codes and deterministic SHA-256 hashes', () => {
-    const c1 = generateRandomLicenseCodeServer({ tier: 'pro', cycle: 'monthly' });
-    const c2 = generateRandomLicenseCodeServer({ tier: 'business', cycle: 'lifetime' });
-    assert.ok(c1.code.startsWith(LICENSE_CODE_PREFIX));
-    assert.ok(c2.code.startsWith(BUSINESS_LICENSE_CODE_PREFIX));
-    assert.equal(c2.planTier, 'business_pro');
-    assert.equal(c2.cycle, 'lifetime');
-    assert.notEqual(c1.code, c2.code);
-    assert.equal(c1.codeHash, hashLicenseCodeServer(`  ${c1.code.toLowerCase()}  `));
-    assert.equal(c1.codeHash.length, 64);
-    assert.match(c1.codePreview, /^RSD-PRO-\*{4}-/);
-  });
-
+describe('system admin identity and serverSecurity hardening', () => {
   it('verifies timing-safe passcodes against env configuration only', () => {
     assert.equal(verifyTimingSafePasscode('secret-pass-99', 'secret-pass-99'), true);
     assert.equal(verifyTimingSafePasscode('  secret-pass-99 ', 'secret-pass-99'), true);

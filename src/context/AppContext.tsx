@@ -126,7 +126,6 @@ import {
   fetchLatestCloudBackupFromHistory,
   bootstrapAdminStatusOnServer,
   resolveFirebaseUserEmail,
-  redeemProCodeWithServer,
   startBusinessTrialWithServer,
   fetchScanQuotaFromServer,
   deleteAccountFromServer,
@@ -465,17 +464,6 @@ interface AppContextType {
   planTier: PlanTier;
   proEntitlement: VerifiedProEntitlement | null;
   subscriptionSummary: UserSubscriptionSummary;
-  redeemProCode: (
-    code: string,
-    orgId?: string
-  ) => Promise<{
-    ok: boolean;
-    error?: string;
-    planTier?: PlanTier;
-    billingCycle?: VerifiedProEntitlement['billingCycle'];
-    expiresAt?: number | null;
-    isCumulativeRenewal?: boolean;
-  }>;
   startBusinessTrial: (orgId?: string) => Promise<{ ok: boolean; error?: string }>;
   devActivateProPreview: (tier?: 'personal_pro' | 'business_pro') => void;
   restorePurchases: () => Promise<boolean>;
@@ -1839,166 +1827,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setDevProTierPreview(tier);
     setIsUpgradeModalOpen(false);
   }, []);
-
-  const redeemProCode = useCallback(
-    async (
-      code: string,
-      orgId?: string
-    ): Promise<{
-      ok: boolean;
-      error?: string;
-      planTier?: PlanTier;
-      billingCycle?: VerifiedProEntitlement['billingCycle'];
-      expiresAt?: number | null;
-      isCumulativeRenewal?: boolean;
-    }> => {
-      const isEn = latestPersonalRef.current.settings.language === 'en';
-
-      // Strict identity requirement: guests cannot redeem activation codes without binding Google account
-      if (!auth.currentUser || !latestPersonalRef.current.user?.isLoggedIn) {
-        return {
-          ok: false,
-          error: isEn
-            ? 'Please sign in with Google first to link your subscription to the cloud.'
-            : 'يجب تسجيل الدخول بحساب جوجل أولاً لربط الاشتراك وسحابياً.',
-        };
-      }
-
-      const applyRedeemedEntitlement = async (params: {
-        uid: string;
-        codePreview?: string;
-        proPlan: ProPlanCode;
-        planTier: PlanTier;
-        billingCycle: BillingCycle;
-        startedAt?: number | null;
-        expiresAt: number | null;
-      }) => {
-        const now = Date.now();
-        const entitlement: VerifiedProEntitlement = {
-          uid: params.uid,
-          isPro: true,
-          proActive: true,
-          proPlan: params.proPlan,
-          planTier: params.planTier,
-          billingCycle: params.billingCycle,
-          startedAt: params.startedAt ?? now,
-          expiresAt: params.expiresAt,
-          proExpiresAt: params.expiresAt,
-          verifiedAt: now,
-          activatedViaCode: true,
-          codePreview: params.codePreview,
-        };
-        await applyVerifiedProState(entitlement);
-
-        const newLimit = params.planTier === 'business_pro' ? 500 : 200;
-        setScanQuota((prev) => ({
-          month: prev?.month || new Date().toISOString().slice(0, 7),
-          used: prev?.used || 0,
-          limit: newLimit,
-          remaining: Math.max(0, newLimit - (prev?.used || 0)),
-          isPro: true,
-          planTier: params.planTier,
-          expiresAt: params.expiresAt,
-          proExpiresAt: params.expiresAt,
-        }));
-
-        if (params.planTier === 'business_pro') {
-          const currentMap = latestLocalOrgWorkspacesRef.current;
-          const targetIds =
-            orgId && currentMap[orgId]
-              ? [orgId]
-              : activeWorkspaceRef.current !== 'personal' && currentMap[activeWorkspaceRef.current]
-              ? [activeWorkspaceRef.current]
-              : Object.keys(currentMap);
-
-          if (targetIds.length > 0) {
-            const nextMap: Record<string, OrgWorkspaceData> = { ...currentMap };
-            for (const tid of targetIds) {
-              const ws = nextMap[tid];
-              if (!ws) continue;
-              nextMap[tid] = {
-                ...ws,
-                organization: {
-                  ...ws.organization,
-                  planTier: 'business_pro',
-                  billingCycle: params.billingCycle,
-                  expiresAt: params.expiresAt,
-                  plan: params.billingCycle === 'monthly' ? 'business_monthly' : 'business_yearly',
-                  subscriptionEndsAt: params.expiresAt ?? undefined,
-                  aiScansLimit: 500,
-                  updatedAt: now,
-                },
-              };
-            }
-            latestLocalOrgWorkspacesRef.current = nextMap;
-            setLocalOrgWorkspaces(nextMap);
-            await saveOrgWorkspaces(activeWorkspaceRef.current, nextMap);
-
-            if (auth.currentUser?.uid) {
-              const snap = latestPersonalRef.current;
-              void syncOrganizationMetaToCloud(
-                auth.currentUser.uid,
-                {
-                  transactions: snap.transactions,
-                  wallets: snap.wallets,
-                  categories: snap.categories,
-                  budgets: snap.budgets,
-                  debts: snap.debts,
-                  goals: snap.goals,
-                  templates: snap.templates,
-                  moneyCircles: snap.moneyCircles,
-                  settings: snap.settings,
-                  hasCompletedOnboarding: snap.hasCompletedOnboarding,
-                },
-                nextMap,
-                activeWorkspaceRef.current
-              );
-            }
-          }
-        }
-
-        if (auth.currentUser) {
-          void refreshScanQuota();
-        }
-      };
-
-      if (!auth.currentUser) {
-        return {
-          ok: false,
-          error: isEn
-            ? 'Please sign in with Google first to verify your activation code.'
-            : 'يرجى تسجيل الدخول بحساب جوجل أولاً للتحقق من كود التفعيل.',
-        };
-      }
-
-      try {
-        const res = await redeemProCodeWithServer(code, orgId);
-        await applyRedeemedEntitlement({
-          uid: auth.currentUser.uid,
-          proPlan: res.proPlan,
-          planTier: res.planTier,
-          billingCycle: res.billingCycle,
-          expiresAt: res.expiresAt,
-        });
-        return {
-          ok: true,
-          planTier: res.planTier,
-          billingCycle: res.billingCycle,
-          expiresAt: res.expiresAt,
-          isCumulativeRenewal: res.isCumulativeRenewal,
-        };
-      } catch (err) {
-        const msg =
-          err instanceof Error
-            ? err.message
-            : isEn
-            ? 'Failed to verify activation code.'
-            : 'تعذر التحقق من كود التفعيل.';
-        return { ok: false, error: msg };
-      }
-    },
-    [applyVerifiedProState, refreshScanQuota]
-  );
 
   const startBusinessTrial = useCallback(
     async (orgId?: string): Promise<{ ok: boolean; error?: string }> => {
@@ -8280,7 +8108,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       refreshScanQuota,
       isUpgradeModalOpen,
       setIsUpgradeModalOpen: handleSetIsUpgradeModalOpen,
-      redeemProCode,
       startBusinessTrial,
       devActivateProPreview,
       restorePurchases,
@@ -8298,7 +8125,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       refreshScanQuota,
       isUpgradeModalOpen,
       handleSetIsUpgradeModalOpen,
-      redeemProCode,
       startBusinessTrial,
       devActivateProPreview,
       restorePurchases,
@@ -8594,7 +8420,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       planTier,
       proEntitlement: verifiedPro,
       subscriptionSummary,
-      redeemProCode,
       startBusinessTrial,
       devActivateProPreview,
       restorePurchases,
@@ -8831,7 +8656,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       planTier,
       verifiedPro,
       subscriptionSummary,
-      redeemProCode,
       startBusinessTrial,
       devActivateProPreview,
       restorePurchases,

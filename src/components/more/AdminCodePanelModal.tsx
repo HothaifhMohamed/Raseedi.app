@@ -1,11 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  KeyRound,
   Lock,
   ShieldCheck,
-  Sparkles,
-  Copy,
-  Check,
   X,
   RefreshCw,
   Users,
@@ -17,28 +13,28 @@ import {
   CheckCircle2,
   AlertTriangle,
   Settings,
+  Building2,
+  Calendar,
+  Clock,
+  Plus,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { PRIMARY_SYSTEM_ADMIN_EMAIL } from '../../services/licenseCodes';
 import {
-  AdminCouponCycle,
-  AdminCouponTier,
-  isPrimarySystemAdminEmail,
-  PRIMARY_SYSTEM_ADMIN_EMAIL,
-} from '../../services/licenseCodes';
-import {
+  adminCancelOrganizationSubscription,
   adminCancelUserSubscription,
+  adminUpdateOrganizationSubscription,
   adminUpdateUserSubscription,
   auth,
   changeAdminPinOnServer,
+  CloudAdminOrganizationSummary,
   CloudUserProfile,
-  createLicenseCodeOnServer,
   fetchAdminStatusFromServer,
+  fetchAllOrganizationsForAdmin,
   fetchAllUsersForAdmin,
-  fetchLicenseCodesFromServer,
   resetAdminPinAfterGoogleReauth,
   resolveFirebaseUserEmail,
   ServerApiError,
-  ServerLicenseCodeRecord,
   setupAdminPinOnServer,
   verifyAdminPasscodeOnServer,
 } from '../../services/firebase';
@@ -48,13 +44,15 @@ import {
   isAdminSessionExpired,
   loadVerifiedAdminSession,
   normalizeAdminSessionExpiry,
+  parseAdminExpiryDateInput,
   saveVerifiedAdminSession,
 } from '../../services/adminAuth';
 import { SUBSCRIPTION_DAY_MS } from '../../services/subscriptionHelpers';
 import type { PlanTier } from '../../types';
 
-type AdminTab = 'users' | 'coupons' | 'security';
+type AdminTab = 'users' | 'orgs' | 'security';
 type AdminEditCycle = 'monthly' | 'yearly' | 'lifetime' | 'free';
+type DurationInputMode = 'days' | 'date';
 
 function parseReadableError(err: unknown, fallback: string): string {
   const raw = err instanceof Error ? err.message : '';
@@ -66,6 +64,15 @@ function parseReadableError(err: unknown, fallback: string): string {
     // Plain error text
   }
   return raw;
+}
+
+function formatDateForInput(ms: number | null | undefined): string {
+  if (!ms || !Number.isFinite(ms)) return '';
+  const d = new Date(ms);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 export const AdminCodePanelModal: React.FC = () => {
@@ -110,24 +117,33 @@ export const AdminCodePanelModal: React.FC = () => {
   } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Inline Editor State
+  // Inline User Editor State
   const [editingUid, setEditingUid] = useState<string | null>(null);
   const [editTier, setEditTier] = useState<PlanTier>('personal_pro');
   const [editCycle, setEditCycle] = useState<AdminEditCycle>('yearly');
+  const [editDurationMode, setEditDurationMode] = useState<DurationInputMode>('days');
   const [editCustomDays, setEditCustomDays] = useState<string>('');
+  const [editExpiryDate, setEditExpiryDate] = useState<string>('');
   const [isSavingUserUid, setIsSavingUserUid] = useState<string | null>(null);
 
-  // Coupon Generator State
-  const [adminCouponTier, setAdminCouponTier] = useState<AdminCouponTier>('business');
-  const [adminCouponCycle, setAdminCouponCycle] = useState<AdminCouponCycle>('yearly');
-  const [generatedAdminCode, setGeneratedAdminCode] = useState<string | null>(null);
-  const [adminCodeSyncStatus, setAdminCodeSyncStatus] = useState<
-    'idle' | 'syncing' | 'cloud_synced' | 'error'
-  >('idle');
-  const [adminCodeError, setAdminCodeError] = useState<string | null>(null);
-  const [recentCoupons, setRecentCoupons] = useState<ServerLicenseCodeRecord[]>([]);
-  const [isLoadingCoupons, setIsLoadingCoupons] = useState(false);
-  const [copiedAdminCode, setCopiedAdminCode] = useState(false);
+  // Organizations & Subscriptions Management State
+  const [orgsList, setOrgsList] = useState<CloudAdminOrganizationSummary[]>([]);
+  const [isLoadingOrgs, setIsLoadingOrgs] = useState(false);
+  const [orgsError, setOrgsError] = useState<string | null>(null);
+  const [orgsActionMsg, setOrgsActionMsg] = useState<{
+    type: 'ok' | 'err';
+    text: string;
+  } | null>(null);
+  const [orgSearchQuery, setOrgSearchQuery] = useState('');
+
+  // Inline Org Editor State
+  const [editingOrgId, setEditingOrgId] = useState<string | null>(null);
+  const [editOrgTier, setEditOrgTier] = useState<PlanTier>('business_pro');
+  const [editOrgCycle, setEditOrgCycle] = useState<AdminEditCycle>('yearly');
+  const [editOrgDurationMode, setEditOrgDurationMode] = useState<DurationInputMode>('days');
+  const [editOrgCustomDays, setEditOrgCustomDays] = useState<string>('');
+  const [editOrgExpiryDate, setEditOrgExpiryDate] = useState<string>('');
+  const [isSavingOrgId, setIsSavingOrgId] = useState<string | null>(null);
 
   const [needsReauthPinUpgrade, setNeedsReauthPinUpgrade] = useState(false);
   const [reauthNewPin, setReauthNewPin] = useState('');
@@ -176,13 +192,14 @@ export const AdminCodePanelModal: React.FC = () => {
       setConfirmNewPinInput('');
       setIsChangingPin(false);
       setPinChangeFeedback(null);
-      setAdminCodeError(null);
-      setAdminCodeSyncStatus('idle');
-      setCopiedAdminCode(false);
       setEditingUid(null);
       setUsersError(null);
       setUsersActionMsg(null);
       setSearchQuery('');
+      setEditingOrgId(null);
+      setOrgsError(null);
+      setOrgsActionMsg(null);
+      setOrgSearchQuery('');
       return;
     }
 
@@ -277,31 +294,44 @@ export const AdminCodePanelModal: React.FC = () => {
     }
   };
 
-  const loadAdminCoupons = async (tokenOverride?: string) => {
+  const loadAdminOrganizations = async (tokenOverride?: string) => {
     const token = tokenOverride || adminSessionToken;
     if (!token) return;
-    setIsLoadingCoupons(true);
+    setIsLoadingOrgs(true);
+    setOrgsError(null);
     try {
-      const records = await fetchLicenseCodesFromServer(token);
-      setRecentCoupons(records);
+      const rows = await fetchAllOrganizationsForAdmin(token);
+      setOrgsList(rows);
     } catch (err) {
       if (handleSessionExpiry(err)) return;
-      setAdminCodeError(
+      setOrgsError(
         parseReadableError(
           err,
-          isRTL ? 'تعذر تحميل سجل الأكواد من الخادم.' : 'Failed to load license codes from server.'
+          isRTL
+            ? 'تعذر تحميل قائمة المؤسسات من الخادم.'
+            : 'Failed to load organizations from server.'
         )
       );
     } finally {
-      setIsLoadingCoupons(false);
+      setIsLoadingOrgs(false);
     }
   };
 
   useEffect(() => {
     if (!isAdminCodeModalOpen || !isAuthorizedAdmin || !isUnlocked || !adminSessionToken) return;
     void loadAdminUsers(adminSessionToken);
-    void loadAdminCoupons(adminSessionToken);
+    void loadAdminOrganizations(adminSessionToken);
   }, [isAdminCodeModalOpen, isAuthorizedAdmin, isUnlocked, adminSessionToken]);
+
+  const userEmailByUid = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const u of usersList) {
+      if (u.uid && u.email) {
+        map.set(u.uid, u.email);
+      }
+    }
+    return map;
+  }, [usersList]);
 
   const filteredUsers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -314,12 +344,35 @@ export const AdminCodePanelModal: React.FC = () => {
     );
   }, [usersList, searchQuery]);
 
+  const filteredOrgs = useMemo(() => {
+    const q = orgSearchQuery.trim().toLowerCase();
+    if (!q) return orgsList;
+    return orgsList.filter((o) => {
+      const ownerEmail = userEmailByUid.get(o.ownerId) || '';
+      return (
+        (o.name || '').toLowerCase().includes(q) ||
+        (o.id || '').toLowerCase().includes(q) ||
+        (o.ownerId || '').toLowerCase().includes(q) ||
+        ownerEmail.toLowerCase().includes(q)
+      );
+    });
+  }, [orgsList, orgSearchQuery, userEmailByUid]);
+
   const stats = useMemo(() => {
     const total = usersList.length;
     const paid = usersList.filter((u) => u.isPro).length;
     const business = usersList.filter((u) => u.isPro && u.planTier === 'business_pro').length;
     return { total, paid, business, free: total - paid };
   }, [usersList]);
+
+  const orgStats = useMemo(() => {
+    const total = orgsList.length;
+    const activeBusiness = orgsList.filter(
+      (o) => o.planTier === 'business_pro' && !o.isReadOnly
+    ).length;
+    const inactive = total - activeBusiness;
+    return { total, activeBusiness, inactive };
+  }, [orgsList]);
 
   if (!isAdminCodeModalOpen || !isAuthorizedAdmin) return null;
 
@@ -561,8 +614,8 @@ export const AdminCodePanelModal: React.FC = () => {
       setPinChangeFeedback({
         type: 'ok',
         text: isRTL
-          ? 'تم تحديث الرمز السري وحفظه بتشفير scrypt الآمن في السحابة بنجاح.'
-          : 'Admin PIN updated and securely stored with salted scrypt hashing.',
+          ? 'تم تحديث الرمز السري وحفظه مشفراً في السحابة بنجاح.'
+          : 'Admin PIN updated and securely stored in the cloud.',
       });
     } catch (err) {
       if (handleSessionExpiry(err)) return;
@@ -578,6 +631,7 @@ export const AdminCodePanelModal: React.FC = () => {
     }
   };
 
+  // --- User Subscription Direct Management ---
   const openInlineEditor = (u: CloudUserProfile) => {
     setEditingUid(u.uid);
     setUsersActionMsg(null);
@@ -592,37 +646,65 @@ export const AdminCodePanelModal: React.FC = () => {
           : 'lifetime'
       );
     }
+    setEditDurationMode('days');
     setEditCustomDays('');
+    setEditExpiryDate(formatDateForInput(u.expiresAt));
   };
 
-  const handleSaveUserSubscription = async (targetUid: string) => {
+  const handleSaveUserSubscription = async (account: CloudUserProfile) => {
     if (!adminSessionToken) return;
-    setIsSavingUserUid(targetUid);
+    setIsSavingUserUid(account.uid);
     setUsersActionMsg(null);
     try {
-      const parsedDays = editCustomDays.trim() ? Number(editCustomDays.trim()) : null;
-      const customDays =
-        parsedDays !== null && Number.isFinite(parsedDays) && parsedDays > 0
-          ? Math.round(parsedDays)
-          : null;
+      let customDays: number | null = null;
+      let customExpiresAt: number | null = null;
+
+      if (editTier !== 'free' && editCycle !== 'lifetime') {
+        if (editDurationMode === 'date' && editExpiryDate.trim()) {
+          const parsedDateMs = parseAdminExpiryDateInput(editExpiryDate.trim());
+          if (!parsedDateMs || parsedDateMs <= Date.now()) {
+            setUsersActionMsg({
+              type: 'err',
+              text: isRTL
+                ? 'يرجى اختيار تاريخ انتهاء مستقبلي صحيح.'
+                : 'Please pick a valid future expiry date.',
+            });
+            setIsSavingUserUid(null);
+            return;
+          }
+          customExpiresAt = parsedDateMs;
+        } else if (editDurationMode === 'days' && editCustomDays.trim()) {
+          const parsedDays = Number(editCustomDays.trim());
+          if (!Number.isFinite(parsedDays) || parsedDays <= 0) {
+            setUsersActionMsg({
+              type: 'err',
+              text: isRTL ? 'يرجى إدخال عدد أيام صحيح.' : 'Please enter a valid number of days.',
+            });
+            setIsSavingUserUid(null);
+            return;
+          }
+          customDays = Math.round(parsedDays);
+        }
+      }
 
       const updated = await adminUpdateUserSubscription({
-        targetUid,
+        targetUid: account.uid,
         planTier: editTier,
         billingCycle: editTier === 'free' ? 'free' : editCycle,
         customDays,
+        customExpiresAt,
         adminSessionToken,
       });
 
       setUsersList((prev) =>
-        prev.map((row) => (row.uid === targetUid ? { ...row, ...updated } : row))
+        prev.map((row) => (row.uid === account.uid ? { ...row, ...updated } : row))
       );
       setEditingUid(null);
       setUsersActionMsg({
         type: 'ok',
         text: isRTL
-          ? 'تم تحديث اشتراك الحساب بنجاح في السحابة.'
-          : 'User subscription updated successfully.',
+          ? 'تم تحديث وتفعيل اشتراك الحساب مباشرة في Firestore بنجاح.'
+          : 'Account subscription updated and synced to Firestore.',
       });
     } catch (err) {
       if (handleSessionExpiry(err)) return;
@@ -631,6 +713,46 @@ export const AdminCodePanelModal: React.FC = () => {
         text: parseReadableError(
           err,
           isRTL ? 'تعذر تعديل اشتراك الحساب.' : 'Could not update subscription.'
+        ),
+      });
+    } finally {
+      setIsSavingUserUid(null);
+    }
+  };
+
+  const handleQuickExtendUser = async (account: CloudUserProfile, extendDays: number) => {
+    if (!adminSessionToken) return;
+    setIsSavingUserUid(account.uid);
+    setUsersActionMsg(null);
+    try {
+      const targetTier: PlanTier =
+        account.planTier === 'business_pro' ? 'business_pro' : 'personal_pro';
+      const targetCycle: 'monthly' | 'yearly' =
+        extendDays >= 365 || account.billingCycle === 'yearly' ? 'yearly' : 'monthly';
+      const updated = await adminUpdateUserSubscription({
+        targetUid: account.uid,
+        planTier: targetTier,
+        billingCycle: targetCycle,
+        extendDays,
+        existingExpiresAt: account.expiresAt ?? null,
+        adminSessionToken,
+      });
+      setUsersList((prev) =>
+        prev.map((row) => (row.uid === account.uid ? { ...row, ...updated } : row))
+      );
+      setUsersActionMsg({
+        type: 'ok',
+        text: isRTL
+          ? `تم تمديد اشتراك الحساب (+${extendDays} يوم) ومزامنته فوراً في السحابة.`
+          : `Extended subscription by +${extendDays} days and synced to Firestore.`,
+      });
+    } catch (err) {
+      if (handleSessionExpiry(err)) return;
+      setUsersActionMsg({
+        type: 'err',
+        text: parseReadableError(
+          err,
+          isRTL ? 'تعذر تمديد الاشتراك.' : 'Could not extend subscription.'
         ),
       });
     } finally {
@@ -668,30 +790,156 @@ export const AdminCodePanelModal: React.FC = () => {
     }
   };
 
-  const handleGenerateAndSave = async () => {
-    if (!adminSessionToken) return;
-    setCopiedAdminCode(false);
-    setAdminCodeSyncStatus('syncing');
-    setAdminCodeError(null);
+  // --- Organization Subscription Direct Management ---
+  const openInlineOrgEditor = (org: CloudAdminOrganizationSummary) => {
+    setEditingOrgId(org.id);
+    setOrgsActionMsg(null);
+    if (org.planTier === 'free') {
+      setEditOrgTier('business_pro');
+      setEditOrgCycle('yearly');
+    } else {
+      setEditOrgTier('business_pro');
+      setEditOrgCycle(
+        org.billingCycle === 'monthly' ||
+          org.billingCycle === 'yearly' ||
+          org.billingCycle === 'lifetime'
+          ? org.billingCycle
+          : 'yearly'
+      );
+    }
+    setEditOrgDurationMode('days');
+    setEditOrgCustomDays('');
+    setEditOrgExpiryDate(formatDateForInput(org.expiresAt));
+  };
 
+  const handleSaveOrgSubscription = async (org: CloudAdminOrganizationSummary) => {
+    if (!adminSessionToken) return;
+    setIsSavingOrgId(org.id);
+    setOrgsActionMsg(null);
     try {
-      const res = await createLicenseCodeOnServer({
+      let customDays: number | null = null;
+      let customExpiresAt: number | null = null;
+
+      if (editOrgTier !== 'free' && editOrgCycle !== 'lifetime') {
+        if (editOrgDurationMode === 'date' && editOrgExpiryDate.trim()) {
+          const parsedDateMs = parseAdminExpiryDateInput(editOrgExpiryDate.trim());
+          if (!parsedDateMs || parsedDateMs <= Date.now()) {
+            setOrgsActionMsg({
+              type: 'err',
+              text: isRTL
+                ? 'يرجى اختيار تاريخ انتهاء مستقبلي صحيح للمؤسسة.'
+                : 'Please pick a valid future expiry date for the organization.',
+            });
+            setIsSavingOrgId(null);
+            return;
+          }
+          customExpiresAt = parsedDateMs;
+        } else if (editOrgDurationMode === 'days' && editOrgCustomDays.trim()) {
+          const parsedDays = Number(editOrgCustomDays.trim());
+          if (!Number.isFinite(parsedDays) || parsedDays <= 0) {
+            setOrgsActionMsg({
+              type: 'err',
+              text: isRTL ? 'يرجى إدخال عدد أيام صحيح.' : 'Please enter a valid number of days.',
+            });
+            setIsSavingOrgId(null);
+            return;
+          }
+          customDays = Math.round(parsedDays);
+        }
+      }
+
+      const updated = await adminUpdateOrganizationSubscription({
+        orgId: org.id,
+        planTier: editOrgTier,
+        billingCycle: editOrgTier === 'free' ? 'free' : editOrgCycle,
+        customDays,
+        customExpiresAt,
         adminSessionToken,
-        tier: adminCouponTier,
-        cycle: adminCouponCycle,
       });
-      setGeneratedAdminCode(res.code);
-      setAdminCodeSyncStatus('cloud_synced');
-      setRecentCoupons((prev) => [res.record, ...prev].slice(0, 50));
+
+      setOrgsList((prev) => prev.map((row) => (row.id === org.id ? { ...row, ...updated } : row)));
+      setEditingOrgId(null);
+      setOrgsActionMsg({
+        type: 'ok',
+        text: isRTL
+          ? 'تم تحديث اشتراك المؤسسة ومزامنته فوراً في Firestore.'
+          : 'Organization subscription updated and synced to Firestore.',
+      });
     } catch (err) {
       if (handleSessionExpiry(err)) return;
-      setAdminCodeSyncStatus('error');
-      setAdminCodeError(
-        parseReadableError(
+      setOrgsActionMsg({
+        type: 'err',
+        text: parseReadableError(
           err,
-          isRTL ? 'تعذر توليد وحفظ الكود على الخادم.' : 'Could not generate license code on server.'
-        )
-      );
+          isRTL ? 'تعذر تعديل اشتراك المؤسسة.' : 'Could not update organization subscription.'
+        ),
+      });
+    } finally {
+      setIsSavingOrgId(null);
+    }
+  };
+
+  const handleQuickExtendOrg = async (org: CloudAdminOrganizationSummary, extendDays: number) => {
+    if (!adminSessionToken) return;
+    setIsSavingOrgId(org.id);
+    setOrgsActionMsg(null);
+    try {
+      const targetCycle: 'monthly' | 'yearly' =
+        extendDays >= 365 || org.billingCycle === 'yearly' ? 'yearly' : 'monthly';
+      const updated = await adminUpdateOrganizationSubscription({
+        orgId: org.id,
+        planTier: 'business_pro',
+        billingCycle: targetCycle,
+        extendDays,
+        existingExpiresAt: org.expiresAt ?? null,
+        adminSessionToken,
+      });
+      setOrgsList((prev) => prev.map((row) => (row.id === org.id ? { ...row, ...updated } : row)));
+      setOrgsActionMsg({
+        type: 'ok',
+        text: isRTL
+          ? `تم تمديد اشتراك المؤسسة (+${extendDays} يوم) بنجاح في السحابة.`
+          : `Extended organization subscription by +${extendDays} days.`,
+      });
+    } catch (err) {
+      if (handleSessionExpiry(err)) return;
+      setOrgsActionMsg({
+        type: 'err',
+        text: parseReadableError(
+          err,
+          isRTL ? 'تعذر تمديد اشتراك المؤسسة.' : 'Could not extend organization subscription.'
+        ),
+      });
+    } finally {
+      setIsSavingOrgId(null);
+    }
+  };
+
+  const handleCancelOrgSubscription = async (orgId: string) => {
+    if (!adminSessionToken) return;
+    setIsSavingOrgId(orgId);
+    setOrgsActionMsg(null);
+    try {
+      const updated = await adminCancelOrganizationSubscription(orgId, adminSessionToken);
+      setOrgsList((prev) => prev.map((row) => (row.id === orgId ? { ...row, ...updated } : row)));
+      if (editingOrgId === orgId) setEditingOrgId(null);
+      setOrgsActionMsg({
+        type: 'ok',
+        text: isRTL
+          ? 'تم إلغاء اشتراك المؤسسة وتحويلها للخطة المجانية.'
+          : 'Organization subscription cancelled and reverted to Free.',
+      });
+    } catch (err) {
+      if (handleSessionExpiry(err)) return;
+      setOrgsActionMsg({
+        type: 'err',
+        text: parseReadableError(
+          err,
+          isRTL ? 'تعذر إلغاء اشتراك المؤسسة.' : 'Could not cancel organization subscription.'
+        ),
+      });
+    } finally {
+      setIsSavingOrgId(null);
     }
   };
 
@@ -707,6 +955,26 @@ export const AdminCodePanelModal: React.FC = () => {
       day: 'numeric',
     });
     return isRTL ? `${dateStr} (${daysLeft} يوم)` : `${dateStr} (${daysLeft}d)`;
+  };
+
+  const formatOrgExpiry = (org: CloudAdminOrganizationSummary) => {
+    if (org.planTier === 'free') return isRTL ? 'مجاني' : 'Free';
+    if (org.billingCycle === 'lifetime' || !org.expiresAt) {
+      return isRTL ? 'مدى الحياة (دائم)' : 'Lifetime';
+    }
+    const daysLeft = Math.max(0, Math.ceil((org.expiresAt - Date.now()) / SUBSCRIPTION_DAY_MS));
+    const dateStr = new Date(org.expiresAt).toLocaleDateString(isRTL ? 'ar-EG' : 'en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+    return org.isReadOnly
+      ? isRTL
+        ? `منتهي (${dateStr})`
+        : `Expired (${dateStr})`
+      : isRTL
+      ? `${dateStr} (${daysLeft} يوم)`
+      : `${dateStr} (${daysLeft}d)`;
   };
 
   const formatTierBadge = (u: CloudUserProfile) => {
@@ -725,6 +993,31 @@ export const AdminCodePanelModal: React.FC = () => {
     return {
       label: isRTL ? 'أفراد PRO' : 'Personal PRO',
       cls: 'bg-[var(--color-income)]/15 border border-[var(--color-income)]/35 text-[var(--color-income)]',
+    };
+  };
+
+  const formatOrgStatusBadge = (org: CloudAdminOrganizationSummary) => {
+    if (org.planTier === 'free') {
+      return {
+        label: isRTL ? 'مجاني' : 'Free',
+        cls: 'bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-muted)]',
+      };
+    }
+    if (org.isReadOnly) {
+      return {
+        label: isRTL ? 'منتهي (قراءة فقط)' : 'Expired (Read-Only)',
+        cls: 'bg-[var(--color-expense)]/12 border border-[var(--color-expense)]/35 text-[var(--color-expense)]',
+      };
+    }
+    if (org.status === 'trial') {
+      return {
+        label: isRTL ? 'تجربة Business' : 'Business Trial',
+        cls: 'bg-sky-500/15 border border-sky-500/35 text-sky-700 dark:text-sky-300',
+      };
+    }
+    return {
+      label: isRTL ? 'أعمال Business PRO' : 'Business PRO',
+      cls: 'bg-amber-500/15 border border-amber-500/35 text-amber-700 dark:text-amber-300',
     };
   };
 
@@ -760,7 +1053,7 @@ export const AdminCodePanelModal: React.FC = () => {
             </div>
             <div className="min-w-0">
               <h2 className="font-title text-sm sm:text-base font-bold text-[var(--color-ink)] truncate">
-                {isRTL ? 'لوحة إدارة الحسابات والاشتراكات' : 'Admin Accounts & Subscriptions'}
+                {isRTL ? 'لوحة إدارة الاشتراكات المباشرة' : 'Direct Subscription Admin Panel'}
               </h2>
               <p className="text-[11px] text-[var(--color-muted)] truncate" dir="ltr">
                 {user?.email}
@@ -795,7 +1088,11 @@ export const AdminCodePanelModal: React.FC = () => {
         {/* Body */}
         <div className="p-4 sm:p-5 overflow-y-auto space-y-4 flex-1">
           {!isUnlocked ? (
-            <form onSubmit={handleUnlockSubmit} className="space-y-4 max-w-sm mx-auto py-3" data-testid="admin-passcode-gate">
+            <form
+              onSubmit={handleUnlockSubmit}
+              className="space-y-4 max-w-sm mx-auto py-3"
+              data-testid="admin-passcode-gate"
+            >
               <div className="p-4 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] text-center space-y-2">
                 <div className="w-11 h-11 rounded-full bg-[var(--color-accent)]/15 text-[var(--color-accent)] flex items-center justify-center mx-auto">
                   <Lock className="w-5 h-5" />
@@ -816,11 +1113,11 @@ export const AdminCodePanelModal: React.FC = () => {
                 <p className="text-xs text-[var(--color-muted)]">
                   {!pinConfigured
                     ? isRTL
-                      ? 'اختر رمزاً سرياً خاصاً بلوحة الإدارة (4-32 حرفاً/رقماً). يتم تشفيره بـ scrypt وحفظه بسرية تامة.'
-                      : 'Create a confidential Admin PIN (4-32 chars). It is cryptographically hashed with scrypt.'
+                      ? 'اختر رمزاً سرياً خاصاً بلوحة الإدارة (4-32 حرفاً/رقماً). يتم تشفيره وحفظه بسرية تامة.'
+                      : 'Create a confidential Admin PIN (4-32 chars). It is cryptographically hashed.'
                     : isRTL
-                    ? 'بوابة تحقق حصرية لمالك النظام لإدارة الحسابات والأكواد والاشتراكات.'
-                    : 'Exclusive system admin gate to manage accounts, licenses, and security.'}
+                    ? 'بوابة تحقق حصرية لمالك النظام لتفعيل وإدارة اشتراكات الحسابات والمؤسسات مباشرة.'
+                    : 'Exclusive system admin gate to activate and manage account & organization subscriptions directly.'}
                 </p>
               </div>
 
@@ -965,7 +1262,7 @@ export const AdminCodePanelModal: React.FC = () => {
             </form>
           ) : (
             <div className="space-y-4">
-              {/* Admin Navigation Tabs */}
+              {/* Admin Navigation Tabs (Accounts | Organizations | Security) */}
               <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)]">
                 <button
                   type="button"
@@ -982,16 +1279,16 @@ export const AdminCodePanelModal: React.FC = () => {
                 </button>
                 <button
                   type="button"
-                  data-testid="admin-tab-coupons"
-                  onClick={() => setActiveTab('coupons')}
+                  data-testid="admin-tab-orgs"
+                  onClick={() => setActiveTab('orgs')}
                   className={`py-2 px-2 rounded-lg text-[11px] sm:text-xs font-bold flex items-center justify-center gap-1.5 transition-colors min-h-[40px] ${
-                    activeTab === 'coupons'
+                    activeTab === 'orgs'
                       ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-sm'
                       : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
                   }`}
                 >
-                  <KeyRound className="w-3.5 h-3.5 shrink-0" />
-                  <span className="truncate">{isRTL ? 'أكواد التفعيل' : 'Licenses'}</span>
+                  <Building2 className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">{isRTL ? 'المؤسسات' : 'Organizations'}</span>
                 </button>
                 <button
                   type="button"
@@ -1052,7 +1349,9 @@ export const AdminCodePanelModal: React.FC = () => {
                         onChange={(e) => setSearchQuery(e.target.value)}
                         data-testid="admin-users-search-input"
                         placeholder={
-                          isRTL ? 'ابحث بالبريد الإلكتروني أو الاسم...' : 'Search by email or name...'
+                          isRTL
+                            ? 'ابحث بالبريد الإلكتروني أو الاسم أو المعرّف...'
+                            : 'Search by email, name, or UID...'
                         }
                         className="w-full ps-8 pe-3 py-2 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[40px]"
                       />
@@ -1118,6 +1417,8 @@ export const AdminCodePanelModal: React.FC = () => {
                         const isEditing = editingUid === account.uid;
                         const isBusy = isSavingUserUid === account.uid;
                         const isSelfAdmin = Boolean(account.isAdmin || account.uid === user?.id);
+                        const canQuickExtend =
+                          account.isPro && account.billingCycle !== 'lifetime' && !isSelfAdmin;
 
                         return (
                           <div
@@ -1156,7 +1457,33 @@ export const AdminCodePanelModal: React.FC = () => {
                                 </div>
                               </div>
 
-                              <div className="flex items-center gap-1.5 shrink-0">
+                              <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                                {canQuickExtend && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={isBusy}
+                                      data-testid={`admin-extend-30d-${account.uid}`}
+                                      onClick={() => void handleQuickExtendUser(account, 30)}
+                                      className="px-2 py-1.5 rounded-lg bg-[var(--color-income)]/12 border border-[var(--color-income)]/30 text-[10px] font-bold text-[var(--color-income)] hover:bg-[var(--color-income)]/20 flex items-center gap-0.5 min-h-[34px] disabled:opacity-50"
+                                      title={isRTL ? 'تمديد 30 يوماً' : 'Extend 30 days'}
+                                    >
+                                      <Plus className="w-3 h-3" />
+                                      <span>{isRTL ? '30 يوم' : '30d'}</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={isBusy}
+                                      data-testid={`admin-extend-365d-${account.uid}`}
+                                      onClick={() => void handleQuickExtendUser(account, 365)}
+                                      className="px-2 py-1.5 rounded-lg bg-[var(--color-income)]/12 border border-[var(--color-income)]/30 text-[10px] font-bold text-[var(--color-income)] hover:bg-[var(--color-income)]/20 flex items-center gap-0.5 min-h-[34px] disabled:opacity-50"
+                                      title={isRTL ? 'تمديد سنة كاملة' : 'Extend 1 year'}
+                                    >
+                                      <Plus className="w-3 h-3" />
+                                      <span>{isRTL ? 'سنة' : '1y'}</span>
+                                    </button>
+                                  </>
+                                )}
                                 <button
                                   type="button"
                                   disabled={isBusy}
@@ -1167,7 +1494,19 @@ export const AdminCodePanelModal: React.FC = () => {
                                   className="px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-[11px] font-semibold text-[var(--color-ink)] flex items-center gap-1 min-h-[34px]"
                                 >
                                   <Edit3 className="w-3 h-3 text-[var(--color-accent)]" />
-                                  <span>{isEditing ? (isRTL ? 'إغلاق' : 'Close') : isRTL ? 'تعديل' : 'Edit'}</span>
+                                  <span>
+                                    {isEditing
+                                      ? isRTL
+                                        ? 'إغلاق'
+                                        : 'Close'
+                                      : account.isPro
+                                      ? isRTL
+                                        ? 'تعديل'
+                                        : 'Edit'
+                                      : isRTL
+                                      ? 'تفعيل'
+                                      : 'Activate'}
+                                  </span>
                                 </button>
                                 {account.isPro && !isSelfAdmin && (
                                   <button
@@ -1182,7 +1521,7 @@ export const AdminCodePanelModal: React.FC = () => {
                                     ) : (
                                       <Ban className="w-3 h-3" />
                                     )}
-                                    <span>{isRTL ? 'إلغاء الاشتراك' : 'Cancel'}</span>
+                                    <span>{isRTL ? 'إلغاء' : 'Cancel'}</span>
                                   </button>
                                 )}
                               </div>
@@ -1212,8 +1551,12 @@ export const AdminCodePanelModal: React.FC = () => {
                                       className="w-full px-2.5 py-2 rounded-lg bg-[var(--color-bg)] border border-[var(--color-line)] text-xs text-[var(--color-ink)] min-h-[38px]"
                                     >
                                       <option value="free">{isRTL ? 'مجاني (Free)' : 'Free'}</option>
-                                      <option value="personal_pro">{isRTL ? 'أفراد Personal PRO' : 'Personal PRO'}</option>
-                                      <option value="business_pro">{isRTL ? 'أعمال Business PRO' : 'Business PRO'}</option>
+                                      <option value="personal_pro">
+                                        {isRTL ? 'أفراد Personal PRO' : 'Personal PRO'}
+                                      </option>
+                                      <option value="business_pro">
+                                        {isRTL ? 'أعمال Business PRO' : 'Business PRO'}
+                                      </option>
                                     </select>
                                   </div>
 
@@ -1236,22 +1579,70 @@ export const AdminCodePanelModal: React.FC = () => {
                                 </div>
 
                                 {editTier !== 'free' && editCycle !== 'lifetime' && (
-                                  <div>
-                                    <label className="block text-[10px] font-semibold text-[var(--color-muted)] mb-1">
-                                      {isRTL
-                                        ? 'أيام مخصصة (اختياري — اتركه فارغاً للافتراضي)'
-                                        : 'Custom Days (optional — blank for default)'}
-                                    </label>
-                                    <input
-                                      type="number"
-                                      min={1}
-                                      max={3650}
-                                      dir="ltr"
-                                      value={editCustomDays}
-                                      onChange={(e) => setEditCustomDays(e.target.value)}
-                                      placeholder={editCycle === 'monthly' ? '30' : '365'}
-                                      className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--color-bg)] border border-[var(--color-line)] text-xs text-[var(--color-ink)] min-h-[36px]"
-                                    />
+                                  <div className="space-y-2">
+                                    <div className="flex items-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditDurationMode('days')}
+                                        className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-semibold border flex items-center justify-center gap-1 min-h-[34px] ${
+                                          editDurationMode === 'days'
+                                            ? 'bg-[var(--color-accent)]/15 border-[var(--color-accent)] text-[var(--color-accent)]'
+                                            : 'bg-[var(--color-bg)] border-[var(--color-line)] text-[var(--color-muted)]'
+                                        }`}
+                                      >
+                                        <Clock className="w-3 h-3" />
+                                        <span>{isRTL ? 'مدة بالأيام' : 'Custom Days'}</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditDurationMode('date')}
+                                        className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-semibold border flex items-center justify-center gap-1 min-h-[34px] ${
+                                          editDurationMode === 'date'
+                                            ? 'bg-[var(--color-accent)]/15 border-[var(--color-accent)] text-[var(--color-accent)]'
+                                            : 'bg-[var(--color-bg)] border-[var(--color-line)] text-[var(--color-muted)]'
+                                        }`}
+                                      >
+                                        <Calendar className="w-3 h-3" />
+                                        <span>{isRTL ? 'تاريخ انتهاء محدد' : 'Expiry Date'}</span>
+                                      </button>
+                                    </div>
+
+                                    {editDurationMode === 'days' ? (
+                                      <div>
+                                        <label className="block text-[10px] font-semibold text-[var(--color-muted)] mb-1">
+                                          {isRTL
+                                            ? 'أيام مخصصة (اختياري — اتركه فارغاً للافتراضي)'
+                                            : 'Custom Days (optional — blank for default)'}
+                                        </label>
+                                        <input
+                                          type="number"
+                                          min={1}
+                                          max={3650}
+                                          dir="ltr"
+                                          value={editCustomDays}
+                                          onChange={(e) => setEditCustomDays(e.target.value)}
+                                          placeholder={editCycle === 'monthly' ? '30' : '365'}
+                                          data-testid={`admin-custom-days-${account.uid}`}
+                                          className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--color-bg)] border border-[var(--color-line)] text-xs text-[var(--color-ink)] min-h-[36px]"
+                                        />
+                                      </div>
+                                    ) : (
+                                      <div>
+                                        <label className="block text-[10px] font-semibold text-[var(--color-muted)] mb-1">
+                                          {isRTL
+                                            ? 'اختر تاريخ انتهاء الاشتراك'
+                                            : 'Pick exact subscription expiry date'}
+                                        </label>
+                                        <input
+                                          type="date"
+                                          dir="ltr"
+                                          value={editExpiryDate}
+                                          onChange={(e) => setEditExpiryDate(e.target.value)}
+                                          data-testid={`admin-expiry-date-${account.uid}`}
+                                          className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--color-bg)] border border-[var(--color-line)] text-xs text-[var(--color-ink)] min-h-[36px]"
+                                        />
+                                      </div>
+                                    )}
                                   </div>
                                 )}
 
@@ -1267,11 +1658,11 @@ export const AdminCodePanelModal: React.FC = () => {
                                     type="button"
                                     disabled={isBusy}
                                     data-testid={`admin-save-user-${account.uid}`}
-                                    onClick={() => void handleSaveUserSubscription(account.uid)}
+                                    onClick={() => void handleSaveUserSubscription(account)}
                                     className="px-3.5 py-1.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center gap-1.5 min-h-[36px] disabled:opacity-60"
                                   >
                                     {isBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                                    <span>{isRTL ? 'حفظ الاشتراك' : 'Save Plan'}</span>
+                                    <span>{isRTL ? 'حفظ وتفعيل الاشتراك' : 'Save & Sync Plan'}</span>
                                   </button>
                                 </div>
                               </div>
@@ -1284,208 +1675,333 @@ export const AdminCodePanelModal: React.FC = () => {
                 </div>
               )}
 
-              {/* TAB 2: COUPON GENERATOR */}
-              {activeTab === 'coupons' && (
-                <div className="space-y-4" data-testid="admin-coupon-panel">
-                  <div className="flex items-center justify-between">
-                    <span className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-income)]">
-                      <ShieldCheck className="w-4 h-4 shrink-0" />
-                      <span>{isRTL ? 'توليد أكواد التفعيل (coupons)' : 'License Coupon Generator'}</span>
-                    </span>
+              {/* TAB 2: ORGANIZATIONS & DIRECT BUSINESS SUBSCRIPTION MANAGEMENT */}
+              {activeTab === 'orgs' && (
+                <div className="space-y-3" data-testid="admin-orgs-panel">
+                  {/* Org Stats Summary */}
+                  <div className="grid grid-cols-3 gap-2 text-center">
+                    <div className="p-2.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)]">
+                      <div className="text-[10px] text-[var(--color-muted)]">
+                        {isRTL ? 'إجمالي المؤسسات' : 'Total Orgs'}
+                      </div>
+                      <div className="text-sm font-bold text-[var(--color-ink)] num-tabular">
+                        {orgStats.total}
+                      </div>
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)]">
+                      <div className="text-[10px] text-[var(--color-muted)]">
+                        {isRTL ? 'نشطة Business' : 'Active Business'}
+                      </div>
+                      <div className="text-sm font-bold text-amber-600 dark:text-amber-400 num-tabular">
+                        {orgStats.activeBusiness}
+                      </div>
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)]">
+                      <div className="text-[10px] text-[var(--color-muted)]">
+                        {isRTL ? 'منتهية / مجانية' : 'Expired / Free'}
+                      </div>
+                      <div className="text-sm font-bold text-[var(--color-muted)] num-tabular">
+                        {orgStats.inactive}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Org Search & Refresh */}
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <Search className="w-3.5 h-3.5 text-[var(--color-muted)] absolute top-1/2 -translate-y-1/2 start-3 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={orgSearchQuery}
+                        onChange={(e) => setOrgSearchQuery(e.target.value)}
+                        data-testid="admin-orgs-search-input"
+                        placeholder={
+                          isRTL
+                            ? 'ابحث باسم المؤسسة أو بريد المالك أو المعرّف...'
+                            : 'Search by org name, owner email, or ID...'
+                        }
+                        className="w-full ps-8 pe-3 py-2 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[40px]"
+                      />
+                    </div>
                     <button
                       type="button"
-                      disabled={isLoadingCoupons}
-                      onClick={() => void loadAdminCoupons()}
-                      className="text-[11px] font-semibold text-[var(--color-accent)] hover:underline flex items-center gap-1"
+                      disabled={isLoadingOrgs}
+                      onClick={() => void loadAdminOrganizations()}
+                      data-testid="admin-refresh-orgs-btn"
+                      className="px-3 py-2 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] text-xs font-semibold text-[var(--color-accent)] hover:border-[var(--color-accent)] flex items-center gap-1.5 min-h-[40px] shrink-0"
                     >
-                      <RefreshCw className={`w-3 h-3 ${isLoadingCoupons ? 'animate-spin' : ''}`} />
-                      <span>{isRTL ? 'تحديث السجل' : 'Refresh'}</span>
+                      <RefreshCw className={`w-3.5 h-3.5 ${isLoadingOrgs ? 'animate-spin' : ''}`} />
+                      <span>{isRTL ? 'تحديث' : 'Refresh'}</span>
                     </button>
                   </div>
 
-                  {/* Tier Selection */}
-                  <div className="space-y-1.5">
-                    <span className="block text-xs font-semibold text-[var(--color-muted)]">
-                      {isRTL ? 'نوع الباقة' : 'Plan Tier'}
-                    </span>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setAdminCouponTier('pro')}
-                        data-testid="admin-tier-pro"
-                        className={`py-2.5 px-3 rounded-xl text-xs font-semibold border transition-colors min-h-[42px] ${
-                          adminCouponTier === 'pro'
-                            ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)]'
-                            : 'bg-[var(--color-bg)] text-[var(--color-ink)] border-[var(--color-line)]'
-                        }`}
-                      >
-                        {isRTL ? 'أفراد PRO' : 'Personal PRO'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setAdminCouponTier('business')}
-                        data-testid="admin-tier-business"
-                        className={`py-2.5 px-3 rounded-xl text-xs font-semibold border transition-colors min-h-[42px] ${
-                          adminCouponTier === 'business'
-                            ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)]'
-                            : 'bg-[var(--color-bg)] text-[var(--color-ink)] border-[var(--color-line)]'
-                        }`}
-                      >
-                        {isRTL ? 'أعمال Business' : 'Business PRO'}
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Cycle Selection */}
-                  <div className="space-y-1.5">
-                    <span className="block text-xs font-semibold text-[var(--color-muted)]">
-                      {isRTL ? 'مدة التفعيل' : 'Activation Duration'}
-                    </span>
-                    <div className="grid grid-cols-3 gap-2">
-                      {(
-                        [
-                          { id: 'monthly', ar: 'شهر', en: '1 Month' },
-                          { id: 'yearly', ar: 'سنة', en: '1 Year' },
-                          { id: 'lifetime', ar: 'مدى الحياة', en: 'Lifetime' },
-                        ] as const
-                      ).map((opt) => (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => setAdminCouponCycle(opt.id)}
-                          data-testid={`admin-cycle-${opt.id}`}
-                          className={`py-2 px-2 rounded-xl text-xs font-semibold border transition-colors min-h-[40px] ${
-                            adminCouponCycle === opt.id
-                              ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)]'
-                              : 'bg-[var(--color-bg)] text-[var(--color-ink)] border-[var(--color-line)]'
-                          }`}
-                        >
-                          {isRTL ? opt.ar : opt.en}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    disabled={adminCodeSyncStatus === 'syncing'}
-                    onClick={() => void handleGenerateAndSave()}
-                    data-testid="admin-generate-code-btn"
-                    className="w-full py-2.5 px-4 bg-[var(--color-accent)] text-[var(--color-on-accent)] font-bold rounded-xl text-xs flex items-center justify-center gap-2 hover:opacity-95 transition-opacity min-h-[44px] disabled:opacity-60"
-                  >
-                    <Sparkles className="w-4 h-4" />
-                    <span>
-                      {adminCodeSyncStatus === 'syncing'
-                        ? isRTL
-                          ? 'جاري التوليد والحفظ في Firestore...'
-                          : 'Generating & Saving...'
-                        : isRTL
-                        ? 'توليد وحفظ كود تفعيل جديد'
-                        : 'Generate & Save Coupon'}
-                    </span>
-                  </button>
-
-                  {adminCodeError && (
-                    <p className="text-xs text-[var(--color-expense)] font-medium">
-                      {adminCodeError}
-                    </p>
-                  )}
-
-                  {generatedAdminCode && (
-                    <div className="p-3 bg-[var(--color-bg)] border border-[var(--color-accent)]/40 rounded-xl space-y-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <code
-                          dir="ltr"
-                          data-testid="admin-generated-code"
-                          className="text-xs font-mono font-bold text-[var(--color-ink)] select-all break-all"
-                        >
-                          {generatedAdminCode}
-                        </code>
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            try {
-                              await navigator.clipboard?.writeText(generatedAdminCode);
-                            } catch {
-                              // Ignore clipboard errors
-                            }
-                            setCopiedAdminCode(true);
-                            window.setTimeout(() => setCopiedAdminCode(false), 2500);
-                          }}
-                          data-testid="admin-copy-code-btn"
-                          className="px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-xs font-semibold text-[var(--color-ink)] hover:border-[var(--color-accent)] flex items-center gap-1 shrink-0 min-h-[34px]"
-                        >
-                          {copiedAdminCode ? (
-                            <>
-                              <Check className="w-3.5 h-3.5 text-[var(--color-income)]" />
-                              <span>{isRTL ? 'تم النسخ' : 'Copied'}</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="w-3.5 h-3.5 text-[var(--color-accent)]" />
-                              <span>{isRTL ? 'نسخ' : 'Copy'}</span>
-                            </>
-                          )}
-                        </button>
-                      </div>
-                      <p className="text-[11px] text-[var(--color-muted)]">
-                        {adminCodeSyncStatus === 'cloud_synced'
-                          ? isRTL
-                            ? 'تم حفظ الكود مشفراً بـ SHA-256 في Firestore بحالة: غير مستخدم.'
-                            : 'Saved as SHA-256 hash in Firestore (Status: Unused).'
-                          : isRTL
-                          ? 'الكود جاهز للنسخ والمشاركة.'
-                          : 'Code ready to copy.'}
-                      </p>
+                  {orgsActionMsg && (
+                    <div
+                      data-testid="admin-orgs-feedback"
+                      className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
+                        orgsActionMsg.type === 'ok'
+                          ? 'bg-[var(--color-income)]/12 border-[var(--color-income)]/35 text-[var(--color-income)]'
+                          : 'bg-[var(--color-expense)]/12 border-[var(--color-expense)]/35 text-[var(--color-expense)]'
+                      }`}
+                    >
+                      {orgsActionMsg.type === 'ok' ? (
+                        <CheckCircle2 className="w-4 h-4 shrink-0" />
+                      ) : (
+                        <AlertTriangle className="w-4 h-4 shrink-0" />
+                      )}
+                      <span>{orgsActionMsg.text}</span>
                     </div>
                   )}
 
-                  {recentCoupons.length > 0 && (
-                    <div className="pt-2 border-t border-[var(--color-line)] space-y-2">
-                      <div className="text-xs font-semibold text-[var(--color-muted)]">
-                        {isRTL ? 'سجل الأكواد الصادرة في Firestore' : 'Issued License Codes in Firestore'}
-                      </div>
-                      <div className="space-y-1.5 max-h-48 overflow-y-auto">
-                        {recentCoupons.map((rec) => (
+                  {orgsError && (
+                    <div className="p-3 rounded-xl bg-[var(--color-expense)]/12 border border-[var(--color-expense)]/30 text-xs text-[var(--color-expense)] space-y-2">
+                      <p className="font-semibold">{orgsError}</p>
+                      <button
+                        type="button"
+                        onClick={() => void loadAdminOrganizations()}
+                        className="px-3 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-ink)] text-[11px] font-bold"
+                      >
+                        {isRTL ? 'إعادة المحاولة' : 'Retry'}
+                      </button>
+                    </div>
+                  )}
+
+                  {isLoadingOrgs && orgsList.length === 0 ? (
+                    <div className="py-8 flex flex-col items-center justify-center gap-2 text-xs text-[var(--color-muted)]">
+                      <Loader2 className="w-5 h-5 animate-spin text-[var(--color-accent)]" />
+                      <span>{isRTL ? 'جاري تحميل قائمة المؤسسات...' : 'Loading organizations...'}</span>
+                    </div>
+                  ) : filteredOrgs.length === 0 ? (
+                    <div className="p-6 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] text-center text-xs text-[var(--color-muted)]">
+                      {isRTL
+                        ? 'لا توجد مؤسسات مطابقة للبحث حالياً.'
+                        : 'No matching organizations found.'}
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5 max-h-[48vh] overflow-y-auto pe-1">
+                      {filteredOrgs.map((org) => {
+                        const badge = formatOrgStatusBadge(org);
+                        const isEditing = editingOrgId === org.id;
+                        const isBusy = isSavingOrgId === org.id;
+                        const ownerEmail = userEmailByUid.get(org.ownerId);
+                        const canQuickExtend =
+                          org.planTier !== 'free' && org.billingCycle !== 'lifetime';
+
+                        return (
                           <div
-                            key={rec.codeHash}
-                            className="px-3 py-2 rounded-lg bg-[var(--color-bg)] border border-[var(--color-line)] flex items-center justify-between gap-2 text-[11px]"
+                            key={org.id}
+                            data-testid={`admin-org-row-${org.id}`}
+                            className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-2.5"
                           >
-                            <div className="min-w-0">
-                              <code className="block font-mono font-bold text-[var(--color-ink)] truncate" dir="ltr">
-                                {rec.codePreview}
-                              </code>
-                              <span className="text-[10px] text-[var(--color-muted)]">
-                                {rec.tier === 'business' ? 'Business' : 'PRO'} •{' '}
-                                {rec.cycle === 'monthly'
-                                  ? isRTL
-                                    ? 'شهر'
-                                    : 'Month'
-                                  : rec.cycle === 'yearly'
-                                  ? isRTL
-                                    ? 'سنة'
-                                    : 'Year'
-                                  : isRTL
-                                  ? 'مدى الحياة'
-                                  : 'Lifetime'}
-                              </span>
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="text-xs font-bold text-[var(--color-ink)] truncate">
+                                    {org.name}
+                                  </span>
+                                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${badge.cls}`}>
+                                    {badge.label}
+                                  </span>
+                                  {org.planTier !== 'free' && (
+                                    <span className="px-1.5 py-0.5 rounded bg-[var(--color-surface)] border border-[var(--color-line)] text-[10px] font-semibold text-[var(--color-muted)]">
+                                      {formatCycleLabel(org.billingCycle)}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[11px] text-[var(--color-muted)] truncate mt-0.5" dir="ltr">
+                                  {ownerEmail || org.ownerId} • {org.currency} • {org.seatLimit}{' '}
+                                  {isRTL ? 'مقاعد' : 'seats'}
+                                </div>
+                                <div className="text-[10px] text-[var(--color-muted)] mt-1">
+                                  {isRTL ? 'الانتهاء: ' : 'Expires: '}
+                                  <span className="font-semibold text-[var(--color-ink)]">
+                                    {formatOrgExpiry(org)}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                                {canQuickExtend && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={isBusy}
+                                      data-testid={`admin-org-extend-30d-${org.id}`}
+                                      onClick={() => void handleQuickExtendOrg(org, 30)}
+                                      className="px-2 py-1.5 rounded-lg bg-[var(--color-income)]/12 border border-[var(--color-income)]/30 text-[10px] font-bold text-[var(--color-income)] hover:bg-[var(--color-income)]/20 flex items-center gap-0.5 min-h-[34px] disabled:opacity-50"
+                                    >
+                                      <Plus className="w-3 h-3" />
+                                      <span>{isRTL ? '30 يوم' : '30d'}</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={isBusy}
+                                      data-testid={`admin-org-extend-365d-${org.id}`}
+                                      onClick={() => void handleQuickExtendOrg(org, 365)}
+                                      className="px-2 py-1.5 rounded-lg bg-[var(--color-income)]/12 border border-[var(--color-income)]/30 text-[10px] font-bold text-[var(--color-income)] hover:bg-[var(--color-income)]/20 flex items-center gap-0.5 min-h-[34px] disabled:opacity-50"
+                                    >
+                                      <Plus className="w-3 h-3" />
+                                      <span>{isRTL ? 'سنة' : '1y'}</span>
+                                    </button>
+                                  </>
+                                )}
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  data-testid={`admin-edit-org-${org.id}`}
+                                  onClick={() =>
+                                    isEditing ? setEditingOrgId(null) : openInlineOrgEditor(org)
+                                  }
+                                  className="px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-[11px] font-semibold text-[var(--color-ink)] flex items-center gap-1 min-h-[34px]"
+                                >
+                                  <Edit3 className="w-3 h-3 text-[var(--color-accent)]" />
+                                  <span>
+                                    {isEditing ? (isRTL ? 'إغلاق' : 'Close') : isRTL ? 'تعديل' : 'Edit'}
+                                  </span>
+                                </button>
+                                {org.planTier !== 'free' && (
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    data-testid={`admin-cancel-org-${org.id}`}
+                                    onClick={() => void handleCancelOrgSubscription(org.id)}
+                                    className="px-2.5 py-1.5 rounded-lg bg-[var(--color-expense)]/12 border border-[var(--color-expense)]/30 text-[11px] font-semibold text-[var(--color-expense)] hover:bg-[var(--color-expense)]/20 flex items-center gap-1 min-h-[34px] disabled:opacity-50"
+                                  >
+                                    {isBusy ? (
+                                      <Loader2 className="w-3 h-3 animate-spin" />
+                                    ) : (
+                                      <Ban className="w-3 h-3" />
+                                    )}
+                                    <span>{isRTL ? 'إلغاء' : 'Cancel'}</span>
+                                  </button>
+                                )}
+                              </div>
                             </div>
-                            <span
-                              className={`shrink-0 font-semibold ${
-                                rec.used ? 'text-[var(--color-muted)]' : 'text-[var(--color-income)]'
-                              }`}
-                            >
-                              {rec.used
-                                ? isRTL
-                                  ? 'مُستخدم'
-                                  : 'Used'
-                                : isRTL
-                                ? 'غير مستخدم'
-                                : 'Unused'}
-                            </span>
+
+                            {isEditing && (
+                              <div
+                                data-testid={`admin-edit-org-form-${org.id}`}
+                                className="p-3 rounded-xl bg-[var(--color-surface)] border border-[var(--color-accent)]/35 space-y-2.5"
+                              >
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                  <div>
+                                    <label className="block text-[10px] font-semibold text-[var(--color-muted)] mb-1">
+                                      {isRTL ? 'باقة المؤسسة' : 'Organization Plan'}
+                                    </label>
+                                    <select
+                                      value={editOrgTier}
+                                      onChange={(e) => {
+                                        const nextTier = e.target.value as PlanTier;
+                                        setEditOrgTier(nextTier);
+                                        if (nextTier === 'free') {
+                                          setEditOrgCycle('free');
+                                        } else if (editOrgCycle === 'free') {
+                                          setEditOrgCycle('yearly');
+                                        }
+                                      }}
+                                      className="w-full px-2.5 py-2 rounded-lg bg-[var(--color-bg)] border border-[var(--color-line)] text-xs text-[var(--color-ink)] min-h-[38px]"
+                                    >
+                                      <option value="free">{isRTL ? 'مجاني / معطّل' : 'Free / Disabled'}</option>
+                                      <option value="business_pro">
+                                        {isRTL ? 'أعمال Business PRO' : 'Business PRO'}
+                                      </option>
+                                    </select>
+                                  </div>
+
+                                  {editOrgTier !== 'free' && (
+                                    <div>
+                                      <label className="block text-[10px] font-semibold text-[var(--color-muted)] mb-1">
+                                        {isRTL ? 'دورة الفوترة / المدة' : 'Billing Cycle'}
+                                      </label>
+                                      <select
+                                        value={editOrgCycle}
+                                        onChange={(e) => setEditOrgCycle(e.target.value as AdminEditCycle)}
+                                        className="w-full px-2.5 py-2 rounded-lg bg-[var(--color-bg)] border border-[var(--color-line)] text-xs text-[var(--color-ink)] min-h-[38px]"
+                                      >
+                                        <option value="monthly">{isRTL ? 'شهري (30 يوم)' : 'Monthly (30d)'}</option>
+                                        <option value="yearly">{isRTL ? 'سنوي (365 يوم)' : 'Yearly (365d)'}</option>
+                                        <option value="lifetime">{isRTL ? 'مدى الحياة (دائم)' : 'Lifetime'}</option>
+                                      </select>
+                                    </div>
+                                  )}
+                                </div>
+
+                                {editOrgTier !== 'free' && editOrgCycle !== 'lifetime' && (
+                                  <div className="space-y-2">
+                                    <div className="flex items-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditOrgDurationMode('days')}
+                                        className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-semibold border flex items-center justify-center gap-1 min-h-[34px] ${
+                                          editOrgDurationMode === 'days'
+                                            ? 'bg-[var(--color-accent)]/15 border-[var(--color-accent)] text-[var(--color-accent)]'
+                                            : 'bg-[var(--color-bg)] border-[var(--color-line)] text-[var(--color-muted)]'
+                                        }`}
+                                      >
+                                        <Clock className="w-3 h-3" />
+                                        <span>{isRTL ? 'مدة بالأيام' : 'Custom Days'}</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditOrgDurationMode('date')}
+                                        className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-semibold border flex items-center justify-center gap-1 min-h-[34px] ${
+                                          editOrgDurationMode === 'date'
+                                            ? 'bg-[var(--color-accent)]/15 border-[var(--color-accent)] text-[var(--color-accent)]'
+                                            : 'bg-[var(--color-bg)] border-[var(--color-line)] text-[var(--color-muted)]'
+                                        }`}
+                                      >
+                                        <Calendar className="w-3 h-3" />
+                                        <span>{isRTL ? 'تاريخ انتهاء محدد' : 'Expiry Date'}</span>
+                                      </button>
+                                    </div>
+
+                                    {editOrgDurationMode === 'days' ? (
+                                      <input
+                                        type="number"
+                                        min={1}
+                                        max={3650}
+                                        dir="ltr"
+                                        value={editOrgCustomDays}
+                                        onChange={(e) => setEditOrgCustomDays(e.target.value)}
+                                        placeholder={editOrgCycle === 'monthly' ? '30' : '365'}
+                                        className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--color-bg)] border border-[var(--color-line)] text-xs text-[var(--color-ink)] min-h-[36px]"
+                                      />
+                                    ) : (
+                                      <input
+                                        type="date"
+                                        dir="ltr"
+                                        value={editOrgExpiryDate}
+                                        onChange={(e) => setEditOrgExpiryDate(e.target.value)}
+                                        className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--color-bg)] border border-[var(--color-line)] text-xs text-[var(--color-ink)] min-h-[36px]"
+                                      />
+                                    )}
+                                  </div>
+                                )}
+
+                                <div className="flex items-center justify-end gap-2 pt-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingOrgId(null)}
+                                    className="px-3 py-1.5 rounded-lg border border-[var(--color-line)] text-xs font-semibold text-[var(--color-muted)] min-h-[36px]"
+                                  >
+                                    {isRTL ? 'إلغاء' : 'Cancel'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    data-testid={`admin-save-org-${org.id}`}
+                                    onClick={() => void handleSaveOrgSubscription(org)}
+                                    className="px-3.5 py-1.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center gap-1.5 min-h-[36px] disabled:opacity-60"
+                                  >
+                                    {isBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                                    <span>{isRTL ? 'حفظ اشتراك المؤسسة' : 'Save Org Plan'}</span>
+                                  </button>
+                                </div>
+                              </div>
+                            )}
                           </div>
-                        ))}
-                      </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -1501,7 +2017,7 @@ export const AdminCodePanelModal: React.FC = () => {
                         <span>{isRTL ? 'مالك النظام الحصري' : 'Exclusive System Admin'}</span>
                       </span>
                       <span className="px-2 py-0.5 rounded bg-[var(--color-income)]/15 border border-[var(--color-income)]/35 text-[10px] font-bold text-[var(--color-income)]">
-                        {isRTL ? 'محمي بـ scrypt' : 'scrypt Hashed'}
+                        {isRTL ? 'تشفير مشفّر' : 'Hashed PIN'}
                       </span>
                     </div>
                     <p className="text-xs font-mono text-[var(--color-ink)]" dir="ltr">
@@ -1509,8 +2025,8 @@ export const AdminCodePanelModal: React.FC = () => {
                     </p>
                     <p className="text-[11px] text-[var(--color-muted)] leading-relaxed">
                       {isRTL
-                        ? 'الوصول للوحة التحكم، توليد أكواد التفعيل، وتعديل الاشتراكات محصور بهذا البريد الإلكتروني الموثّق عبر Firebase Auth ID Token فقط. يُحفظ الرمز السري مشفراً بملح عشوائي (scrypt) داخل مستند محمي على الخادم (adminConfig/security) ولا يُخزن أبداً كنص صريح.'
-                        : 'Admin panel access, license issuance, and subscription overrides are strictly locked to this verified account via Firebase Auth ID Token. Your PIN is stored exclusively as a salted scrypt hash in adminConfig/security on the server.'}
+                        ? 'الوصول للوحة التحكم وتفعيل أو تعديل اشتراكات الحسابات والمؤسسات محصور بهذا البريد الإلكتروني الموثّق عبر Firebase Auth فقط. يُحفظ الرمز السري مشفراً بملح عشوائي داخل مستند محمي (adminConfig/security) ولا يُخزن أبداً كنص صريح.'
+                        : 'Admin panel access and direct subscription management for accounts & organizations are strictly locked to this verified account via Firebase Auth. Your PIN is stored exclusively as a salted cryptographic hash in adminConfig/security.'}
                     </p>
                     {pinUpdatedAtMs && (
                       <p className="text-[10px] text-[var(--color-muted)]">
@@ -1524,7 +2040,7 @@ export const AdminCodePanelModal: React.FC = () => {
                       <p className="text-[10px] text-amber-600 dark:text-amber-400 font-medium">
                         {isRTL
                           ? 'تستخدم حالياً رمز البيئة الافتراضي — يمكنك تغييره أدناه لحفظ رمز خاص بك مشفراً في السحابة.'
-                          : 'Currently using server environment bootstrap passcode — change it below to store a cloud scrypt-hashed PIN.'}
+                          : 'Currently using server environment bootstrap passcode — change it below to store a cloud hashed PIN.'}
                       </p>
                     )}
                   </div>

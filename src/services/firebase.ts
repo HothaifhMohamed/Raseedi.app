@@ -84,17 +84,15 @@ import { shouldFallbackAccountDeleteError } from './accountDeletion';
 import { resolveSafeCloudBackupWrite } from './backupMerge';
 import { sortTransactionsDescending } from './orgTransactionQuery';
 import {
-  AdminCouponCycle,
-  AdminCouponTier,
   isPrimarySystemAdminEmail,
   PRIMARY_SYSTEM_ADMIN_EMAIL,
 } from './licenseCodes';
 import {
   ADMIN_PANEL_SESSION_TTL_MS,
+  buildDirectAdminOrgSubscriptionPatch,
   buildDirectAdminSubscriptionPatch,
   clearVerifiedAdminSession,
   DIRECT_ADMIN_SESSION_PREFIX,
-  generateRandomLicenseCodeBrowser,
   hashAdminPinBrowser,
   isAdminSessionExpired,
   isApiEndpointUnavailableResponse,
@@ -107,6 +105,7 @@ import {
   saveVerifiedAdminSession,
   verifyAdminPinBrowser,
 } from './adminAuth';
+import { computeOrgSubscriptionState } from './entitlements';
 import {
   BackupHistoryRecord,
   BackupHistorySummary,
@@ -1392,6 +1391,9 @@ export async function adminUpdateUserSubscription(params: {
   planTier: PlanTier;
   billingCycle: 'free' | 'monthly' | 'yearly' | 'lifetime';
   customDays?: number | null;
+  customExpiresAt?: number | null;
+  extendDays?: number | null;
+  existingExpiresAt?: number | null;
   adminSessionToken: string;
 }): Promise<CloudUserProfile> {
   if (!params.adminSessionToken) {
@@ -1407,10 +1409,21 @@ export async function adminUpdateUserSubscription(params: {
       throw new ServerApiError('USER_NOT_FOUND', 'تعذر العثور على حساب المستخدم.', 404);
     }
     const existingData = snap.data() as Record<string, unknown>;
+    const existingExpiresAt =
+      typeof params.existingExpiresAt === 'number' && Number.isFinite(params.existingExpiresAt)
+        ? params.existingExpiresAt
+        : typeof existingData.expiresAt === 'number' && Number.isFinite(existingData.expiresAt)
+        ? existingData.expiresAt
+        : typeof existingData.proExpiresAt === 'number' && Number.isFinite(existingData.proExpiresAt)
+        ? existingData.proExpiresAt
+        : null;
     const patch = buildDirectAdminSubscriptionPatch({
       planTier: params.planTier,
       billingCycle: params.billingCycle,
       customDays: params.customDays,
+      customExpiresAt: params.customExpiresAt,
+      extendDays: params.extendDays,
+      existingExpiresAt,
     });
     await updateDoc(targetRef, {
       ...patch,
@@ -1441,6 +1454,13 @@ export async function adminUpdateUserSubscription(params: {
         planTier: params.planTier,
         billingCycle: params.billingCycle,
         ...(params.customDays && params.customDays > 0 ? { customDays: params.customDays } : {}),
+        ...(params.customExpiresAt && params.customExpiresAt > 0
+          ? { customExpiresAt: params.customExpiresAt }
+          : {}),
+        ...(params.extendDays && params.extendDays > 0 ? { extendDays: params.extendDays } : {}),
+        ...(typeof params.existingExpiresAt === 'number' && Number.isFinite(params.existingExpiresAt)
+          ? { existingExpiresAt: params.existingExpiresAt }
+          : {}),
       }),
     });
 
@@ -1479,6 +1499,273 @@ export async function adminCancelUserSubscription(
 ): Promise<CloudUserProfile> {
   return adminUpdateUserSubscription({
     targetUid,
+    planTier: 'free',
+    billingCycle: 'free',
+    adminSessionToken,
+  });
+}
+
+export interface CloudAdminOrganizationSummary {
+  id: string;
+  name: string;
+  ownerId: string;
+  currency: string;
+  planTier: PlanTier;
+  billingCycle: BillingCycle;
+  plan: 'trial' | 'business_monthly' | 'business_yearly';
+  expiresAt: number | null;
+  subscriptionEndsAt: number | null;
+  trialEndsAt: number | null;
+  seatLimit: number;
+  aiScansLimit: number;
+  status: 'trial' | 'active' | 'expiring_soon' | 'grace' | 'read_only';
+  isReadOnly: boolean;
+  daysRemaining: number | null;
+  updatedAtMs: number;
+}
+
+function mapCloudAdminOrganizationSummary(
+  id: string,
+  data: Record<string, unknown>
+): CloudAdminOrganizationSummary {
+  const toMs = (v: unknown): number | null => {
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v;
+    if (v && typeof (v as { toMillis?: () => number }).toMillis === 'function') {
+      return (v as { toMillis: () => number }).toMillis();
+    }
+    return null;
+  };
+  const planTierRaw =
+    data.planTier === 'free' || data.planTier === 'personal_pro' || data.planTier === 'business_pro'
+      ? data.planTier
+      : 'business_pro';
+  const planRaw: 'trial' | 'business_monthly' | 'business_yearly' =
+    data.plan === 'trial' || data.plan === 'business_monthly' || data.plan === 'business_yearly'
+      ? data.plan
+      : 'business_monthly';
+  const billingCycleRaw: BillingCycle =
+    data.billingCycle === 'free' ||
+    data.billingCycle === 'monthly' ||
+    data.billingCycle === 'yearly' ||
+    data.billingCycle === 'lifetime' ||
+    data.billingCycle === 'trial' ||
+    data.billingCycle === 'code'
+      ? data.billingCycle
+      : planRaw === 'business_yearly'
+      ? 'yearly'
+      : planRaw === 'trial'
+      ? 'trial'
+      : 'monthly';
+
+  const expiresAt = toMs(data.expiresAt);
+  const subscriptionEndsAt = toMs(data.subscriptionEndsAt);
+  const trialEndsAt = toMs(data.trialEndsAt);
+  const seatLimit =
+    typeof data.seatLimit === 'number' && Number.isFinite(data.seatLimit) && data.seatLimit > 0
+      ? data.seatLimit
+      : 5;
+  const aiScansLimit =
+    typeof data.aiScansLimit === 'number' && Number.isFinite(data.aiScansLimit)
+      ? data.aiScansLimit
+      : planTierRaw === 'free'
+      ? 5
+      : 250;
+
+  const state = computeOrgSubscriptionState({
+    planTier: planTierRaw,
+    plan: planRaw,
+    billingCycle: billingCycleRaw,
+    expiresAt,
+    subscriptionEndsAt: subscriptionEndsAt ?? undefined,
+    trialEndsAt: trialEndsAt ?? undefined,
+    seatLimit,
+    extraSeats: typeof data.extraSeats === 'number' ? data.extraSeats : 0,
+  });
+
+  const updatedAtMs = toMs(data.updatedAt) ?? toMs(data.createdAt) ?? 0;
+
+  return {
+    id,
+    name: typeof data.name === 'string' && data.name.trim() ? data.name.trim() : id,
+    ownerId: typeof data.ownerId === 'string' ? data.ownerId : '',
+    currency: typeof data.currency === 'string' && data.currency ? data.currency : 'EGP',
+    planTier: state.planTier,
+    billingCycle: state.billingCycle,
+    plan: planRaw,
+    expiresAt: state.expiresAt,
+    subscriptionEndsAt: subscriptionEndsAt ?? state.expiresAt,
+    trialEndsAt,
+    seatLimit: state.seatLimit,
+    aiScansLimit,
+    status: state.status,
+    isReadOnly: state.isReadOnly,
+    daysRemaining: state.daysRemaining,
+    updatedAtMs,
+  };
+}
+
+export async function fetchAllOrganizationsForAdmin(
+  adminSessionToken: string
+): Promise<CloudAdminOrganizationSummary[]> {
+  if (!adminSessionToken) {
+    throw new ServerApiError('ADMIN_SESSION_REQUIRED', 'ADMIN_SESSION_REQUIRED', 403);
+  }
+
+  const runDirectFetchOrgs = async (): Promise<CloudAdminOrganizationSummary[]> => {
+    const { user } = assertDirectPrimaryAdminUser();
+    assertValidDirectAdminSession(adminSessionToken, user.uid);
+    const q = query(collection(db, 'organizations'), limit(200));
+    const snap = await getDocsFromServer(q).catch(() => getDocs(q));
+    const rows = snap.docs.map((d) =>
+      mapCloudAdminOrganizationSummary(d.id, d.data() as Record<string, unknown>)
+    );
+    return rows.sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0));
+  };
+
+  if (isDirectAdminSessionToken(adminSessionToken)) {
+    return runDirectFetchOrgs();
+  }
+
+  const idToken = await getRequiredIdToken();
+  try {
+    const { response, payload } = await fetchAdminApiJson<{
+      organizations?: CloudAdminOrganizationSummary[];
+      error?: string;
+      message?: string;
+    }>('/api/admin/organizations', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        'X-Admin-Session': adminSessionToken,
+      },
+    });
+
+    if (!response.ok || !Array.isArray(payload.organizations)) {
+      throw new ServerApiError(
+        payload.error || 'ADMIN_ORGS_LIST_FAILED',
+        payload.message || payload.error || 'ADMIN_ORGS_LIST_FAILED',
+        response.status
+      );
+    }
+
+    return payload.organizations.map((row) =>
+      mapCloudAdminOrganizationSummary(row.id, row as unknown as Record<string, unknown>)
+    );
+  } catch (err) {
+    if (!shouldFallbackAdminApiErrorToDirect(err, adminSessionToken, auth.currentUser?.uid)) {
+      throw err;
+    }
+    return runDirectFetchOrgs();
+  }
+}
+
+export async function adminUpdateOrganizationSubscription(params: {
+  orgId: string;
+  planTier: PlanTier;
+  billingCycle: 'free' | 'monthly' | 'yearly' | 'lifetime';
+  customDays?: number | null;
+  customExpiresAt?: number | null;
+  extendDays?: number | null;
+  existingExpiresAt?: number | null;
+  adminSessionToken: string;
+}): Promise<CloudAdminOrganizationSummary> {
+  if (!params.adminSessionToken) {
+    throw new ServerApiError('ADMIN_SESSION_REQUIRED', 'ADMIN_SESSION_REQUIRED', 403);
+  }
+
+  const runDirectOrgUpdate = async (): Promise<CloudAdminOrganizationSummary> => {
+    const { user } = assertDirectPrimaryAdminUser();
+    assertValidDirectAdminSession(params.adminSessionToken, user.uid);
+    const orgRef = doc(db, 'organizations', params.orgId);
+    const snap = await getDocFromServer(orgRef).catch(() => getDoc(orgRef));
+    if (!snap.exists()) {
+      throw new ServerApiError('ORG_NOT_FOUND', 'تعذر العثور على المؤسسة.', 404);
+    }
+    const existingData = snap.data() as Record<string, unknown>;
+    const existingExpiresAt =
+      typeof params.existingExpiresAt === 'number' && Number.isFinite(params.existingExpiresAt)
+        ? params.existingExpiresAt
+        : typeof existingData.expiresAt === 'number' && Number.isFinite(existingData.expiresAt)
+        ? existingData.expiresAt
+        : typeof existingData.subscriptionEndsAt === 'number' &&
+          Number.isFinite(existingData.subscriptionEndsAt)
+        ? existingData.subscriptionEndsAt
+        : null;
+    const patch = buildDirectAdminOrgSubscriptionPatch({
+      planTier: params.planTier,
+      billingCycle: params.billingCycle,
+      customDays: params.customDays,
+      customExpiresAt: params.customExpiresAt,
+      extendDays: params.extendDays,
+      existingExpiresAt,
+    });
+    const nowMs = Date.now();
+    await updateDoc(orgRef, {
+      ...patch,
+      updatedAt: nowMs,
+    });
+    return mapCloudAdminOrganizationSummary(params.orgId, {
+      ...existingData,
+      ...patch,
+      updatedAt: nowMs,
+    });
+  };
+
+  if (isDirectAdminSessionToken(params.adminSessionToken)) {
+    return runDirectOrgUpdate();
+  }
+
+  const idToken = await getRequiredIdToken();
+  try {
+    const { response, payload } = await fetchAdminApiJson<
+      Partial<CloudAdminOrganizationSummary> & { error?: string; message?: string }
+    >(`/api/admin/organizations/${encodeURIComponent(params.orgId)}/subscription`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+        'X-Admin-Session': params.adminSessionToken,
+      },
+      body: JSON.stringify({
+        planTier: params.planTier,
+        billingCycle: params.billingCycle,
+        ...(params.customDays && params.customDays > 0 ? { customDays: params.customDays } : {}),
+        ...(params.customExpiresAt && params.customExpiresAt > 0
+          ? { customExpiresAt: params.customExpiresAt }
+          : {}),
+        ...(params.extendDays && params.extendDays > 0 ? { extendDays: params.extendDays } : {}),
+        ...(typeof params.existingExpiresAt === 'number' && Number.isFinite(params.existingExpiresAt)
+          ? { existingExpiresAt: params.existingExpiresAt }
+          : {}),
+      }),
+    });
+
+    if (!response.ok) {
+      throw new ServerApiError(
+        payload.error || 'ADMIN_ORG_SUBSCRIPTION_FAILED',
+        payload.message || payload.error || 'ADMIN_ORG_SUBSCRIPTION_FAILED',
+        response.status
+      );
+    }
+
+    return mapCloudAdminOrganizationSummary(
+      payload.id || params.orgId,
+      payload as unknown as Record<string, unknown>
+    );
+  } catch (err) {
+    if (!shouldFallbackAdminApiErrorToDirect(err, params.adminSessionToken, auth.currentUser?.uid)) {
+      throw err;
+    }
+    return runDirectOrgUpdate();
+  }
+}
+
+export async function adminCancelOrganizationSubscription(
+  orgId: string,
+  adminSessionToken: string
+): Promise<CloudAdminOrganizationSummary> {
+  return adminUpdateOrganizationSubscription({
+    orgId,
     planTier: 'free',
     billingCycle: 'free',
     adminSessionToken,
@@ -2548,327 +2835,6 @@ async function getRequiredIdToken(): Promise<string> {
     throw new Error('AUTH_REQUIRED');
   }
   return currentUser.getIdToken();
-}
-
-export async function previewProCodeWithServer(
-  code: string,
-  orgId?: string
-): Promise<{
-  valid: boolean;
-  tier?: AdminCouponTier;
-  planTier?: PlanTier;
-  proPlan?: ProPlanCode;
-  billingCycle?: AdminCouponCycle;
-  expiresAt?: number | null;
-}> {
-  const currentUser = auth.currentUser;
-  if (!currentUser) return { valid: false };
-  try {
-    const idToken = await currentUser.getIdToken();
-    const response = await fetch('/api/redeem-code', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${idToken}`,
-      },
-      body: JSON.stringify({
-        code: code.trim(),
-        preview: true,
-        ...(orgId ? { orgId } : {}),
-      }),
-    });
-
-    if (!response.ok) return { valid: false };
-    const payload = (await response.json().catch(() => ({}))) as {
-      valid?: boolean;
-      preview?: boolean;
-      tier?: AdminCouponTier;
-      planTier?: PlanTier;
-      proPlan?: ProPlanCode;
-      billingCycle?: AdminCouponCycle;
-      expiresAt?: number | null;
-    };
-
-    if (!payload.valid && !payload.preview) return { valid: false };
-    return {
-      valid: true,
-      tier: payload.tier === 'business' ? 'business' : 'pro',
-      planTier: payload.planTier,
-      proPlan: payload.proPlan,
-      billingCycle: payload.billingCycle,
-      expiresAt: payload.expiresAt ?? null,
-    };
-  } catch {
-    return { valid: false };
-  }
-}
-
-export async function redeemProCodeWithServer(
-  code: string,
-  orgId?: string
-): Promise<{
-  isPro: boolean;
-  proPlan: ProPlanCode;
-  planTier: PlanTier;
-  billingCycle: BillingCycle;
-  expiresAt: number | null;
-  isCumulativeRenewal?: boolean;
-}> {
-  const idToken = await getRequiredIdToken();
-  const response = await fetch('/api/redeem-code', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${idToken}`,
-    },
-    body: JSON.stringify({ code: code.trim(), ...(orgId ? { orgId } : {}) }),
-  });
-
-  const payload = (await response.json().catch(() => ({}))) as {
-    ok?: boolean;
-    isPro?: boolean;
-    proPlan?: ProPlanCode;
-    planTier?: PlanTier;
-    billingCycle?: BillingCycle;
-    expiresAt?: number | null;
-    isCumulativeRenewal?: boolean;
-    error?: string;
-    message?: string;
-  };
-
-  if (!response.ok || !payload.isPro) {
-    throw new Error(payload.message || payload.error || 'REDEEM_FAILED');
-  }
-
-  return {
-    isPro: true,
-    proPlan: payload.proPlan || 'code',
-    planTier: payload.planTier || 'personal_pro',
-    billingCycle: payload.billingCycle || 'lifetime',
-    expiresAt: payload.expiresAt ?? null,
-    isCumulativeRenewal: Boolean(payload.isCumulativeRenewal),
-  };
-}
-
-export interface ServerLicenseCodeRecord {
-  codeHash: string;
-  codePreview: string;
-  tier: AdminCouponTier;
-  planTier: PlanTier;
-  cycle: AdminCouponCycle;
-  status: 'unused' | 'used';
-  used: boolean;
-  usedBy: string | null;
-  usedOrgId: string | null;
-  usedAt: number | null;
-  createdByUid: string;
-  createdByEmail: string;
-  createdAtMs: number;
-}
-
-function mapFirestoreLicenseCodeDoc(
-  id: string,
-  data: Record<string, unknown>
-): ServerLicenseCodeRecord {
-  const used = Boolean(data.used) || data.status === 'used';
-  const tier: AdminCouponTier = data.tier === 'business' ? 'business' : 'pro';
-  const cycle: AdminCouponCycle =
-    data.cycle === 'monthly' || data.cycle === 'yearly' || data.cycle === 'lifetime'
-      ? data.cycle
-      : 'yearly';
-  const planTier: PlanTier =
-    data.planTier === 'business_pro' || tier === 'business' ? 'business_pro' : 'personal_pro';
-  const usedAtRaw = data.usedAt;
-  const usedAt =
-    typeof usedAtRaw === 'number' && Number.isFinite(usedAtRaw)
-      ? usedAtRaw
-      : usedAtRaw && typeof (usedAtRaw as { toMillis?: () => number }).toMillis === 'function'
-      ? (usedAtRaw as { toMillis: () => number }).toMillis()
-      : null;
-
-  return {
-    codeHash: typeof data.codeHash === 'string' ? data.codeHash : id,
-    codePreview: typeof data.codePreview === 'string' ? data.codePreview : `RSD-****-${id.slice(-4)}`,
-    tier,
-    planTier,
-    cycle,
-    status: used ? 'used' : 'unused',
-    used,
-    usedBy: typeof data.usedBy === 'string' ? data.usedBy : null,
-    usedOrgId: typeof data.usedOrgId === 'string' ? data.usedOrgId : null,
-    usedAt,
-    createdByUid: typeof data.createdByUid === 'string' ? data.createdByUid : '',
-    createdByEmail: typeof data.createdByEmail === 'string' ? data.createdByEmail : PRIMARY_SYSTEM_ADMIN_EMAIL,
-    createdAtMs:
-      typeof data.createdAtMs === 'number' && Number.isFinite(data.createdAtMs)
-        ? data.createdAtMs
-        : Date.now(),
-  };
-}
-
-export async function fetchLicenseCodesFromServer(
-  adminSessionToken: string
-): Promise<ServerLicenseCodeRecord[]> {
-  if (!adminSessionToken) {
-    throw new ServerApiError('ADMIN_SESSION_REQUIRED', 'ADMIN_SESSION_REQUIRED', 403);
-  }
-
-  const runDirectFetchCodes = async (): Promise<ServerLicenseCodeRecord[]> => {
-    const { user } = assertDirectPrimaryAdminUser();
-    assertValidDirectAdminSession(adminSessionToken, user.uid);
-    const q = query(
-      collection(db, 'licenseCodes'),
-      orderBy('createdAtMs', 'desc'),
-      limit(50)
-    );
-    const snap = await getDocsFromServer(q).catch(() => getDocs(q));
-    return snap.docs.map((d) =>
-      mapFirestoreLicenseCodeDoc(d.id, d.data() as Record<string, unknown>)
-    );
-  };
-
-  if (isDirectAdminSessionToken(adminSessionToken)) {
-    return runDirectFetchCodes();
-  }
-
-  const idToken = await getRequiredIdToken();
-  try {
-    const { response, payload } = await fetchAdminApiJson<{
-      codes?: ServerLicenseCodeRecord[];
-      error?: string;
-      message?: string;
-    }>('/api/admin/license-codes', {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${idToken}`,
-        'X-Admin-Session': adminSessionToken,
-      },
-    });
-
-    if (!response.ok || !Array.isArray(payload.codes)) {
-      throw new ServerApiError(
-        payload.error || 'LIST_LICENSE_CODES_FAILED',
-        payload.message || payload.error || 'LIST_LICENSE_CODES_FAILED',
-        response.status
-      );
-    }
-
-    return payload.codes;
-  } catch (err) {
-    if (!shouldFallbackAdminApiErrorToDirect(err, adminSessionToken, auth.currentUser?.uid)) {
-      throw err;
-    }
-    return runDirectFetchCodes();
-  }
-}
-
-export async function createLicenseCodeOnServer(params: {
-  adminSessionToken: string;
-  tier: AdminCouponTier;
-  cycle: AdminCouponCycle;
-  targetEmail?: string;
-}): Promise<{ code: string; record: ServerLicenseCodeRecord }> {
-  if (!params.adminSessionToken) {
-    throw new ServerApiError('ADMIN_SESSION_REQUIRED', 'ADMIN_SESSION_REQUIRED', 403);
-  }
-
-  const runDirectCreateCode = async (): Promise<{
-    code: string;
-    record: ServerLicenseCodeRecord;
-  }> => {
-    const { user, email } = assertDirectPrimaryAdminUser();
-    assertValidDirectAdminSession(params.adminSessionToken, user.uid);
-    const generated = await generateRandomLicenseCodeBrowser({
-      tier: params.tier,
-      cycle: params.cycle,
-    });
-    const createdAtMs = Date.now();
-    const targetEmail = params.targetEmail?.trim().toLowerCase() || null;
-    const codeRef = doc(db, 'licenseCodes', generated.codeHash);
-    await setDoc(codeRef, {
-      codeHash: generated.codeHash,
-      codePreview: generated.codePreview,
-      plan: generated.proPlan,
-      tier: generated.tier,
-      planTier: generated.planTier,
-      cycle: generated.cycle,
-      targetEmail,
-      status: 'unused',
-      used: false,
-      usedBy: null,
-      usedOrgId: null,
-      usedAt: null,
-      createdByUid: user.uid,
-      createdByEmail: email || PRIMARY_SYSTEM_ADMIN_EMAIL,
-      createdAtMs,
-      createdAt: serverTimestamp(),
-    });
-
-    return {
-      code: generated.code,
-      record: {
-        codeHash: generated.codeHash,
-        codePreview: generated.codePreview,
-        tier: generated.tier,
-        planTier: generated.planTier,
-        cycle: generated.cycle,
-        status: 'unused',
-        used: false,
-        usedBy: null,
-        usedOrgId: null,
-        usedAt: null,
-        createdByUid: user.uid,
-        createdByEmail: email || PRIMARY_SYSTEM_ADMIN_EMAIL,
-        createdAtMs,
-      },
-    };
-  };
-
-  if (isDirectAdminSessionToken(params.adminSessionToken)) {
-    return runDirectCreateCode();
-  }
-
-  const idToken = await getRequiredIdToken();
-  try {
-    const { response, payload } = await fetchAdminApiJson<{
-      code?: string;
-      record?: ServerLicenseCodeRecord;
-      error?: string;
-      message?: string;
-    }>('/api/admin/license-codes', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${idToken}`,
-        'X-Admin-Session': params.adminSessionToken,
-      },
-      body: JSON.stringify({
-        tier: params.tier,
-        cycle: params.cycle,
-        ...(params.targetEmail?.trim()
-          ? { targetEmail: params.targetEmail.trim().toLowerCase() }
-          : {}),
-      }),
-    });
-
-    if (!response.ok || !payload.code || !payload.record) {
-      throw new ServerApiError(
-        payload.error || 'CREATE_LICENSE_CODE_FAILED',
-        payload.message || payload.error || 'CREATE_LICENSE_CODE_FAILED',
-        response.status
-      );
-    }
-
-    return {
-      code: payload.code,
-      record: payload.record,
-    };
-  } catch (err) {
-    if (!shouldFallbackAdminApiErrorToDirect(err, params.adminSessionToken, auth.currentUser?.uid)) {
-      throw err;
-    }
-    return runDirectCreateCode();
-  }
 }
 
 export async function startBusinessTrialWithServer(orgId?: string): Promise<{

@@ -38,12 +38,14 @@ import {
   PRIMARY_SYSTEM_ADMIN_EMAIL,
 } from './src/services/licenseCodes';
 import {
+  buildDirectAdminOrgSubscriptionPatch,
+  buildDirectAdminSubscriptionPatch,
+} from './src/services/adminAuth';
+import {
   buildAdminCustomClaims,
   deriveCrossInstanceAdminSessionKey,
-  generateRandomLicenseCodeServer,
   getLocalTodayDateString,
   hashAdminPinServer,
-  hashLicenseCodeServer,
   isAllowedCorsOrigin,
   isOrgReceiptScannerRole,
   isSafeWebhookId,
@@ -53,7 +55,6 @@ import {
   normalizeScannedReceiptResult,
   resolveActivationPlanDetails,
   resolveAdminSessionSecret,
-  evaluateSameUserCodeReuse,
   ServerActivationPlan,
   ServerSupportedBillingCycle,
   ServerSupportedPlanTier,
@@ -554,10 +555,6 @@ function getUtcMonthKey(): string {
   return new Date().toISOString().slice(0, 7);
 }
 
-function hashActivationCodeServer(rawCode: string): string {
-  return hashLicenseCodeServer(rawCode);
-}
-
 function hashInviteCodeServer(rawCode: string): string {
   const normalized = rawCode.trim().toUpperCase();
   return crypto
@@ -856,19 +853,6 @@ async function createApp() {
     message: {
       error: 'RATE_LIMITED',
       message: 'محاولات كثيرة. يرجى المحاولة بعد عدة دقائق.',
-    },
-  });
-
-  const redeemUidLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 10,
-    standardHeaders: true,
-    legacyHeaders: false,
-    keyGenerator: (req) =>
-      (req as AuthenticatedRequest).authUser?.uid || ipKeyGenerator(req.ip || '127.0.0.1'),
-    message: {
-      error: 'RATE_LIMITED',
-      message: 'تم تجاوز عدد محاولات التفعيل المسموح بها لحسابك. انتظر قليلاً.',
     },
   });
 
@@ -1751,211 +1735,6 @@ Return JSON matching the schema with:
     }
   );
 
-  const mapAdminLicenseCodeRow = (docId: string, raw: Record<string, unknown>) => {
-    const isUsed = Boolean(raw.used === true || raw.status === 'used' || raw.usedBy);
-    return {
-      codeHash: String(raw.codeHash || docId),
-      codePreview: String(raw.codePreview || 'RSD-****'),
-      tier: raw.tier === 'business' ? ('business' as const) : ('pro' as const),
-      planTier: raw.planTier === 'business_pro' ? ('business_pro' as const) : ('personal_pro' as const),
-      cycle:
-        raw.cycle === 'monthly' || raw.cycle === 'yearly' || raw.cycle === 'lifetime'
-          ? (raw.cycle as 'monthly' | 'yearly' | 'lifetime')
-          : ('yearly' as const),
-      status: isUsed ? ('used' as const) : ('unused' as const),
-      used: isUsed,
-      usedBy: typeof raw.usedBy === 'string' ? raw.usedBy : null,
-      usedOrgId: typeof raw.usedOrgId === 'string' ? raw.usedOrgId : null,
-      usedAt: typeof raw.usedAt === 'number' ? raw.usedAt : null,
-      createdByUid: String(raw.createdByUid || ''),
-      createdByEmail: String(raw.createdByEmail || ''),
-      createdAtMs: typeof raw.createdAtMs === 'number' ? raw.createdAtMs : Date.now(),
-    };
-  };
-
-  app.get(
-    '/api/admin/license-codes',
-    redeemIpLimiter,
-    requireFirebaseAuth,
-    async (req: AuthenticatedRequest, res: Response) => {
-      const authUser = req.authUser!;
-      if (!isAdminRequestUser(authUser)) {
-        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات مالك النظام مطلوبة.' });
-        return;
-      }
-      if (!(await verifyServerAdminSession(req, authUser.uid))) {
-        res.status(403).json({
-          error: 'ADMIN_SESSION_REQUIRED',
-          message: 'يتطلب التحقق من رمز مرور الإدارة أولاً.',
-        });
-        return;
-      }
-
-      if (adminDbReady) {
-        try {
-          const snap = await adminDb
-            .collection('licenseCodes')
-            .orderBy('createdAtMs', 'desc')
-            .limit(50)
-            .get();
-          const codes = snap.docs.map((d) =>
-            mapAdminLicenseCodeRow(d.id, d.data() as Record<string, unknown>)
-          );
-          res.json({ ok: true, codes });
-          return;
-        } catch (err) {
-          if (isFirestorePermissionDeniedError(err)) {
-            adminDbReady = false;
-          } else {
-            console.error('Admin list license codes error:', err);
-            res.status(500).json({ error: 'LIST_LICENSE_CODES_FAILED' });
-            return;
-          }
-        }
-      }
-
-      const idToken = extractBearerToken(req);
-      const restRes = await listFirestoreDocumentsWithToken({
-        projectId: firebaseConfig.projectId,
-        databaseId: firebaseConfig.firestoreDatabaseId,
-        collectionPath: 'licenseCodes',
-        idToken,
-        pageSize: 100,
-      });
-      if (!restRes.ok) {
-        if (restRes.forbidden) {
-          res.status(403).json({ error: 'FORBIDDEN', message: 'تم رفض قراءة الأكواد من Firestore.' });
-          return;
-        }
-        respondCloudAdminUnavailable(res);
-        return;
-      }
-      const codes = restRes.docs
-        .map((d) => mapAdminLicenseCodeRow(d.id, d.data))
-        .sort((a, b) => b.createdAtMs - a.createdAtMs)
-        .slice(0, 50);
-      res.json({ ok: true, codes });
-    }
-  );
-
-  app.post(
-    '/api/admin/license-codes',
-    redeemIpLimiter,
-    requireFirebaseAuth,
-    async (req: AuthenticatedRequest, res: Response) => {
-      const authUser = req.authUser!;
-      if (!isAdminRequestUser(authUser)) {
-        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات مالك النظام مطلوبة.' });
-        return;
-      }
-      if (!(await verifyServerAdminSession(req, authUser.uid))) {
-        res.status(403).json({
-          error: 'ADMIN_SESSION_REQUIRED',
-          message: 'يتطلب التحقق من رمز مرور الإدارة أولاً.',
-        });
-        return;
-      }
-
-      const rawTier = req.body?.tier === 'business' ? 'business' : 'pro';
-      const rawCycle =
-        req.body?.cycle === 'monthly' || req.body?.cycle === 'yearly' || req.body?.cycle === 'lifetime'
-          ? req.body.cycle
-          : 'yearly';
-      const targetEmail =
-        typeof req.body?.targetEmail === 'string' && req.body.targetEmail.trim()
-          ? req.body.targetEmail.trim().toLowerCase().slice(0, 254)
-          : null;
-
-      const generated = generateRandomLicenseCodeServer({
-        tier: rawTier,
-        cycle: rawCycle,
-      });
-      const now = Date.now();
-      const createdByEmail = String(authUser.email || PRIMARY_SYSTEM_ADMIN_EMAIL)
-        .trim()
-        .toLowerCase()
-        .slice(0, 254);
-
-      const baseDocData = {
-        codeHash: generated.codeHash,
-        codePreview: generated.codePreview,
-        plan: generated.proPlan,
-        tier: generated.tier,
-        planTier: generated.planTier,
-        cycle: generated.cycle,
-        targetEmail,
-        status: 'unused' as const,
-        used: false,
-        usedBy: null,
-        usedOrgId: null,
-        usedAt: null,
-        createdByUid: authUser.uid,
-        createdByEmail,
-        createdAtMs: now,
-      };
-
-      const responseRecord = {
-        codeHash: generated.codeHash,
-        codePreview: generated.codePreview,
-        tier: generated.tier,
-        planTier: generated.planTier,
-        cycle: generated.cycle,
-        status: 'unused' as const,
-        used: false,
-        usedBy: null,
-        usedOrgId: null,
-        usedAt: null,
-        createdByUid: authUser.uid,
-        createdByEmail,
-        createdAtMs: now,
-      };
-
-      if (adminDbReady) {
-        try {
-          await adminDb.collection('licenseCodes').doc(generated.codeHash).set({
-            ...baseDocData,
-            createdAt: FieldValue.serverTimestamp(),
-          });
-          res.json({ ok: true, code: generated.code, record: responseRecord });
-          return;
-        } catch (err) {
-          if (isFirestorePermissionDeniedError(err)) {
-            adminDbReady = false;
-          } else {
-            console.error('Admin create license code error:', err);
-            res.status(500).json({ error: 'CREATE_LICENSE_CODE_FAILED' });
-            return;
-          }
-        }
-      }
-
-      const idToken = extractBearerToken(req);
-      const restWrite = await commitFirestoreWriteWithToken({
-        projectId: firebaseConfig.projectId,
-        databaseId: firebaseConfig.firestoreDatabaseId,
-        documentPath: `licenseCodes/${generated.codeHash}`,
-        idToken,
-        data: baseDocData,
-        serverTimestampFields: ['createdAt'],
-        currentDocumentExists: false,
-      });
-
-      if (!restWrite.ok) {
-        if (restWrite.forbidden) {
-          res.status(403).json({
-            error: 'FORBIDDEN',
-            message: 'تم رفض حفظ الكود في Firestore. تأكد من الصلاحيات.',
-          });
-          return;
-        }
-        respondCloudAdminUnavailable(res);
-        return;
-      }
-
-      res.json({ ok: true, code: generated.code, record: responseRecord });
-    }
-  );
-
   const mapAdminUserRow = (docId: string, data: Record<string, unknown>) => {
     const ent = resolveUserEntitlement(data);
     const rowUid = String(data.uid || docId);
@@ -2073,48 +1852,64 @@ Return JSON matching the schema with:
         typeof req.body?.customDays === 'number' && Number.isFinite(req.body.customDays) && req.body.customDays > 0
           ? Math.round(req.body.customDays)
           : null;
+      const customExpiresAt =
+        typeof req.body?.customExpiresAt === 'number' && Number.isFinite(req.body.customExpiresAt) && req.body.customExpiresAt > 0
+          ? Math.round(req.body.customExpiresAt)
+          : null;
+      const extendDays =
+        typeof req.body?.extendDays === 'number' && Number.isFinite(req.body.extendDays) && req.body.extendDays > 0
+          ? Math.round(req.body.extendDays)
+          : null;
 
       const planTier: SupportedPlanTier =
         rawTier === 'business_pro' ? 'business_pro' : rawTier === 'personal_pro' ? 'personal_pro' : 'free';
+      const cycle: 'free' | 'monthly' | 'yearly' | 'lifetime' =
+        planTier === 'free' || rawCycle === 'free'
+          ? 'free'
+          : rawCycle === 'monthly' || rawCycle === 'yearly'
+          ? rawCycle
+          : 'lifetime';
       const now = Date.now();
-      let jsonFields: Record<string, unknown>;
+      const idToken = extractBearerToken(req);
 
-      if (planTier === 'free' || rawCycle === 'free') {
-        jsonFields = {
-          isPro: false,
-          proActive: false,
-          planTier: 'free',
-          proPlan: 'free',
-          billingCycle: 'free',
-          startedAt: null,
-          expiresAt: null,
-          proExpiresAt: null,
-          redeemedCouponCode: null,
-        };
-      } else {
-        const cycle = rawCycle === 'monthly' || rawCycle === 'yearly' ? rawCycle : 'lifetime';
-        const days = cycle === 'monthly' ? customDays ?? 30 : cycle === 'yearly' ? customDays ?? 365 : 0;
-        const expiresAt = cycle === 'lifetime' ? null : now + days * DAY_MS;
-        const proPlan =
-          planTier === 'business_pro'
-            ? cycle === 'monthly'
-              ? 'business_monthly'
-              : cycle === 'yearly'
-              ? 'business_yearly'
-              : 'code'
-            : cycle;
-        jsonFields = {
-          isPro: true,
-          proActive: true,
-          planTier,
-          proPlan,
-          billingCycle: cycle,
-          startedAt: now,
-          expiresAt,
-          proExpiresAt: expiresAt,
-          redeemedCouponCode: null,
-        };
+      let existingExpiresAt: number | null =
+        typeof req.body?.existingExpiresAt === 'number' && Number.isFinite(req.body.existingExpiresAt)
+          ? req.body.existingExpiresAt
+          : null;
+
+      if (extendDays && existingExpiresAt === null) {
+        if (adminDbReady) {
+          try {
+            const snap = await adminDb.collection('users').doc(targetUid).get();
+            const d = snap.data() as Record<string, unknown> | undefined;
+            if (d && typeof d.expiresAt === 'number' && Number.isFinite(d.expiresAt)) {
+              existingExpiresAt = d.expiresAt;
+            }
+          } catch {
+            // Fall through to REST or client-provided existingExpiresAt
+          }
+        } else {
+          const restDoc = await fetchFirestoreDocumentWithToken({
+            projectId: firebaseConfig.projectId,
+            databaseId: firebaseConfig.firestoreDatabaseId,
+            documentPath: `users/${targetUid}`,
+            idToken,
+          });
+          if (restDoc.exists && !restDoc.forbidden && typeof restDoc.data?.expiresAt === 'number') {
+            existingExpiresAt = restDoc.data.expiresAt;
+          }
+        }
       }
+
+      const jsonFields = buildDirectAdminSubscriptionPatch({
+        planTier,
+        billingCycle: cycle,
+        customDays,
+        customExpiresAt,
+        extendDays,
+        existingExpiresAt,
+        nowMs: now,
+      });
 
       if (adminDbReady) {
         try {
@@ -2143,7 +1938,6 @@ Return JSON matching the schema with:
         }
       }
 
-      const idToken = extractBearerToken(req);
       const restUpdate = await commitFirestoreWriteWithToken({
         projectId: firebaseConfig.projectId,
         databaseId: firebaseConfig.firestoreDatabaseId,
@@ -2176,344 +1970,241 @@ Return JSON matching the schema with:
     }
   );
 
-  app.post(
-    '/api/redeem-code',
+  const mapAdminOrgRow = (docId: string, data: Record<string, unknown>) => {
+    const sub = computeOrgSubscriptionState({
+      planTier: data.planTier as SupportedPlanTier | undefined,
+      plan: data.plan as 'trial' | 'business_monthly' | 'business_yearly' | undefined,
+      billingCycle: data.billingCycle as SupportedBillingCycle | undefined,
+      expiresAt: typeof data.expiresAt === 'number' ? data.expiresAt : null,
+      subscriptionEndsAt:
+        typeof data.subscriptionEndsAt === 'number' ? data.subscriptionEndsAt : undefined,
+      trialEndsAt: typeof data.trialEndsAt === 'number' ? data.trialEndsAt : undefined,
+      seatLimit: typeof data.seatLimit === 'number' ? data.seatLimit : undefined,
+      maxSeats: typeof data.maxSeats === 'number' ? data.maxSeats : undefined,
+      extraSeats: typeof data.extraSeats === 'number' ? data.extraSeats : undefined,
+      aiScansLimit: typeof data.aiScansLimit === 'number' ? data.aiScansLimit : undefined,
+    });
+    return {
+      orgId: String(data.id || docId),
+      name: String(data.name || docId),
+      ownerUid: String(data.ownerUid || ''),
+      currency: String(data.currency || 'EGP'),
+      planTier: sub.planTier,
+      billingCycle: sub.billingCycle,
+      status: sub.status,
+      expiresAt: sub.expiresAt,
+      seatLimit: sub.seatLimit,
+      aiScansLimit: sub.monthlyScanLimit,
+      isReadOnly: sub.isReadOnly,
+      createdAt: typeof data.createdAt === 'number' ? data.createdAt : undefined,
+    };
+  };
+
+  app.get(
+    '/api/admin/organizations',
     redeemIpLimiter,
     requireFirebaseAuth,
-    redeemUidLimiter,
     async (req: AuthenticatedRequest, res: Response) => {
-      const uid = req.authUser!.uid;
-      const email = req.authUser!.email || '';
-      const rawCode = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
-      const targetOrgId = typeof req.body?.orgId === 'string' ? req.body.orgId.trim() : '';
-      const isPreview = req.body?.preview === true;
-
-      if (!rawCode || rawCode.length > 64) {
-        res.status(400).json({
-          error: 'INVALID_CODE_FORMAT',
-          message: 'يرجى إدخال كود تفعيل صالح.',
+      const authUser = req.authUser!;
+      if (!isAdminRequestUser(authUser)) {
+        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات مالك النظام مطلوبة.' });
+        return;
+      }
+      if (!(await verifyServerAdminSession(req, authUser.uid))) {
+        res.status(403).json({
+          error: 'ADMIN_SESSION_REQUIRED',
+          message: 'يتطلب التحقق من رمز مرور الإدارة أولاً.',
         });
         return;
       }
 
-      if (targetOrgId && !VALID_ORG_ID_REGEX.test(targetOrgId)) {
-        res.status(400).json({ error: 'INVALID_ORG_ID', message: 'معرف المؤسسة غير صالح.' });
+      const sortOrgs = (orgs: ReturnType<typeof mapAdminOrgRow>[]) =>
+        orgs.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+      if (adminDbReady) {
+        try {
+          const snap = await adminDb.collection('organizations').limit(200).get();
+          const organizations = sortOrgs(
+            snap.docs.map((d) => mapAdminOrgRow(d.id, d.data() as Record<string, unknown>))
+          );
+          res.json({ ok: true, organizations });
+          return;
+        } catch (err) {
+          if (isFirestorePermissionDeniedError(err)) {
+            adminDbReady = false;
+          } else {
+            console.error('Admin list organizations error:', err);
+            res.status(500).json({ error: 'ADMIN_ORGS_LIST_FAILED' });
+            return;
+          }
+        }
+      }
+
+      const idToken = extractBearerToken(req);
+      const restOrgs = await listFirestoreDocumentsWithToken({
+        projectId: firebaseConfig.projectId,
+        databaseId: firebaseConfig.firestoreDatabaseId,
+        collectionPath: 'organizations',
+        idToken,
+        pageSize: 200,
+      });
+      if (!restOrgs.ok) {
+        if (restOrgs.forbidden) {
+          res.status(403).json({ error: 'FORBIDDEN', message: 'تم رفض قراءة قائمة المؤسسات من Firestore.' });
+          return;
+        }
+        respondCloudAdminUnavailable(res);
+        return;
+      }
+      const organizations = sortOrgs(restOrgs.docs.map((d) => mapAdminOrgRow(d.id, d.data)));
+      res.json({ ok: true, organizations });
+    }
+  );
+
+  app.post(
+    '/api/admin/organizations/:orgId/subscription',
+    redeemIpLimiter,
+    requireFirebaseAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const authUser = req.authUser!;
+      if (!isAdminRequestUser(authUser)) {
+        res.status(403).json({ error: 'FORBIDDEN', message: 'صلاحيات مالك النظام مطلوبة.' });
+        return;
+      }
+      if (!(await verifyServerAdminSession(req, authUser.uid))) {
+        res.status(403).json({
+          error: 'ADMIN_SESSION_REQUIRED',
+          message: 'يتطلب التحقق من رمز مرور الإدارة أولاً.',
+        });
         return;
       }
 
-      if (!adminDbReady) {
+      const targetOrgId = typeof req.params?.orgId === 'string' ? req.params.orgId.trim() : '';
+      if (!targetOrgId || !VALID_ORG_ID_REGEX.test(targetOrgId)) {
+        res.status(400).json({ error: 'INVALID_ORG_ID' });
+        return;
+      }
+
+      const rawTier = String(req.body?.planTier || 'free').trim();
+      const rawCycle = String(req.body?.billingCycle || 'free').trim();
+      const customDays =
+        typeof req.body?.customDays === 'number' && Number.isFinite(req.body.customDays) && req.body.customDays > 0
+          ? Math.round(req.body.customDays)
+          : null;
+      const customExpiresAt =
+        typeof req.body?.customExpiresAt === 'number' && Number.isFinite(req.body.customExpiresAt) && req.body.customExpiresAt > 0
+          ? Math.round(req.body.customExpiresAt)
+          : null;
+      const extendDays =
+        typeof req.body?.extendDays === 'number' && Number.isFinite(req.body.extendDays) && req.body.extendDays > 0
+          ? Math.round(req.body.extendDays)
+          : null;
+
+      const planTier: SupportedPlanTier = rawTier === 'free' ? 'free' : 'business_pro';
+      const cycle: 'free' | 'monthly' | 'yearly' | 'lifetime' =
+        planTier === 'free' || rawCycle === 'free'
+          ? 'free'
+          : rawCycle === 'monthly' || rawCycle === 'yearly'
+          ? rawCycle
+          : 'lifetime';
+      const now = Date.now();
+      const idToken = extractBearerToken(req);
+
+      let existingExpiresAt: number | null =
+        typeof req.body?.existingExpiresAt === 'number' && Number.isFinite(req.body.existingExpiresAt)
+          ? req.body.existingExpiresAt
+          : null;
+
+      if (extendDays && existingExpiresAt === null) {
+        if (adminDbReady) {
+          try {
+            const snap = await adminDb.collection('organizations').doc(targetOrgId).get();
+            const d = snap.data() as Record<string, unknown> | undefined;
+            if (d && typeof d.expiresAt === 'number' && Number.isFinite(d.expiresAt)) {
+              existingExpiresAt = d.expiresAt;
+            }
+          } catch {
+            // Fall through
+          }
+        } else {
+          const restDoc = await fetchFirestoreDocumentWithToken({
+            projectId: firebaseConfig.projectId,
+            databaseId: firebaseConfig.firestoreDatabaseId,
+            documentPath: `organizations/${targetOrgId}`,
+            idToken,
+          });
+          if (restDoc.exists && !restDoc.forbidden && typeof restDoc.data?.expiresAt === 'number') {
+            existingExpiresAt = restDoc.data.expiresAt;
+          }
+        }
+      }
+
+      const orgPatch = buildDirectAdminOrgSubscriptionPatch({
+        planTier,
+        billingCycle: cycle,
+        customDays,
+        customExpiresAt,
+        extendDays,
+        existingExpiresAt,
+        nowMs: now,
+      });
+
+      if (adminDbReady) {
+        try {
+          await adminDb
+            .collection('organizations')
+            .doc(targetOrgId)
+            .update({
+              ...orgPatch,
+              updatedAt: FieldValue.serverTimestamp(),
+            });
+          res.json({
+            ok: true,
+            orgId: targetOrgId,
+            ...orgPatch,
+            updatedAt: new Date(now).toISOString(),
+          });
+          return;
+        } catch (err) {
+          if (isFirestorePermissionDeniedError(err)) {
+            adminDbReady = false;
+          } else {
+            console.error('Admin update org subscription error:', err);
+            res.status(500).json({ error: 'ADMIN_UPDATE_ORG_SUBSCRIPTION_FAILED' });
+            return;
+          }
+        }
+      }
+
+      const restUpdate = await commitFirestoreWriteWithToken({
+        projectId: firebaseConfig.projectId,
+        databaseId: firebaseConfig.firestoreDatabaseId,
+        documentPath: `organizations/${targetOrgId}`,
+        idToken,
+        data: orgPatch,
+        updateMaskFields: [...Object.keys(orgPatch), 'updatedAt'],
+        serverTimestampFields: ['updatedAt'],
+        currentDocumentExists: true,
+      });
+
+      if (!restUpdate.ok) {
+        if (restUpdate.forbidden) {
+          res.status(403).json({
+            error: 'FORBIDDEN',
+            message: 'تم رفض تحديث اشتراك المؤسسة من Firestore.',
+          });
+          return;
+        }
         respondCloudAdminUnavailable(res);
         return;
       }
 
-      const codeHash = hashActivationCodeServer(rawCode);
-
-      try {
-        const result = await adminDb.runTransaction(async (tx) => {
-          const licenseRef = adminDb.collection('licenseCodes').doc(codeHash);
-          const activationRef = adminDb.collection('activationCodes').doc(codeHash);
-          const adminIssuedRef = adminDb.collection('adminIssuedCodes').doc(codeHash);
-          const userRef = adminDb.collection('users').doc(uid);
-          const orgRef = targetOrgId ? adminDb.collection('organizations').doc(targetOrgId) : null;
-          const memberRef = orgRef ? orgRef.collection('members').doc(uid) : null;
-
-          const [licenseSnap, activationSnap, adminIssuedSnap, userSnap, orgSnap, memberSnap] =
-            await Promise.all([
-              tx.get(licenseRef),
-              tx.get(activationRef),
-              tx.get(adminIssuedRef),
-              tx.get(userRef),
-              orgRef ? tx.get(orgRef) : Promise.resolve(null),
-              memberRef ? tx.get(memberRef) : Promise.resolve(null),
-            ]);
-
-          const activeCodeRef = licenseSnap.exists
-            ? licenseRef
-            : activationSnap.exists
-            ? activationRef
-            : adminIssuedSnap.exists
-            ? adminIssuedRef
-            : null;
-          const activeCodeSnap = licenseSnap.exists
-            ? licenseSnap
-            : activationSnap.exists
-            ? activationSnap
-            : adminIssuedSnap.exists
-            ? adminIssuedSnap
-            : null;
-
-          if (!activeCodeRef || !activeCodeSnap || !activeCodeSnap.exists) {
-            return {
-              status: 404 as const,
-              error: 'INVALID_CODE',
-              message: 'كود التفعيل غير صحيح أو غير مسجل.',
-            };
-          }
-
-          const codeData = activeCodeSnap.data() as {
-            plan?: string;
-            tier?: string;
-            planTier?: string;
-            cycle?: string;
-            seats?: number;
-            extraSeats?: number;
-            targetEmail?: string | null;
-            used?: boolean;
-            status?: string;
-            usedBy?: string | null;
-            usedOrgId?: string | null;
-          };
-
-          if (
-            codeData.targetEmail &&
-            codeData.targetEmail.trim().toLowerCase() !== email.trim().toLowerCase()
-          ) {
-            return {
-              status: 403 as const,
-              error: 'TARGET_EMAIL_MISMATCH',
-              message: 'هذا الكود مخصص لبريد إلكتروني آخر.',
-            };
-          }
-
-          const isAlreadyClaimedOther =
-            (codeData.usedBy && codeData.usedBy !== uid) ||
-            ((codeData.used === true || codeData.status === 'used') && !codeData.usedBy);
-          if (isAlreadyClaimedOther) {
-            return {
-              status: 409 as const,
-              error: 'CODE_ALREADY_USED',
-              message: 'تم استخدام هذا الكود مسبقاً بحساب آخر.',
-            };
-          }
-
-          if (codeData.usedBy === uid) {
-            if (isPreview) {
-              return {
-                status: 409 as const,
-                error: 'CODE_ALREADY_USED',
-                message: 'تم تفعيل هذا الكود مسبقاً على حسابك.',
-              };
-            }
-            const currentEntitlement = resolveUserEntitlement(userSnap.data());
-            const reuseDecision = evaluateSameUserCodeReuse({
-              usedOrgId: codeData.usedOrgId,
-              targetOrgId,
-              currentIsPro: currentEntitlement.isPro,
-            });
-            if (reuseDecision === 'other_org') {
-              return {
-                status: 409 as const,
-                error: 'CODE_ALREADY_USED_OTHER_ORG',
-                message: 'تم استخدام هذا الكود مسبقاً لمؤسسة أخرى.',
-              };
-            }
-            if (reuseDecision === 'idempotent_active') {
-              return {
-                status: 200 as const,
-                isPro: true,
-                proPlan: String(userSnap.data()?.proPlan || 'code') as SupportedActivationPlan,
-                planTier: currentEntitlement.planTier as Exclude<SupportedPlanTier, 'free'>,
-                billingCycle: currentEntitlement.billingCycle as Exclude<
-                  SupportedBillingCycle,
-                  'free' | 'trial' | 'code'
-                >,
-                expiresAt: currentEntitlement.expiresAt,
-                seatLimit: orgSnap?.exists
-                  ? Number(orgSnap.data()?.seatLimit || computeOrgSeatLimit(0))
-                  : undefined,
-              };
-            }
-            // Expired subscription: strictly forbid reusing the already-redeemed code
-            return {
-              status: 409 as const,
-              error: 'CODE_ALREADY_USED',
-              message: 'تم استخدام هذا الكود مسبقاً وانتهت صلاحيته.',
-            };
-          }
-
-          const previewResolved = resolveActivationPlanDetails(codeData.plan, {
-            tier: codeData.planTier || codeData.tier,
-            cycle: codeData.cycle,
-          });
-
-          if (orgRef && previewResolved.planTier !== 'business_pro') {
-            return {
-              status: 400 as const,
-              error: 'PERSONAL_CODE_FOR_ORG',
-              message:
-                'هذا الكود مخصص لباقة الأفراد ولا يصلح لترقية مؤسسة. أدخل كود باقة الأعمال أو فعّل بدون تحديد مؤسسة.',
-            };
-          }
-
-          if (isPreview) {
-            return {
-              status: 200 as const,
-              preview: true as const,
-              tier: previewResolved.planTier === 'business_pro' ? ('business' as const) : ('pro' as const),
-              planTier: previewResolved.planTier,
-              proPlan: previewResolved.proPlan,
-              billingCycle: previewResolved.billingCycle,
-              expiresAt: previewResolved.expiresAt,
-            };
-          }
-
-          const existingEntitlement = resolveUserEntitlement(userSnap.data());
-          const existingOrgExpiresAt =
-            orgSnap?.exists &&
-            orgSnap.data()?.planTier === 'business_pro' &&
-            orgSnap.data()?.billingCycle !== 'trial' &&
-            typeof orgSnap.data()?.expiresAt === 'number'
-              ? (orgSnap.data()?.expiresAt as number)
-              : undefined;
-          const existingUserExpiresAt =
-            existingEntitlement.isPro &&
-            existingEntitlement.planTier === previewResolved.planTier &&
-            userSnap.data()?.billingCycle !== 'trial' &&
-            typeof userSnap.data()?.expiresAt === 'number'
-              ? (userSnap.data()?.expiresAt as number)
-              : undefined;
-
-          const resolved = resolveActivationPlanDetails(codeData.plan, {
-            tier: codeData.planTier || codeData.tier,
-            cycle: codeData.cycle,
-            baseMs: targetOrgId ? existingOrgExpiresAt : existingUserExpiresAt,
-          });
-
-          let appliedSeatLimit: number | undefined;
-
-          if (resolved.planTier === 'business_pro' && orgRef) {
-            if (!orgSnap?.exists) {
-              return { status: 404 as const, error: 'ORG_NOT_FOUND', message: 'المؤسسة غير موجودة.' };
-            }
-            const isOwner = orgSnap.data()?.ownerUid === uid;
-            const isAdmin =
-              memberSnap?.exists &&
-              memberSnap.data()?.status === 'active' &&
-              (memberSnap.data()?.role === 'owner' || memberSnap.data()?.role === 'admin');
-            if (!isOwner && !isAdmin) {
-              return {
-                status: 403 as const,
-                error: 'NOT_ORG_OWNER',
-                message: 'فقط مالك المؤسسة أو المدير يمكنه ترقية باقة المؤسسة.',
-              };
-            }
-            const codeExtraSeats =
-              typeof codeData.seats === 'number' && Number.isFinite(codeData.seats)
-                ? Math.max(0, Math.floor(codeData.seats) - PRICING_CONFIG.businessPro.includedSeats)
-                : Math.max(0, Math.floor(Number(codeData.extraSeats ?? 0)));
-            const currentExtraSeats = Math.max(0, Math.floor(Number(orgSnap.data()?.extraSeats ?? 0)));
-            const nextExtra = Math.max(currentExtraSeats, codeExtraSeats);
-            appliedSeatLimit = computeOrgSeatLimit(nextExtra);
-
-            tx.update(orgRef, {
-              planTier: 'business_pro',
-              billingCycle: resolved.billingCycle,
-              expiresAt: resolved.expiresAt,
-              extraSeats: nextExtra,
-              seatLimit: appliedSeatLimit,
-              updatedAt: FieldValue.serverTimestamp(),
-            });
-          }
-
-          if (!codeData.usedBy) {
-            tx.update(activeCodeRef, {
-              status: 'used',
-              used: true,
-              usedBy: uid,
-              usedOrgId: targetOrgId || null,
-              usedAt: Date.now(),
-              usedAtServer: FieldValue.serverTimestamp(),
-            });
-          }
-
-          const nowMs = Date.now();
-          const userUpdates: Record<string, unknown> = {
-            uid,
-            isPro: true,
-            proActive: true,
-            proPlan: resolved.proPlan,
-            planTier: resolved.planTier,
-            billingCycle: resolved.billingCycle,
-            startedAt: nowMs,
-            expiresAt: resolved.expiresAt,
-            proExpiresAt: resolved.expiresAt,
-            activationCodeHash: codeHash,
-            updatedAt: FieldValue.serverTimestamp(),
-          };
-          if (email) {
-            userUpdates.email = email.slice(0, 254);
-          }
-          if (!userSnap.exists) {
-            userUpdates.createdAt = FieldValue.serverTimestamp();
-            if (!userUpdates.email) {
-              userUpdates.email = `${uid}@firebase.local`;
-            }
-          }
-
-          tx.set(userRef, userUpdates, { merge: true });
-
-          return {
-            status: 200 as const,
-            preview: false as const,
-            isPro: true,
-            proPlan: resolved.proPlan,
-            planTier: resolved.planTier,
-            billingCycle: resolved.billingCycle,
-            expiresAt: resolved.expiresAt,
-            isCumulativeRenewal: Boolean(targetOrgId ? existingOrgExpiresAt : existingUserExpiresAt),
-            seatLimit: appliedSeatLimit,
-          };
-        });
-
-        if (result.status !== 200) {
-          res.status(result.status).json({ error: result.error, message: result.message });
-          return;
-        }
-
-        if ('preview' in result && result.preview) {
-          res.json({
-            ok: true,
-            preview: true,
-            valid: true,
-            tier: result.tier,
-            planTier: result.planTier,
-            proPlan: result.proPlan,
-            billingCycle: result.billingCycle,
-            expiresAt: result.expiresAt,
-          });
-          return;
-        }
-
-        res.json({
-          ok: true,
-          isPro: true,
-          proPlan: result.proPlan,
-          planTier: result.planTier,
-          billingCycle: result.billingCycle,
-          expiresAt: result.expiresAt,
-          proExpiresAt: result.expiresAt,
-          isCumulativeRenewal: Boolean(result.isCumulativeRenewal),
-          ...(result.seatLimit !== undefined ? { seatLimit: result.seatLimit } : {}),
-        });
-      } catch (err) {
-        if (err instanceof Error && err.message === 'INVALID_PLAN') {
-          res.status(400).json({
-            error: 'INVALID_PLAN',
-            message: 'بيانات الخطة المرتبطة بهذا الكود غير صالحة.',
-          });
-          return;
-        }
-        if (isFirestorePermissionDeniedError(err)) {
-          adminDbReady = false;
-          respondCloudAdminUnavailable(res);
-          return;
-        }
-        console.error('Redeem code error:', err);
-        res.status(500).json({
-          error: 'REDEEM_FAILED',
-          message: 'تعذر التحقق من كود التفعيل حالياً. حاول مرة أخرى.',
-        });
-      }
+      res.json({
+        ok: true,
+        orgId: targetOrgId,
+        ...orgPatch,
+        updatedAt: new Date(now).toISOString(),
+      });
     }
   );
 
