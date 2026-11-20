@@ -20,6 +20,7 @@ import {
   Timestamp,
 } from 'firebase/firestore';
 import {
+  auth,
   db,
   deleteOrgOnServer,
   deleteWorkspaceTransactionsCloud,
@@ -29,20 +30,24 @@ import {
 import {
   AuditLogAction,
   AuditLogEntry,
+  BillingCycle,
   Budget,
   BusinessParty,
   Category,
   CostCenter,
   Organization,
+  OrganizationIndustry,
   OrganizationMember,
   OrganizationRole,
   OrgRef,
   OrgWorkspaceData,
+  PlanTier,
   Transaction,
   Wallet,
 } from '../types';
 import { convertCurrency, fromMinor, toMinor } from './currency';
 import { getEffectiveTransactionAmount } from './calculations';
+import { createStarterCostCentersForIndustry, createStarterOrgCategories } from './db';
 import { normalizeApprovalStatus } from './entitlements';
 import { stripSensitivePinFromWallet } from './security';
 import {
@@ -59,6 +64,12 @@ import {
   computeEmailLookupHash,
   parseMemberLookupQuery,
 } from './usernameService';
+import {
+  FIRESTORE_BATCH_CONCURRENCY,
+  FIRESTORE_FAST_BATCH_SIZE,
+  normalizeValidFirestoreId,
+  runResilientBatchCommits,
+} from './workspaceSync';
 
 export interface OrgActorInfo {
   uid: string;
@@ -1132,39 +1143,46 @@ export async function importOrgTransactionsBatchCloud(
   onProgress?: (processed: number, total: number) => void
 ): Promise<void> {
   if (newTransactions.length === 0) return;
-  const CHUNK_SIZE = 420;
   const total = newTransactions.length;
   const totalDeltas = new Map<string, number>();
-  let committed = 0;
 
-  for (let i = 0; i < total; i += CHUNK_SIZE) {
-    const slice = newTransactions.slice(i, i + CHUNK_SIZE);
-    const batch = writeBatch(db);
-    for (const tx of slice) {
-      const cloudDoc = buildOrgTxPayloadForCloud(orgId, {
-        ...tx,
-        submittedBy: tx.submittedBy || actor.uid,
-        submittedByName: tx.submittedByName || actor.name,
-      });
-      batch.set(doc(db, 'organizations', orgId, 'transactions', tx.id), cloudDoc);
-      const deltas = computeWalletBalanceDeltas(tx, wallets, customRates, 1);
-      for (const [k, v] of deltas.entries()) totalDeltas.set(k, (totalDeltas.get(k) || 0) + v);
+  for (const tx of newTransactions) {
+    const deltas = computeWalletBalanceDeltas(tx, wallets, customRates, 1);
+    for (const [k, v] of deltas.entries()) {
+      totalDeltas.set(k, (totalDeltas.get(k) || 0) + v);
     }
-    if (i === 0) {
-      const audit = makeAuditDocPayload(
-        orgId,
-        'create',
-        'transaction',
-        slice[0].id,
-        actor,
-        `استيراد دفعة معاملات (${total})`
-      );
-      batch.set(doc(db, 'organizations', orgId, 'auditLogs', audit.id), audit.data);
-    }
-    await batch.commit();
-    committed = Math.min(total, committed + slice.length);
-    onProgress?.(committed, total);
   }
+
+  await runResilientBatchCommits({
+    items: newTransactions,
+    batchSize: FIRESTORE_FAST_BATCH_SIZE,
+    concurrency: FIRESTORE_BATCH_CONCURRENCY,
+    maxRetries: 3,
+    onProgress,
+    commitChunk: async (slice, batchIndex) => {
+      const batch = writeBatch(db);
+      for (const tx of slice) {
+        const cloudDoc = buildOrgTxPayloadForCloud(orgId, {
+          ...tx,
+          submittedBy: tx.submittedBy || actor.uid,
+          submittedByName: tx.submittedByName || actor.name,
+        });
+        batch.set(doc(db, 'organizations', orgId, 'transactions', tx.id), cloudDoc);
+      }
+      if (batchIndex === 0 && slice.length > 0) {
+        const audit = makeAuditDocPayload(
+          orgId,
+          'create',
+          'transaction',
+          slice[0].id,
+          actor,
+          `استيراد دفعة معاملات (${total})`
+        );
+        batch.set(doc(db, 'organizations', orgId, 'auditLogs', audit.id), audit.data);
+      }
+      await batch.commit();
+    },
+  });
 
   if (totalDeltas.size > 0) {
     const walletBatch = writeBatch(db);
@@ -1652,22 +1670,332 @@ export async function migrateLegacyOrgToCloud(
   );
   ops.push((batch) => batch.set(doc(db, 'organizations', cloudOrgId, 'auditLogs', audit.id), audit.data));
 
-  const BATCH_LIMIT = 380;
   const total = ops.length;
   onProgress?.(0, total);
-  for (let i = 0; i < total; i += BATCH_LIMIT) {
-    const batch = writeBatch(db);
-    const slice = ops.slice(i, i + BATCH_LIMIT);
-    for (const fn of slice) fn(batch);
-    await batch.commit();
-    onProgress?.(Math.min(i + slice.length, total), total);
+  await runResilientBatchCommits({
+    items: ops,
+    batchSize: FIRESTORE_FAST_BATCH_SIZE,
+    concurrency: FIRESTORE_BATCH_CONCURRENCY,
+    maxRetries: 3,
+    onProgress,
+    commitChunk: async (slice) => {
+      const batch = writeBatch(db);
+      for (const fn of slice) fn(batch);
+      await batch.commit();
+    },
+  });
+}
+
+export interface CreateCloudOrgDirectInput {
+  name: string;
+  currency: string;
+  industry?: OrganizationIndustry;
+  vatRate?: number;
+  taxNumber?: string;
+  approvalThreshold?: number;
+  loadSampleData?: boolean;
+  preferredOrgId?: string;
+  seedWorkspace?: OrgWorkspaceData | null;
+  onMigrationProgress?: (completed: number, total: number) => void;
+}
+
+export interface CreateCloudOrgDirectResult {
+  orgId: string;
+  organization: Organization;
+  orgRef: OrgRef;
+}
+
+function readTimestampOrNumberMs(val: unknown): number | null {
+  if (typeof val === 'number' && Number.isFinite(val) && val > 0) return val;
+  if (val && typeof val === 'object' && 'toMillis' in val && typeof (val as Timestamp).toMillis === 'function') {
+    const ms = (val as Timestamp).toMillis();
+    return Number.isFinite(ms) && ms > 0 ? ms : null;
   }
+  return null;
+}
+
+/**
+ * Creates a full Cloud Organization directly in Firestore via an atomic transaction
+ * (`organizations/{orgId}`, `organizations/{orgId}/members/{uid}`, `users/{uid}/orgRefs/{orgId}`),
+ * inheriting the verified user's exact Business PRO or Free entitlement without requiring
+ * a custom Express/Firebase Admin backend (works identically on Vercel & AI Studio).
+ */
+export async function createCloudOrganizationDirect(
+  input: CreateCloudOrgDirectInput
+): Promise<CreateCloudOrgDirectResult> {
+  const currentUser = auth.currentUser;
+  if (!currentUser || !currentUser.uid) {
+    throw new Error('AUTH_REQUIRED_FOR_CLOUD_ORG');
+  }
+
+  const uid = currentUser.uid;
+  const now = Date.now();
+  const cleanName = (input.name || '').trim().slice(0, 120) || 'مؤسستي';
+  const cleanCurrency = (input.currency || 'EGP').trim().toUpperCase().slice(0, 8) || 'EGP';
+  const cleanIndustry: OrganizationIndustry =
+    input.industry && ['retail', 'restaurant', 'tech', 'construction', 'medical', 'general'].includes(input.industry)
+      ? input.industry
+      : 'general';
+  const cleanVatRate = Number.isFinite(Number(input.vatRate))
+    ? Math.max(0, Math.min(100, Number(input.vatRate)))
+    : 14;
+  const cleanApprovalThreshold = Number.isFinite(Number(input.approvalThreshold))
+    ? Math.max(0, Math.min(1_000_000_000, Number(input.approvalThreshold)))
+    : 2000;
+  const cleanTaxNumber =
+    typeof input.taxNumber === 'string' && input.taxNumber.trim().length > 0
+      ? input.taxNumber.trim().slice(0, 64)
+      : null;
+
+  // Read verified user profile from Firestore to match isValidOrgEntitlementOnCreate strictly
+  const userSnap = await getDoc(doc(db, 'users', uid));
+  const uData = (userSnap.exists() ? userSnap.data() : {}) as Record<string, unknown>;
+  const uPlanTier = String(uData.planTier || 'free');
+  const uProPlan = String(uData.proPlan || 'free');
+  const uIsPro = uData.isPro === true || uData.proActive === true;
+  const uHasBusinessTier =
+    uPlanTier === 'business_pro' ||
+    uPlanTier === 'business' ||
+    uProPlan === 'business_monthly' ||
+    uProPlan === 'business_yearly';
+  const uExp =
+    readTimestampOrNumberMs(uData.proExpiresAt) ??
+    readTimestampOrNumberMs(uData.expiresAt);
+  const uNotExpired = uExp === null || now <= uExp + 7 * 86_400_000;
+
+  let planTier: PlanTier = 'free';
+  let billingCycle: BillingCycle = 'free';
+  let expiresAt: number | null = null;
+
+  if (uIsPro && uHasBusinessTier && uNotExpired) {
+    planTier = 'business_pro';
+    const rawCycle = String(uData.billingCycle || '');
+    if (['monthly', 'yearly', 'lifetime', 'trial', 'code'].includes(rawCycle)) {
+      billingCycle = rawCycle as BillingCycle;
+    } else if (uProPlan === 'business_yearly') {
+      billingCycle = 'yearly';
+    } else if (uProPlan === 'lifetime') {
+      billingCycle = 'lifetime';
+    } else {
+      billingCycle = 'monthly';
+    }
+    expiresAt = uExp;
+  }
+
+  const rawUsername = typeof uData.username === 'string' ? uData.username.trim().toLowerCase() : '';
+  const validUsername = /^[a-z0-9_]{3,30}$/.test(rawUsername) ? rawUsername : undefined;
+  const cleanEmail = (currentUser.email || String(uData.email || '') || `${uid}@firebase.local`)
+    .trim()
+    .toLowerCase()
+    .slice(0, 254);
+  const cleanDisplayName = (
+    currentUser.displayName ||
+    String(uData.displayName || '') ||
+    cleanEmail.split('@')[0] ||
+    'المالك'
+  )
+    .trim()
+    .slice(0, 120);
+
+  let orgId = input.preferredOrgId?.trim()
+    ? normalizeValidFirestoreId(input.preferredOrgId.trim(), 'org')
+    : `org-${now}-${Math.random().toString(36).slice(2, 8)}`;
+
+  // Avoid ID collision if upgrading a local org whose ID already exists on Firestore
+  try {
+    const existingOrgSnap = await getDoc(doc(db, 'organizations', orgId));
+    if (existingOrgSnap.exists()) {
+      const existingData = existingOrgSnap.data() as Record<string, unknown>;
+      if (existingData.ownerUid === uid) {
+        // Already exists and owned by this user — ensure orgRef is returned
+        const orgRef: OrgRef = {
+          orgId,
+          orgName: String(existingData.name || cleanName),
+          role: 'owner',
+          status: 'active',
+          currency: String(existingData.currency || cleanCurrency),
+          joinedAt: now,
+        };
+        const organization: Organization = {
+          id: orgId,
+          name: orgRef.orgName,
+          currency: orgRef.currency,
+          mainCurrency: orgRef.currency,
+          industry: (existingData.industry as OrganizationIndustry) || cleanIndustry,
+          vatRate: Number(existingData.vatRate ?? cleanVatRate),
+          ...(existingData.taxNumber ? { taxNumber: String(existingData.taxNumber) } : {}),
+          approvalThreshold: Number(existingData.approvalThreshold ?? cleanApprovalThreshold),
+          ownerUid: uid,
+          ownerId: uid,
+          planTier: (existingData.planTier as PlanTier) || planTier,
+          billingCycle: (existingData.billingCycle as BillingCycle) || billingCycle,
+          expiresAt: readTimestampOrNumberMs(existingData.expiresAt),
+          seatLimit: Number(existingData.seatLimit ?? 5),
+          extraSeats: Number(existingData.extraSeats ?? 0),
+          localFirstMode: false,
+          createdAt: now,
+          updatedAt: now,
+        };
+        return { orgId, organization, orgRef };
+      }
+      orgId = `org-${now}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+  } catch {
+    // Expected when non-member or doc doesn't exist (permission-denied on get for non-member)
+    if (input.preferredOrgId?.trim()) {
+      orgId = `org-${now}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+  }
+
+  const monthKey = new Date(now).toISOString().slice(0, 7);
+  const orgDocRef = doc(db, 'organizations', orgId);
+  const memberDocRef = doc(db, 'organizations', orgId, 'members', uid);
+  const userOrgRefDoc = doc(db, 'users', uid, 'orgRefs', orgId);
+
+  const orgPayload = stripUndefinedDeep({
+    id: orgId,
+    name: cleanName,
+    currency: cleanCurrency,
+    industry: cleanIndustry,
+    vatRate: cleanVatRate,
+    ...(cleanTaxNumber ? { taxNumber: cleanTaxNumber } : {}),
+    approvalThreshold: cleanApprovalThreshold,
+    ownerUid: uid,
+    planTier,
+    billingCycle,
+    expiresAt,
+    seatLimit: 5,
+    extraSeats: 0,
+    aiScansUsed: 0,
+    aiScansMonth: monthKey,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  const ownerMemberPayload = stripUndefinedDeep({
+    uid,
+    email: cleanEmail,
+    displayName: cleanDisplayName,
+    ...(validUsername ? { username: validUsername } : {}),
+    role: 'owner' as const,
+    status: 'active' as const,
+    joinedAt: now,
+    updatedAt: serverTimestamp(),
+  });
+
+  const orgRefPayload: OrgRef = {
+    orgId,
+    orgName: cleanName,
+    role: 'owner',
+    status: 'active',
+    currency: cleanCurrency,
+    joinedAt: now,
+  };
+
+  await runTransaction(db, async (tx) => {
+    tx.set(orgDocRef, orgPayload);
+    tx.set(memberDocRef, ownerMemberPayload);
+    tx.set(userOrgRefDoc, orgRefPayload);
+  });
+
+  const actor: OrgActorInfo = { uid, name: cleanDisplayName };
+
+  // Seed subcollections (either migrating an existing local workspace or seeding clean starter data)
+  if (input.seedWorkspace) {
+    await migrateLegacyOrgToCloud(orgId, input.seedWorkspace, actor, input.onMigrationProgress);
+  } else {
+    const starterWorkspace: OrgWorkspaceData = {
+      organization: {
+        id: orgId,
+        name: cleanName,
+        currency: cleanCurrency,
+        mainCurrency: cleanCurrency,
+        industry: cleanIndustry,
+        vatRate: cleanVatRate,
+        ...(cleanTaxNumber ? { taxNumber: cleanTaxNumber } : {}),
+        approvalThreshold: cleanApprovalThreshold,
+        ownerUid: uid,
+        ownerId: uid,
+        planTier,
+        billingCycle,
+        expiresAt,
+        seatLimit: 5,
+        extraSeats: 0,
+        localFirstMode: false,
+        createdAt: now,
+        updatedAt: now,
+      },
+      members: [],
+      costCenters: createStarterCostCentersForIndustry(
+        orgId,
+        cleanIndustry,
+        Boolean(input.loadSampleData),
+        now
+      ),
+      parties: [],
+      wallets: [
+        {
+          id: `org-w-cash-${now}`,
+          name: 'الخزينة الرئيسية',
+          currency: cleanCurrency,
+          initialBalance: 0,
+          initialBalanceMinor: 0,
+          balance: 0,
+          balanceMinor: 0,
+          color: '#3A605B',
+          icon: 'Wallet',
+          isArchived: false,
+          order: 1,
+          walletType: 'standard',
+          workspaceId: orgId,
+        },
+      ],
+      categories: createStarterOrgCategories(cleanIndustry),
+      transactions: [],
+      budgets: [],
+      debts: [],
+      goals: [],
+      templates: [],
+      auditLogs: [],
+    };
+    await migrateLegacyOrgToCloud(orgId, starterWorkspace, actor, input.onMigrationProgress);
+  }
+
+  const organization: Organization = {
+    id: orgId,
+    name: cleanName,
+    currency: cleanCurrency,
+    mainCurrency: cleanCurrency,
+    industry: cleanIndustry,
+    vatRate: cleanVatRate,
+    ...(cleanTaxNumber ? { taxNumber: cleanTaxNumber } : {}),
+    approvalThreshold: cleanApprovalThreshold,
+    ownerUid: uid,
+    ownerId: uid,
+    planTier,
+    billingCycle,
+    expiresAt,
+    seatLimit: 5,
+    maxSeats: 5,
+    extraSeats: 0,
+    aiScansUsed: 0,
+    aiScansMonth: monthKey,
+    localFirstMode: false,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  return {
+    orgId,
+    organization,
+    orgRef: orgRefPayload,
+  };
 }
 
 /**
  * Deletes an organization cleanly from Cloud Firestore:
- * - For shared/cloud orgs (`hasCloudOrgRef`), invokes the verified `/api/org/delete` endpoint
- *   (treating 404 ORG_NOT_FOUND as already deleted on server).
+ * - For shared/cloud orgs (`hasCloudOrgRef`), tries `/api/org/delete` first, and if server admin
+ *   is unavailable (e.g., static Vercel deployment), performs atomic owner deletion directly in Firestore.
  * - Cleans up user-scoped workspace transactions (`users/{uid}/workspaces/{orgId}/transactions`)
  *   and removes stale `orgWorkspaces` entries from `users/{uid}/backup/meta`.
  */
@@ -1681,15 +2009,45 @@ export async function deleteOrganizationWorkspaceCloud(params: {
   if (!cleanOrgId) return;
 
   if (params.hasCloudOrgRef) {
+    let deletedViaServer = false;
     try {
       await deleteOrgOnServer(cleanOrgId, params.orgName);
+      deletedViaServer = true;
     } catch (err) {
       const isAlreadyMissing =
         err instanceof ServerApiError &&
         (err.status === 404 || err.code === 'ORG_NOT_FOUND');
-      if (!isAlreadyMissing) {
+      const isServerUnavailable =
+        err instanceof ServerApiError &&
+        (err.code === 'CLOUD_ADMIN_UNAVAILABLE' || err.status === 501 || err.status === 503 || err.status === 0);
+      if (isAlreadyMissing) {
+        deletedViaServer = true;
+      } else if (!isServerUnavailable) {
         throw err;
       }
+    }
+
+    if (!deletedViaServer && params.uid && auth.currentUser?.uid === params.uid) {
+      const uid = params.uid;
+      await runTransaction(db, async (tx) => {
+        const orgDocRef = doc(db, 'organizations', cleanOrgId);
+        const ownerMemberRef = doc(db, 'organizations', cleanOrgId, 'members', uid);
+        const ownerOrgRef = doc(db, 'users', uid, 'orgRefs', cleanOrgId);
+        const [orgSnap, memberSnap, userRefSnap] = await Promise.all([
+          tx.get(orgDocRef),
+          tx.get(ownerMemberRef),
+          tx.get(ownerOrgRef),
+        ]);
+        if (orgSnap.exists()) {
+          tx.delete(orgDocRef);
+        }
+        if (memberSnap.exists()) {
+          tx.delete(ownerMemberRef);
+        }
+        if (userRefSnap.exists()) {
+          tx.delete(ownerOrgRef);
+        }
+      });
     }
   }
 

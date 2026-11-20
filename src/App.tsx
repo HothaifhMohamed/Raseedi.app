@@ -28,6 +28,7 @@ import { UndoSnackbar } from './components/common/UndoSnackbar';
 import { ToastNotification } from './components/common/ToastNotification';
 import { PinLockModal } from './components/common/PinLockModal';
 import { PWAInstallPrompt, OfflineIndicator } from './components/common/PWAInstallPrompt';
+import { BackgroundSyncBanner } from './components/common/BackgroundSyncBanner';
 import { AppUpdateBanner } from './components/common/AppUpdateBanner';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
 import {
@@ -238,6 +239,9 @@ const MainLayout: React.FC = () => {
 
         {/* Top Navbar */}
         <Navbar />
+
+        {/* Non-blocking background cloud sync progress banner for large imports */}
+        <BackgroundSyncBanner />
 
         {/* In-app PWA install prompt button/banner */}
         <PWAInstallPrompt />

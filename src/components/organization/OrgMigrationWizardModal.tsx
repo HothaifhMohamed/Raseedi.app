@@ -15,7 +15,10 @@ import {
   createOrgOnServer,
   saveCloudBackup,
 } from '../../services/firebase';
-import { migrateLegacyOrgToCloud } from '../../services/orgCloud';
+import {
+  createCloudOrganizationDirect,
+  migrateLegacyOrgToCloud,
+} from '../../services/orgCloud';
 import { loadOrgWorkspaces } from '../../services/db';
 import { formatLocalDate } from '../../services/calculations';
 import { OrgWorkspaceData } from '../../types';
@@ -157,8 +160,27 @@ export const OrgMigrationWizardModal: React.FC = () => {
           serverMigratedIds.push(org.id);
           lastCreatedOrgId = created.orgId;
         } catch {
-          // Server endpoint unavailable (e.g. static Vercel hosting) -> queue for direct Firestore user Cloud Backup
-          fallbackTargets.push(ws);
+          // Server endpoint unavailable (e.g. static Vercel hosting) -> try direct atomic Firestore Cloud Org creation
+          try {
+            const directCreated = await createCloudOrganizationDirect({
+              name: org.name,
+              currency: org.currency || org.mainCurrency || 'EGP',
+              industry: org.industry || 'general',
+              vatRate: Number.isFinite(org.vatRate) ? org.vatRate : 14,
+              approvalThreshold: Number.isFinite(org.approvalThreshold) ? org.approvalThreshold : 5000,
+              taxNumber: org.taxNumber,
+              preferredOrgId: org.id,
+              seedWorkspace: ws,
+              onMigrationProgress: (done, total) => {
+                setProgress({ currentOrgName: org.name, done, total });
+              },
+            });
+            serverMigratedIds.push(org.id);
+            lastCreatedOrgId = directCreated.orgId;
+          } catch {
+            // Final offline-safe fallback to user Cloud Backup
+            fallbackTargets.push(ws);
+          }
         }
       }
 

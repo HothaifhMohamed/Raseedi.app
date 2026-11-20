@@ -149,6 +149,7 @@ import {
   fetchWorkspaceTransactionsCloud,
   subscribeWorkspaceTransactions,
   syncWorkspaceTransactionsWithZeroGuard,
+  removeOrgWorkspaceFromBackupMeta,
   isOfflineFirestoreError,
   isEntitlementActive,
   resolvePlanTierFromProfile,
@@ -218,6 +219,7 @@ import {
   upsertOrgPartyCloud,
   deleteOrgPartyCloud,
   updateOrgSettingsCloud,
+  createCloudOrganizationDirect,
   deleteOrganizationWorkspaceCloud,
   lookupUserForOrgDirectAdd,
   addOrgMemberDirectlyCloud,
@@ -248,6 +250,15 @@ import {
   getNextWalletOrder,
   sortWalletsByOrder,
 } from '../services/walletOrder';
+
+export interface BackgroundImportSyncState {
+  status: 'idle' | 'syncing' | 'synced' | 'error';
+  workspaceId: string | null;
+  processed: number;
+  total: number;
+  percent: number;
+  error: string | null;
+}
 
 export interface FilterState {
   type: 'all' | 'income' | 'expense';
@@ -343,6 +354,10 @@ interface AppContextType {
     approvalThreshold?: number;
     loadSampleData?: boolean;
   }) => Promise<Organization>;
+  upgradeLocalOrgToCloud: (
+    orgId: string,
+    onProgress?: (completed: number, total: number) => void
+  ) => Promise<{ ok: boolean; orgId?: string; error?: string }>;
   joinOrganizationByCode: (
     inviteCode: string
   ) => Promise<{ ok: boolean; orgId?: string; orgName?: string; error?: string }>;
@@ -575,6 +590,13 @@ interface AppContextType {
       onProgress?: (processed: number, total: number) => void;
     }
   ) => Promise<{ ok: boolean; error?: string }>;
+  backgroundImportSync: BackgroundImportSyncState;
+  startBackgroundImportCloudSync: (
+    workspaceId: string,
+    createdTransactions: Transaction[]
+  ) => void;
+  retryBackgroundImportCloudSync: () => void;
+  dismissBackgroundImportCloudSync: () => void;
   updateTransaction: (id: string, data: Partial<Transaction>) => void;
   deleteTransaction: (id: string) => void;
   deleteSelectedTransactions: () => void;
@@ -736,6 +758,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [lastCloudBackupExists, setLastCloudBackupExists] = useState(false);
   const [isCloudLoaded, setIsCloudLoaded] = useState(false);
   const [cloudBackupHistory, setCloudBackupHistory] = useState<BackupHistorySummary[]>([]);
+  const [backgroundImportSync, setBackgroundImportSync] = useState<BackgroundImportSyncState>({
+    status: 'idle',
+    workspaceId: null,
+    processed: 0,
+    total: 0,
+    percent: 0,
+    error: null,
+  });
+  const pendingBackgroundImportRef = React.useRef<{
+    workspaceId: string;
+    createdTransactions: Transaction[];
+  } | null>(null);
+  const backgroundImportDismissTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const [preRestoreSnapshotDate, setPreRestoreSnapshotDate] = useState<number | null>(null);
   const skipNextAutoSyncRef = React.useRef(false);
   const hasCompletedInitialCloudSyncRef = React.useRef(false);
@@ -2455,12 +2490,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             return null;
           }),
           fetchWorkspaceTransactionsCloud(firebaseUser.uid, 'personal', {
-            forceServer: isOnline,
-          }).catch(() =>
-            fetchWorkspaceTransactionsCloud(firebaseUser.uid, 'personal', {
-              forceServer: false,
-            }).catch(() => [])
-          ),
+            forceServer: false,
+          }).catch(() => []),
         ]);
         if (reqId !== syncRequestIdRef.current) return;
         setCloudDiagnosticsError(null);
@@ -2925,8 +2956,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       const fetchEpoch = workspaceSyncEpochRef.current;
       try {
+        // Server-first with graceful local-cache fallback prevents "Failed to get documents from server"
+        // errors when Firestore's WebChannel/long-polling transport is still establishing or offline;
+        // the live onSnapshot listener below delivers authoritative server snapshots immediately on connect.
         const serverTxs = await fetchWorkspaceTransactionsCloud(uid, activeWsId, {
-          forceServer: true,
+          forceServer: false,
         });
         if (isStaleSync()) return;
         if (fetchEpoch !== workspaceSyncEpochRef.current) {
@@ -2946,16 +2980,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         let legacyCloudTxs: Transaction[] = [];
         if (!unifiedBackfilledKeysRef.current.has(backfillKey)) {
           unifiedBackfilledKeysRef.current.add(backfillKey);
-          const cloudBackup = await fetchCloudBackup(uid, { forceServer: true }).catch(() => null);
+          const cloudBackup = await fetchCloudBackup(uid, { forceServer: false }).catch(() => null);
           if (isStaleSync()) return;
           if (activeWsId === 'personal') {
             legacyCloudTxs = (cloudBackup?.transactions || []).filter((tx) =>
               isActiveWorkspaceTransaction(tx, 'personal')
             );
             if (legacyCloudTxs.length === 0) {
-              const hist = await fetchLatestCloudBackupFromHistory(uid, { forceServer: true }).catch(
-                () => null
-              );
+              const hist = await fetchLatestCloudBackupFromHistory(uid, {
+                forceServer: false,
+              }).catch(() => null);
               if (isStaleSync()) return;
               legacyCloudTxs = (hist?.transactions || []).filter((tx) =>
                 isActiveWorkspaceTransaction(tx, 'personal')
@@ -2994,7 +3028,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
         markCloudReady();
       } catch (err) {
-        console.error(`[WorkspaceSync] Cloud-First fetch failed for ${activeWsId}:`, err);
+        if (isOfflineFirestoreError(err)) {
+          console.warn(`[WorkspaceSync] Offline cache mode for ${activeWsId}`);
+        } else {
+          console.error(`[WorkspaceSync] Cloud-First fetch failed for ${activeWsId}:`, err);
+        }
       }
     };
 
@@ -3342,16 +3380,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         void refreshScanQuota();
 
         const [cloudMeta, unifiedPersonalTxs] = await Promise.all([
-          fetchCloudBackupMeta(firebaseUser.uid, { forceServer: true }).catch(() =>
-            fetchCloudBackupMeta(firebaseUser.uid, { forceServer: false }).catch(() => null)
-          ),
+          fetchCloudBackupMeta(firebaseUser.uid, { forceServer: false }).catch(() => null),
           fetchWorkspaceTransactionsCloud(firebaseUser.uid, 'personal', {
-            forceServer: true,
-          }).catch(() =>
-            fetchWorkspaceTransactionsCloud(firebaseUser.uid, 'personal', {
-              forceServer: false,
-            }).catch(() => [])
-          ),
+            forceServer: false,
+          }).catch(() => []),
         ]);
         const hasCloudData = Boolean(cloudMeta) || unifiedPersonalTxs.length > 0;
         setLastCloudBackupExists(hasCloudData);
@@ -3372,10 +3404,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         let restored = false;
         if (postAction === 'restore_cloud_and_enter') {
           const cloudBackup = await fetchCloudBackup(firebaseUser.uid, {
-            forceServer: true,
-          }).catch(() =>
-            fetchCloudBackup(firebaseUser.uid, { forceServer: false }).catch(() => null)
-          );
+            forceServer: false,
+          }).catch(() => null);
           const resolvedUnified =
             unifiedPersonalTxs.length > 0
               ? reconcileWorkspaceTransactions(
@@ -3635,6 +3665,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     try {
       await ensureUserProfile(auth.currentUser);
 
+      const activeCloudOrgCounts =
+        isOrgWorkspace && activeOrganization && !isUsingLocalOrgMode
+          ? {
+              transactions: activeCloudTransactions.filter((tx) => !tx.deletedAt).length,
+              wallets: activeCloudWallets.length,
+            }
+          : undefined;
+
       const { syncedAt, updatedAtMs, skippedAttachmentsCount, blockedEmptyOverwrite } =
         await saveCloudBackup(
           auth.currentUser.uid,
@@ -3652,7 +3690,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             settings: snap.settings,
             hasCompletedOnboarding: snap.hasCompletedOnboarding,
           },
-          { source: 'manual', recordHistory: true, allowEmptyOverwrite: false }
+          {
+            source: 'manual',
+            recordHistory: true,
+            allowEmptyOverwrite: false,
+            activeCloudOrgCounts,
+          }
         );
 
       if (blockedEmptyOverwrite) {
@@ -3705,7 +3748,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     } finally {
       setIsCloudSyncing(false);
     }
-  }, [refreshCloudBackupHistory]);
+  }, [
+    refreshCloudBackupHistory,
+    isOrgWorkspace,
+    activeOrganization,
+    isUsingLocalOrgMode,
+    activeCloudTransactions,
+    activeCloudWallets,
+  ]);
 
   const restoreFromCloudNow = useCallback(async (): Promise<boolean> => {
     if (!auth.currentUser) return false;
@@ -3719,8 +3769,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (reqId !== syncRequestIdRef.current) return false;
       const [profile, cloudBackup, unifiedPersonal] = await Promise.all([
         fetchUserProfile(uid),
-        fetchCloudBackup(uid, { forceServer: true }),
-        fetchWorkspaceTransactionsCloud(uid, 'personal', { forceServer: true }).catch(() => []),
+        fetchCloudBackup(uid, { forceServer: false }),
+        fetchWorkspaceTransactionsCloud(uid, 'personal', { forceServer: false }).catch(() => []),
       ]);
       if (reqId !== syncRequestIdRef.current) return false;
 
@@ -4528,15 +4578,107 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         auth.currentUser?.email?.split('@')[0] ||
         (settings.language === 'en' ? 'Owner' : 'المالك');
       const actorEmail = user?.email || auth.currentUser?.email || undefined;
+      const cleanName = params.name.trim() || (settings.language === 'en' ? 'My Company' : 'شركتي');
+      const cleanCurrency = (params.currency || settings.mainCurrency || 'EGP').trim().toUpperCase();
+      const cleanIndustry: OrganizationIndustry = params.industry || 'general';
+      const cleanVatRate = params.vatRate ?? 14;
+      const cleanApprovalThreshold = params.approvalThreshold ?? 2000;
+      const cleanTaxNumber = params.taxNumber?.trim() || undefined;
 
-      // 1. Offline-first / Local-first immediate creation in state & IndexedDB
+      const isSignedInOnline =
+        Boolean(auth.currentUser?.uid) &&
+        Boolean(user?.isLoggedIn) &&
+        (typeof navigator === 'undefined' || navigator.onLine);
+
+      // 1. When signed in with Google & online: create a genuine Cloud Organization immediately
+      //    so Team collaboration (adding members via Email / @username) works from the very first second,
+      //    including for 2nd/3rd organizations and static deployments like Vercel.
+      if (isSignedInOnline && auth.currentUser) {
+        try {
+          await ensureUserProfile(auth.currentUser).catch(() => null);
+          let createdCloud: {
+            orgId: string;
+            organization: Organization;
+            orgRef: OrgRef;
+          } | null = null;
+
+          try {
+            const serverRes = await createOrgOnServer({
+              name: cleanName,
+              currency: cleanCurrency,
+              industry: cleanIndustry,
+              vatRate: cleanVatRate,
+              approvalThreshold: cleanApprovalThreshold,
+              taxNumber: cleanTaxNumber,
+              loadSampleData: Boolean(params.loadSampleData),
+            });
+            createdCloud = {
+              orgId: serverRes.orgId,
+              organization: { ...serverRes.organization, localFirstMode: false },
+              orgRef: {
+                orgId: serverRes.orgId,
+                orgName: serverRes.organization.name || cleanName,
+                role: 'owner',
+                status: 'active',
+                currency: serverRes.organization.currency || cleanCurrency,
+                joinedAt: Date.now(),
+              },
+            };
+          } catch {
+            // Static hosting (e.g. Vercel) without Express Admin SDK -> direct atomic Firestore creation
+            createdCloud = await createCloudOrganizationDirect({
+              name: cleanName,
+              currency: cleanCurrency,
+              industry: cleanIndustry,
+              vatRate: cleanVatRate,
+              approvalThreshold: cleanApprovalThreshold,
+              taxNumber: cleanTaxNumber,
+              loadSampleData: Boolean(params.loadSampleData),
+            });
+          }
+
+          if (createdCloud) {
+            const { orgId, organization, orgRef } = createdCloud;
+            // Optimistically register Cloud OrgRef so isCloudOrg is true immediately
+            setOrgRefs((prev) =>
+              prev.some((r) => r.orgId === orgId)
+                ? prev.map((r) => (r.orgId === orgId ? orgRef : r))
+                : [...prev, orgRef]
+            );
+            setActiveCloudOrg(organization);
+
+            // Ensure no stale local-only shadow exists for the same ID
+            if (latestLocalOrgWorkspacesRef.current[orgId]) {
+              const cleanedLocal = { ...latestLocalOrgWorkspacesRef.current };
+              delete cleanedLocal[orgId];
+              latestLocalOrgWorkspacesRef.current = cleanedLocal;
+              setLocalOrgWorkspaces(cleanedLocal);
+              await saveOrgWorkspaces(orgId, cleanedLocal);
+            }
+
+            setActiveWorkspace(orgId);
+            saveActiveWorkspacePref(orgId);
+            setHasCompletedOnboarding(true);
+            savePersonalState({ hasCompletedOnboarding: true });
+            setOrgActionError(null);
+            return organization;
+          }
+        } catch (cloudErr) {
+          console.warn(
+            '[createOrganization] Direct cloud creation fell back to offline local workspace:',
+            cloudErr
+          );
+        }
+      }
+
+      // 2. Offline / Guest fallback: create local-first workspace in IndexedDB
       const localWs = buildLocalOrgWorkspace({
-        name: params.name.trim() || (settings.language === 'en' ? 'My Company' : 'شركتي'),
-        currency: params.currency || settings.mainCurrency,
-        industry: params.industry || 'general',
-        vatRate: params.vatRate ?? 14,
-        approvalThreshold: params.approvalThreshold ?? 2000,
-        taxNumber: params.taxNumber?.trim() || undefined,
+        name: cleanName,
+        currency: cleanCurrency,
+        industry: cleanIndustry,
+        vatRate: cleanVatRate,
+        approvalThreshold: cleanApprovalThreshold,
+        taxNumber: cleanTaxNumber,
         loadSampleData: Boolean(params.loadSampleData),
         actor: { uid: currentUid, name: actorName, email: actorEmail },
       });
@@ -4557,84 +4699,89 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       savePersonalState({ hasCompletedOnboarding: true });
       setOrgActionError(null);
 
-      // 2. Silent background cloud sync (never blocks or throws ORG_CREATE_FAILED)
-      void (async () => {
-        try {
-          if (!auth.currentUser || !user?.isLoggedIn) return;
-          if (typeof navigator !== 'undefined' && !navigator.onLine) return;
-
-          try {
-            const serverRes = await createOrgOnServer({
-              name: localWs.organization.name,
-              currency: localWs.organization.currency,
-              industry: localWs.organization.industry || 'general',
-              vatRate: localWs.organization.vatRate,
-              approvalThreshold: localWs.organization.approvalThreshold,
-              taxNumber: localWs.organization.taxNumber,
-              loadSampleData: Boolean(params.loadSampleData),
-              preferredOrgId: orgId,
-            });
-            const syncedAt = Date.now();
-            const currentLatest = latestLocalOrgWorkspacesRef.current[orgId] || localWs;
-            const updatedMap: Record<string, OrgWorkspaceData> = {
-              ...latestLocalOrgWorkspacesRef.current,
-              [serverRes.orgId]: {
-                ...currentLatest,
-                organization: {
-                  ...serverRes.organization,
-                  localFirstMode: true,
-                  cloudBackedUpAt: syncedAt,
-                },
-              },
-            };
-            latestLocalOrgWorkspacesRef.current = updatedMap;
-            setLocalOrgWorkspaces(updatedMap);
-            await saveOrgWorkspaces(activeWorkspaceRef.current || serverRes.orgId, updatedMap);
-          } catch {
-            // Backend API unavailable (e.g. static Vercel) -> fall back silently to Firestore user backup
-            const synced = await syncOrganizationMetaToCloud(
-              auth.currentUser.uid,
-              {
-                transactions: latestPersonalRef.current.transactions,
-                wallets: latestPersonalRef.current.wallets,
-                categories: latestPersonalRef.current.categories,
-                budgets: latestPersonalRef.current.budgets,
-                debts: latestPersonalRef.current.debts,
-                goals: latestPersonalRef.current.goals,
-                templates: latestPersonalRef.current.templates,
-                moneyCircles: latestPersonalRef.current.moneyCircles,
-                settings: latestPersonalRef.current.settings,
-                hasCompletedOnboarding: true,
-              },
-              latestLocalOrgWorkspacesRef.current,
-              activeWorkspaceRef.current || orgId
-            );
-            if (synced) {
-              const currentLatest = latestLocalOrgWorkspacesRef.current[orgId] || localWs;
-              const backedMap: Record<string, OrgWorkspaceData> = {
-                ...latestLocalOrgWorkspacesRef.current,
-                [orgId]: {
-                  ...currentLatest,
-                  organization: {
-                    ...currentLatest.organization,
-                    localFirstMode: true,
-                    cloudBackedUpAt: Date.now(),
-                  },
-                },
-              };
-              latestLocalOrgWorkspacesRef.current = backedMap;
-              setLocalOrgWorkspaces(backedMap);
-              await saveOrgWorkspaces(activeWorkspaceRef.current || orgId, backedMap);
-            }
-          }
-        } catch {
-          // Completely silent background fallback
-        }
-      })();
-
       return localWs.organization;
     },
     [user?.isLoggedIn, user?.id, user?.name, user?.email, settings.language, settings.mainCurrency, savePersonalState]
+  );
+
+  const upgradeLocalOrgToCloud = useCallback(
+    async (
+      orgId: string,
+      onProgress?: (completed: number, total: number) => void
+    ): Promise<{ ok: boolean; orgId?: string; error?: string }> => {
+      const isAr = latestPersonalRef.current.settings.language !== 'en';
+      if (!auth.currentUser?.uid || !user?.isLoggedIn) {
+        return {
+          ok: false,
+          error: isAr
+            ? 'يرجى تسجيل الدخول بحساب Google أولاً لتحويل المؤسسة إلى مؤسسة سحابية.'
+            : 'Please sign in with Google first to upgrade this organization to Cloud.',
+        };
+      }
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        return {
+          ok: false,
+          error: isAr
+            ? 'لا يوجد اتصال بالإنترنت. اتصل بالإنترنت ثم حاول مرة أخرى.'
+            : 'You are offline. Please reconnect and try again.',
+        };
+      }
+
+      const localWs = latestLocalOrgWorkspacesRef.current[orgId];
+      if (!localWs) {
+        return {
+          ok: false,
+          error: isAr ? 'تعذر العثور على بيانات المؤسسة المحلية.' : 'Local organization data not found.',
+        };
+      }
+
+      try {
+        await ensureUserProfile(auth.currentUser).catch(() => null);
+        const result = await createCloudOrganizationDirect({
+          name: localWs.organization.name,
+          currency: localWs.organization.currency || settings.mainCurrency || 'EGP',
+          industry: localWs.organization.industry || 'general',
+          vatRate: localWs.organization.vatRate ?? 14,
+          taxNumber: localWs.organization.taxNumber,
+          approvalThreshold: localWs.organization.approvalThreshold ?? 2000,
+          preferredOrgId: orgId,
+          seedWorkspace: localWs,
+          onMigrationProgress: onProgress,
+        });
+
+        // Register Cloud OrgRef immediately in state
+        setOrgRefs((prev) =>
+          prev.some((r) => r.orgId === result.orgId)
+            ? prev.map((r) => (r.orgId === result.orgId ? result.orgRef : r))
+            : [...prev, result.orgRef]
+        );
+        setActiveCloudOrg(result.organization);
+
+        // Remove local-only copy after successful migration to Firestore
+        const nextLocalMap = { ...latestLocalOrgWorkspacesRef.current };
+        delete nextLocalMap[orgId];
+        latestLocalOrgWorkspacesRef.current = nextLocalMap;
+        setLocalOrgWorkspaces(nextLocalMap);
+        await saveOrgWorkspaces(result.orgId, nextLocalMap);
+        void removeOrgWorkspaceFromBackupMeta(auth.currentUser.uid, orgId).catch(() => null);
+
+        setActiveWorkspace(result.orgId);
+        saveActiveWorkspacePref(result.orgId);
+        setOrgActionError(null);
+        showToast(
+          isAr
+            ? `تم تحويل "${result.organization.name}" إلى مؤسسة سحابية بنجاح — يمكنك الآن إضافة أعضاء الفريق!`
+            : `"${result.organization.name}" upgraded to Cloud Organization — you can now add team members!`,
+          'success'
+        );
+        return { ok: true, orgId: result.orgId };
+      } catch (err) {
+        const msg = formatFirestoreErrorForDisplay(err, isAr);
+        setOrgActionError(msg);
+        return { ok: false, error: msg };
+      }
+    },
+    [user?.isLoggedIn, settings.mainCurrency, showToast]
   );
 
   const joinOrganizationByCode = useCallback(
@@ -5997,13 +6144,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           };
         }
 
-        // Cloud multi-user org: stage metadata and transactions for immediate cloud commit
+        // Cloud multi-user org: stage metadata, optimistically surface in local UI, and hand off for background cloud commit
         const existingCloudWalletIds = new Set(activeCloudWallets.map((w) => w.id));
         const uniqueNewCloudWallets = extraWallets.filter((w) => !existingCloudWalletIds.has(w.id));
+        const combinedCloudWallets = [...activeCloudWallets, ...uniqueNewCloudWallets];
+        const optimisticCloudWallets = await accumulateWalletDeltasChunked(
+          combinedCloudWallets,
+          newTxs,
+          true
+        );
         pendingCloudOrgImportMetaRef.current = {
           newWallets: uniqueNewCloudWallets,
           newCategories: extraCategories,
         };
+        setActiveCloudWallets(optimisticCloudWallets);
+        setActiveCloudTransactions((prev) => {
+          const seen = new Set(newTxs.map((t) => t.id));
+          return [...newTxs, ...prev.filter((t) => !seen.has(t.id))];
+        });
         options?.onProgress?.(total, total);
         return {
           importedCount: newTxs.length,
@@ -6120,6 +6278,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (isOrgWorkspace && activeOrganization && !isUsingLocalOrgMode && targetWsId === activeOrganization.id) {
           const stagedMeta = pendingCloudOrgImportMetaRef.current;
           pendingCloudOrgImportMetaRef.current = null;
+          const mergedWallets = stagedMeta
+            ? [...activeCloudWallets, ...stagedMeta.newWallets]
+            : activeCloudWallets;
           if (stagedMeta) {
             for (const w of stagedMeta.newWallets) {
               await upsertOrgWalletCloud(activeOrganization.id, w, true, actor);
@@ -6127,26 +6288,55 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             for (const c of stagedMeta.newCategories) {
               await upsertOrgCategoryCloud(activeOrganization.id, c, true, actor);
             }
-            if (extraTransactions && extraTransactions.length > 0) {
-              await importOrgTransactionsBatchCloud(
-                activeOrganization.id,
-                extraTransactions,
-                [...activeCloudWallets, ...stagedMeta.newWallets],
-                settings.customExchangeRates,
-                actor,
-                onProgress
-              );
-            }
-          } else if (extraTransactions && extraTransactions.length > 0) {
+          }
+          if (extraTransactions && extraTransactions.length > 0) {
             await importOrgTransactionsBatchCloud(
               activeOrganization.id,
               extraTransactions,
-              activeCloudWallets,
+              mergedWallets,
               settings.customExchangeRates,
               actor,
               onProgress
             );
           }
+
+          // Also refresh backup history snapshot with accurate active cloud org counts
+          const snap = latestPersonalRef.current;
+          const activeOrgTxCount = Math.max(
+            activeCloudTransactions.filter((t) => !t.deletedAt).length,
+            extraTransactions?.length || 0
+          );
+          void saveCloudBackup(
+            uid,
+            {
+              transactions: snap.transactions,
+              wallets: snap.wallets,
+              categories: snap.categories,
+              budgets: snap.budgets,
+              debts: snap.debts,
+              goals: snap.goals,
+              templates: snap.templates,
+              moneyCircles: snap.moneyCircles,
+              orgWorkspaces: latestLocalOrgWorkspacesRef.current,
+              activeWorkspace: activeOrganization.id,
+              settings: snap.settings,
+              hasCompletedOnboarding: true,
+            },
+            {
+              source: 'auto',
+              recordHistory: true,
+              allowEmptyOverwrite: false,
+              activeCloudOrgCounts: {
+                transactions: activeOrgTxCount,
+                wallets: mergedWallets.length,
+              },
+            }
+          )
+            .then(() => {
+              void refreshCloudBackupHistory();
+            })
+            .catch(() => null);
+
           setCloudSyncStatus('synced');
           saveUnsyncedDirtyFlag(false);
           setHasUnsyncedLocalChanges(false);
@@ -6337,10 +6527,106 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       activeOrganization,
       isUsingLocalOrgMode,
       activeCloudWallets,
+      activeCloudTransactions,
       settings.customExchangeRates,
       refreshCloudBackupHistory,
     ]
   );
+
+  const dismissBackgroundImportCloudSync = useCallback(() => {
+    if (backgroundImportDismissTimerRef.current) {
+      clearTimeout(backgroundImportDismissTimerRef.current);
+      backgroundImportDismissTimerRef.current = null;
+    }
+    setBackgroundImportSync({
+      status: 'idle',
+      workspaceId: null,
+      processed: 0,
+      total: 0,
+      percent: 0,
+      error: null,
+    });
+  }, []);
+
+  const startBackgroundImportCloudSync = useCallback(
+    (workspaceId: string, createdTransactions: Transaction[]) => {
+      if (!createdTransactions || createdTransactions.length === 0) return;
+      if (backgroundImportDismissTimerRef.current) {
+        clearTimeout(backgroundImportDismissTimerRef.current);
+        backgroundImportDismissTimerRef.current = null;
+      }
+
+      const total = createdTransactions.length;
+      pendingBackgroundImportRef.current = { workspaceId, createdTransactions };
+      setBackgroundImportSync({
+        status: 'syncing',
+        workspaceId,
+        processed: 0,
+        total,
+        percent: 2,
+        error: null,
+      });
+
+      void (async () => {
+        const res = await syncWorkspaceBackupNow(workspaceId, createdTransactions, {
+          onProgress: (processed, tot) => {
+            const safeTotal = Math.max(1, tot || total);
+            const safeProcessed = Math.min(safeTotal, Math.max(0, processed));
+            const pct = Math.min(99, Math.max(2, Math.round((safeProcessed / safeTotal) * 100)));
+            setBackgroundImportSync((prev) =>
+              prev.status === 'syncing'
+                ? {
+                    ...prev,
+                    processed: safeProcessed,
+                    total: safeTotal,
+                    percent: pct,
+                  }
+                : prev
+            );
+          },
+        });
+
+        if (res.ok) {
+          pendingBackgroundImportRef.current = null;
+          setBackgroundImportSync({
+            status: 'synced',
+            workspaceId,
+            processed: total,
+            total,
+            percent: 100,
+            error: null,
+          });
+          backgroundImportDismissTimerRef.current = setTimeout(() => {
+            setBackgroundImportSync((prev) =>
+              prev.status === 'synced'
+                ? {
+                    status: 'idle',
+                    workspaceId: null,
+                    processed: 0,
+                    total: 0,
+                    percent: 0,
+                    error: null,
+                  }
+                : prev
+            );
+          }, 6000);
+        } else {
+          setBackgroundImportSync((prev) => ({
+            ...prev,
+            status: 'error',
+            error: res.error || 'تعذرت المزامنة مع السحابة. بياناتك محفوظة محلياً بأمان.',
+          }));
+        }
+      })();
+    },
+    [syncWorkspaceBackupNow]
+  );
+
+  const retryBackgroundImportCloudSync = useCallback(() => {
+    const pending = pendingBackgroundImportRef.current;
+    if (!pending) return;
+    startBackgroundImportCloudSync(pending.workspaceId, pending.createdTransactions);
+  }, [startBackgroundImportCloudSync]);
 
   const importTransactionsBatch = useCallback(
     async (
@@ -8700,6 +8986,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       pendingApprovalsCount,
       switchWorkspace,
       createOrganization,
+      upgradeLocalOrgToCloud,
       joinOrganizationByCode,
       pendingJoinCode,
       clearPendingJoinCode,
@@ -8866,6 +9153,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       importTransactionsBatch,
       importSpreadsheetBatchLocally,
       syncWorkspaceBackupNow,
+      backgroundImportSync,
+      startBackgroundImportCloudSync,
+      retryBackgroundImportCloudSync,
+      dismissBackgroundImportCloudSync,
       updateTransaction,
       deleteTransaction,
       deleteSelectedTransactions,
@@ -8965,6 +9256,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       pendingApprovalsCount,
       switchWorkspace,
       createOrganization,
+      upgradeLocalOrgToCloud,
       joinOrganizationByCode,
       pendingJoinCode,
       clearPendingJoinCode,
@@ -9099,6 +9391,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       importTransactionsBatch,
       importSpreadsheetBatchLocally,
       syncWorkspaceBackupNow,
+      backgroundImportSync,
+      startBackgroundImportCloudSync,
+      retryBackgroundImportCloudSync,
+      dismissBackgroundImportCloudSync,
       updateTransaction,
       deleteTransaction,
       deleteSelectedTransactions,

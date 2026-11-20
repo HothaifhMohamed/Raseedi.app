@@ -492,3 +492,190 @@ export function reconcileWorkspaceTransactions(
 
   return sortTransactionsDescending(Array.from(byId.values()));
 }
+
+/**
+ * Detects Firestore offline / transient server-unreachable errors, including
+ * `getDocsFromServer` / `getDocFromServer` failures when the Firestore transport
+ * is connecting or offline ("Failed to get documents from server...").
+ */
+export function isFirestoreServerFetchOfflineError(err: unknown): boolean {
+  if (!err) return false;
+  const code =
+    typeof err === 'object' && 'code' in err
+      ? String((err as { code?: unknown }).code || '').toLowerCase()
+      : '';
+  const msg =
+    err instanceof Error
+      ? err.message
+      : typeof err === 'string'
+      ? err
+      : typeof err === 'object' && 'message' in err
+      ? String((err as { message?: unknown }).message || '')
+      : String(err);
+  const lower = msg.toLowerCase();
+  return (
+    code === 'unavailable' ||
+    lower.includes('client is offline') ||
+    lower.includes('offline') ||
+    lower.includes('failed to get documents from server') ||
+    lower.includes('failed to get document from server') ||
+    lower.includes('failed to get document because the client is offline') ||
+    lower.includes('could not reach cloud firestore backend')
+  );
+}
+
+export const FIRESTORE_FAST_BATCH_SIZE = 350;
+export const FIRESTORE_BATCH_CONCURRENCY = 3;
+
+export function isRetryableFirestoreWriteError(err: unknown): boolean {
+  if (!err) return false;
+  const code =
+    typeof err === 'object' && 'code' in err
+      ? String((err as { code?: unknown }).code || '').toLowerCase()
+      : '';
+  if (
+    code === 'permission-denied' ||
+    code === 'invalid-argument' ||
+    code === 'unauthenticated' ||
+    code === 'failed-precondition' ||
+    code === 'not-found'
+  ) {
+    return false;
+  }
+  if (
+    code === 'unavailable' ||
+    code === 'deadline-exceeded' ||
+    code === 'aborted' ||
+    code === 'resource-exhausted' ||
+    code === 'internal' ||
+    code === 'unknown'
+  ) {
+    return true;
+  }
+  const msg =
+    err instanceof Error
+      ? err.message
+      : typeof err === 'string'
+      ? err
+      : typeof err === 'object' && 'message' in err
+      ? String((err as { message?: unknown }).message || '')
+      : String(err);
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes('unavailable') ||
+    lower.includes('deadline') ||
+    lower.includes('timeout') ||
+    lower.includes('timed out') ||
+    lower.includes('network') ||
+    lower.includes('failed to fetch') ||
+    lower.includes('aborted') ||
+    lower.includes('resource-exhausted') ||
+    lower.includes('quota') ||
+    lower.includes('offline')
+  );
+}
+
+export interface ResilientBatchCommitOptions<T> {
+  items: readonly T[];
+  batchSize?: number;
+  concurrency?: number;
+  maxRetries?: number;
+  baseDelayMs?: number;
+  commitChunk: (chunk: T[], batchIndex: number, totalBatches: number) => Promise<void>;
+  onProgress?: (processed: number, total: number) => void;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export interface ResilientBatchCommitResult {
+  total: number;
+  committed: number;
+  batches: number;
+  retries: number;
+}
+
+const defaultSleep = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+/**
+ * Executes Firestore WriteBatch commits across chunked items using bounded
+ * parallelism (default 3 concurrent batches of 350 items) and automatic
+ * exponential backoff retries for transient network/Firestore errors.
+ */
+export async function runResilientBatchCommits<T>(
+  options: ResilientBatchCommitOptions<T>
+): Promise<ResilientBatchCommitResult> {
+  const {
+    items,
+    batchSize = FIRESTORE_FAST_BATCH_SIZE,
+    concurrency = FIRESTORE_BATCH_CONCURRENCY,
+    maxRetries = 3,
+    baseDelayMs = 400,
+    commitChunk,
+    onProgress,
+    sleep = defaultSleep,
+  } = options;
+
+  const total = items.length;
+  if (total === 0) {
+    return { total: 0, committed: 0, batches: 0, retries: 0 };
+  }
+
+  const chunks = chunkArray(items, batchSize);
+  const totalBatches = chunks.length;
+  const workerCount = Math.max(1, Math.min(Math.floor(concurrency) || 1, totalBatches));
+  const safeMaxRetries = Math.max(0, Math.floor(maxRetries));
+
+  let nextBatchIndex = 0;
+  let committed = 0;
+  let retries = 0;
+  let firstError: unknown = null;
+
+  const worker = async () => {
+    while (true) {
+      if (firstError !== null) return;
+      const currentIndex = nextBatchIndex++;
+      if (currentIndex >= totalBatches) return;
+
+      const chunk = chunks[currentIndex];
+      let attempt = 0;
+
+      while (true) {
+        try {
+          await commitChunk(chunk, currentIndex, totalBatches);
+          committed = Math.min(total, committed + chunk.length);
+          onProgress?.(committed, total);
+          break;
+        } catch (err) {
+          if (attempt < safeMaxRetries && isRetryableFirestoreWriteError(err)) {
+            attempt += 1;
+            retries += 1;
+            const delay = baseDelayMs * Math.pow(2, attempt - 1);
+            await sleep(delay);
+            continue;
+          }
+          if (firstError === null) {
+            firstError = err;
+          }
+          return;
+        }
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  if (firstError !== null) {
+    throw firstError;
+  }
+
+  return {
+    total,
+    committed,
+    batches: totalBatches,
+    retries,
+  };
+}
+
+

@@ -38,7 +38,7 @@ import {
   parseImportFileBufferAsync,
   autoDetectCsvMapping,
   mapCsvRowsToTransactionsChunked,
-  commitImportedTransactionsWithCloudSync,
+  buildImportedTransactionsPayloadChunked,
   CsvColumnMapping,
   CsvImportMappingResult,
 } from '../../services/csvImport';
@@ -98,6 +98,10 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     updateSettings,
     importSpreadsheetBatchLocally,
     syncWorkspaceBackupNow,
+    backgroundImportSync,
+    startBackgroundImportCloudSync,
+    retryBackgroundImportCloudSync,
+    dismissBackgroundImportCloudSync,
     t,
     isRTL,
   } = useApp();
@@ -835,49 +839,75 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     const skippedDup = skipDuplicates ? csvPreviewResult.duplicateCount : 0;
     const createdWalletsCount = readyWalletsToCreate.length;
     const createdCatsCount = readyCategoriesToCreate.length;
-    const hasCloudSync = Boolean(user?.isLoggedIn);
 
     setIsImportingCsv(true);
     setMessage(null);
+    // Stages 2 & 3 run locally with a live progress bar; Stage 4 hands off to non-blocking background cloud sync
+    const shouldBackgroundCloudSync = Boolean(user?.isLoggedIn && isOnline);
     setImportProgress(
       buildImportProgressState({
         stage: 'validating',
         processed: 0,
         total: rowsReadyToImport.length,
-        hasCloudSync,
+        hasCloudSync: false,
       })
     );
     try {
-      const result = await commitImportedTransactionsWithCloudSync({
+      const payload = await buildImportedTransactionsPayloadChunked({
         rows: rowsReadyToImport,
         existingWallets: wallets,
         newWallets: readyWalletsToCreate,
-        newCategories: readyCategoriesToCreate,
         fallbackWalletId: targetWalletId,
         defaultCurrency: importDefaultCurrency,
         workspaceId: activeWorkspace,
-        hasCloudSync,
-        onProgress: (state) => {
-          setImportProgress(state);
+        onProgress: (processed, total) => {
+          setImportProgress(
+            buildImportProgressState({
+              stage: 'validating',
+              processed,
+              total,
+              hasCloudSync: false,
+            })
+          );
         },
-        persistImportLocally: async ({ transactions: txs, newWallets, newCategories, onProgress }) => {
-          const localRes = await importSpreadsheetBatchLocally(txs, {
-            newWallets,
-            newCategories,
-            onProgress,
-          });
-          return {
-            importedCount: localRes.importedCount,
-            createdTransactions: localRes.createdTransactions,
-          };
-        },
-        syncToCloud: user?.isLoggedIn
-          ? async ({ workspaceId: wsId, createdTransactions, onProgress }) =>
-              syncWorkspaceBackupNow(wsId, createdTransactions, { onProgress })
-          : undefined,
       });
 
-      if (result.importedCount <= 0) {
+      if (payload.transactions.length === 0) {
+        setImportProgress(null);
+        setMessage({
+          text: isRTL
+            ? 'لم يتم العثور على معاملات صالحة للاستيراد.'
+            : 'No valid transactions found to import.',
+          error: true,
+        });
+        return;
+      }
+
+      setImportProgress(
+        buildImportProgressState({
+          stage: 'saving_local',
+          processed: 0,
+          total: payload.transactions.length,
+          hasCloudSync: false,
+        })
+      );
+
+      const localRes = await importSpreadsheetBatchLocally(payload.transactions, {
+        newWallets: readyWalletsToCreate,
+        newCategories: readyCategoriesToCreate,
+        onProgress: (processed, total) => {
+          setImportProgress(
+            buildImportProgressState({
+              stage: 'saving_local',
+              processed,
+              total,
+              hasCloudSync: false,
+            })
+          );
+        },
+      });
+
+      if (localRes.importedCount <= 0) {
         setImportProgress(null);
         setMessage({
           text: isRTL
@@ -905,25 +935,17 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
       const extrasAr = extraPartsAr.length > 0 ? ` (${extraPartsAr.join(' • ')})` : '';
       const extrasEn = extraPartsEn.length > 0 ? ` (${extraPartsEn.join(' • ')})` : '';
 
-      // Clear preview table once persisted locally so duplicate clicks can't re-insert the same file
+      // Clear preview & unlock modal immediately after local save completes
       resetImportPreviewState();
-      setImportProgress((prev) =>
-        prev
-          ? {
-              ...prev,
-              active: false,
-              percent: 100,
-              processed: result.importedCount,
-              total: result.importedCount,
-            }
-          : null
-      );
+      setImportProgress(null);
 
-      if (result.cloudSynced) {
+      if (shouldBackgroundCloudSync) {
+        // Non-blocking Stage 4: upload batches in the background while user works freely
+        startBackgroundImportCloudSync(localRes.workspaceId, localRes.createdTransactions);
         setMessage({
           text: isRTL
-            ? `تم استيراد ورفع ${result.importedCount} معاملة إلى السحابة بنجاح!${extrasAr}`
-            : `Successfully imported and synced ${result.importedCount} transactions to Cloud!${extrasEn}`,
+            ? `تم حفظ ${localRes.importedCount.toLocaleString('en-US')} معاملة محلياً بنجاح! جاري المزامنة مع السحابة في الخلفية ويمكنك إغلاق النافذة ومتابعة العمل فوراً.${extrasAr}`
+            : `Saved ${localRes.importedCount.toLocaleString('en-US')} transactions locally! Syncing to Cloud in the background — you can close this window and keep working right away.${extrasEn}`,
         });
         return;
       }
@@ -931,15 +953,10 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
       if (user?.isLoggedIn) {
         setMessage({
           text: isRTL
-            ? `تم حفظ ${result.importedCount} معاملة محلياً على هذا الجهاز فقط، لكن تعذر الرفع إلى السحابة (${
-                result.error || 'خطأ في الاتصال'
-              }).${extrasAr}`
-            : `Saved ${result.importedCount} transactions locally ONLY, but Cloud upload failed (${
-                result.error || 'connection error'
-              }).${extrasEn}`,
-          error: true,
+            ? `تم حفظ ${localRes.importedCount.toLocaleString('en-US')} معاملة محلياً على هذا الجهاز (لا يوجد اتصال بالإنترنت حالياً). يمكنك رفعها للسحابة فور عودة الاتصال.${extrasAr}`
+            : `Saved ${localRes.importedCount.toLocaleString('en-US')} transactions locally (currently offline). Retry Cloud upload when back online.${extrasEn}`,
           localOnly: true,
-          retryWorkspaceId: result.workspaceId,
+          retryWorkspaceId: localRes.workspaceId,
         });
         return;
       }
@@ -947,8 +964,8 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
       // Guest mode: strictly report local-only save (never falsely claim Cloud backup)
       setMessage({
         text: isRTL
-          ? `تم حفظ ${result.importedCount} معاملة محلياً على المتصفح فقط (غير مرفوعة للسحابة لعدم تسجيل الدخول).${extrasAr}`
-          : `Saved ${result.importedCount} transactions locally only (not backed up to Cloud — sign in with Google to sync).${extrasEn}`,
+          ? `تم حفظ ${localRes.importedCount.toLocaleString('en-US')} معاملة محلياً على المتصفح فقط (غير مرفوعة للسحابة لعدم تسجيل الدخول).${extrasAr}`
+          : `Saved ${localRes.importedCount.toLocaleString('en-US')} transactions locally only (not backed up to Cloud — sign in with Google to sync).${extrasEn}`,
         localOnly: true,
       });
     } catch (err) {
@@ -1156,6 +1173,92 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                     ? 'يرجى عدم إغلاق الصفحة حتى اكتمال الحفظ والمزامنة'
                     : 'Please do not close this page until saving and syncing complete'}
                 </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Non-blocking Background Cloud Sync Status (Stage 4) */}
+        {backgroundImportSync.status !== 'idle' && (
+          <div
+            data-testid="backup-modal-bg-sync-card"
+            className={`p-3 rounded-xl border space-y-2 shrink-0 ${
+              backgroundImportSync.status === 'error'
+                ? 'bg-[var(--color-expense)]/10 border-[var(--color-expense)]/25'
+                : backgroundImportSync.status === 'synced'
+                ? 'bg-[var(--color-income)]/10 border-[var(--color-income)]/25'
+                : 'bg-[var(--color-accent)]/8 border-[var(--color-accent)]/25'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 font-bold text-[var(--color-ink)] min-w-0">
+                {backgroundImportSync.status === 'syncing' ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-[var(--color-accent)] shrink-0" />
+                ) : backgroundImportSync.status === 'synced' ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-[var(--color-income)] shrink-0" />
+                ) : (
+                  <AlertCircle className="w-3.5 h-3.5 text-[var(--color-expense)] shrink-0" />
+                )}
+                <span className="truncate">
+                  {backgroundImportSync.status === 'syncing'
+                    ? isRTL
+                      ? `مزامنة الخلفية مع السحابة: ${backgroundImportSync.processed.toLocaleString('en-US')} من ${backgroundImportSync.total.toLocaleString('en-US')} معاملة`
+                      : `Background Cloud Sync: ${backgroundImportSync.processed.toLocaleString('en-US')} / ${backgroundImportSync.total.toLocaleString('en-US')}`
+                    : backgroundImportSync.status === 'synced'
+                    ? isRTL
+                      ? `اكتملت مزامنة ${backgroundImportSync.total.toLocaleString('en-US')} معاملة مع السحابة!`
+                      : `Synced ${backgroundImportSync.total.toLocaleString('en-US')} transactions to Cloud!`
+                    : backgroundImportSync.error ||
+                      (isRTL ? 'تعذرت المزامنة مع السحابة.' : 'Cloud sync failed.')}
+                </span>
+              </div>
+              <span className="text-xs font-extrabold text-[var(--color-accent)] num-tabular shrink-0">
+                {backgroundImportSync.percent}%
+              </span>
+            </div>
+
+            {backgroundImportSync.status === 'syncing' && (
+              <>
+                <div className="w-full h-2 rounded-full bg-[var(--color-surface)] border border-[var(--color-line)] overflow-hidden">
+                  <div
+                    className="h-full bg-[var(--color-accent)] transition-all duration-300 ease-out rounded-full"
+                    style={{ width: `${Math.max(4, Math.min(100, backgroundImportSync.percent))}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--color-muted)]">
+                  <span>
+                    {isRTL
+                      ? 'يمكنك إغلاق هذه النافذة ومتابعة العمل بينما تستمر المزامنة.'
+                      : 'You can close this window and continue working while sync runs.'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleSafeClose}
+                    className="px-2.5 py-1 rounded-md bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-ink)] font-semibold shrink-0 hover:border-[var(--color-accent)]"
+                  >
+                    {isRTL ? 'إغلاق والمتابعة' : 'Close & Continue'}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {backgroundImportSync.status === 'error' && (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={retryBackgroundImportCloudSync}
+                  className="px-3 py-1.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-[11px] font-bold flex items-center gap-1.5"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>{isRTL ? 'إعادة المحاولة الآن' : 'Retry Now'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={dismissBackgroundImportCloudSync}
+                  className="px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-muted)] text-[11px] font-semibold"
+                >
+                  {isRTL ? 'إخفاء' : 'Dismiss'}
+                </button>
               </div>
             )}
           </div>
@@ -1435,10 +1538,17 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                                     </span>
                                   )}
                                 </div>
-                                <div className="text-[10px] text-[var(--color-muted)]">
-                                  {isRTL
-                                    ? `${entry.storedTransactionsCount} معاملة • ${entry.walletsCount} محفظة`
-                                    : `${entry.storedTransactionsCount} tx • ${entry.walletsCount} wallets`}
+                                <div className="text-[10px] text-[var(--color-muted)] num-tabular">
+                                  {(() => {
+                                    const displayTx = Math.max(
+                                      Number(entry.totalTransactions || 0),
+                                      Number(entry.storedTransactionsCount || 0)
+                                    );
+                                    const displayWallets = Math.max(0, Number(entry.walletsCount || 0));
+                                    return isRTL
+                                      ? `${displayTx.toLocaleString('en-US')} معاملة • ${displayWallets.toLocaleString('en-US')} محفظة`
+                                      : `${displayTx.toLocaleString('en-US')} tx • ${displayWallets.toLocaleString('en-US')} wallets`;
+                                  })()}
                                 </div>
                               </div>
                               <button

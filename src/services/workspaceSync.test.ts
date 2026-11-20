@@ -9,6 +9,7 @@ import {
   getWorkspaceTransactionDocPath,
   getWorkspaceTransactionsPath,
   isActiveWorkspaceTransaction,
+  isFirestoreServerFetchOfflineError,
   isTransactionInWorkspace,
   normalizeWorkspaceId,
   reconcileWorkspaceTransactions,
@@ -340,6 +341,26 @@ describe('workspaceSync unified path and workspace isolation', () => {
         isCloudSyncing: false,
       }),
       { canExecute: true, reason: null }
+    );
+  });
+
+  it('detects Firestore getDocsFromServer offline/cache-fallback errors without misclassifying permission errors', () => {
+    const serverSourceErr = Object.assign(
+      new Error(
+        'Failed to get documents from server. (However, these documents may exist in the local cache. Run again without setting source to "server" to retrieve the cached documents.)'
+      ),
+      { code: 'unavailable' }
+    );
+    assert.equal(isFirestoreServerFetchOfflineError(serverSourceErr), true);
+    assert.equal(
+      isFirestoreServerFetchOfflineError(
+        new Error('Failed to get documents from server. (However, these documents may exist in the local cache.)')
+      ),
+      true
+    );
+    assert.equal(
+      isFirestoreServerFetchOfflineError({ code: 'permission-denied', message: 'Missing or insufficient permissions.' }),
+      false
     );
   });
 });

@@ -132,6 +132,7 @@ export const OrganizationHubModal: React.FC = () => {
     addTransaction,
     updateOrganizationSettings,
     lockAccountingPeriod,
+    upgradeLocalOrgToCloud,
     setIsUpgradeModalOpen,
     user,
     settings,
@@ -197,6 +198,8 @@ export const OrganizationHubModal: React.FC = () => {
   const [confirmQuickDeleteOpen, setConfirmQuickDeleteOpen] = useState(false);
   const [quickDeleteError, setQuickDeleteError] = useState<string | null>(null);
   const [isDeletingOrg, setIsDeletingOrg] = useState(false);
+  const [isUpgradingOrgToCloud, setIsUpgradingOrgToCloud] = useState(false);
+  const [upgradeOrgProgress, setUpgradeOrgProgress] = useState<{ done: number; total: number } | null>(null);
   const [teamFeedback, setTeamFeedback] = useState<{ text: string; error?: boolean } | null>(null);
 
   const [pettyFormOpen, setPettyFormOpen] = useState(false);
@@ -1971,10 +1974,78 @@ export const OrganizationHubModal: React.FC = () => {
                   </div>
 
                   {activeOrgPermissions.isLocalOnly ? (
-                    <div className="p-2.5 rounded-lg bg-[var(--color-warning)]/12 border border-[var(--color-warning)]/30 text-[11px] text-[var(--color-warning-text)]">
-                      {isRTL
-                        ? 'هذه المؤسسة محلية على الجهاز فقط. لتفعيل إضافة أعضاء الفريق عبر البريد أو @username، سجّل الدخول بحساب Google وأنشئ مؤسسة سحابية.'
-                        : 'This is a local-only organization. Sign in with Google and use a Cloud Organization to add team members directly.'}
+                    <div className="p-3 rounded-lg bg-[var(--color-warning)]/12 border border-[var(--color-warning)]/30 space-y-2.5">
+                      <p className="text-[11px] text-[var(--color-warning-text)] leading-relaxed">
+                        {user?.isLoggedIn
+                          ? isRTL
+                            ? 'هذه المؤسسة محفوظة محلياً على الجهاز فقط. يمكنك تحويلها الآن إلى مؤسسة سحابية (Cloud Organization) بنقرة واحدة مع نقل جميع المحافظ والتصنيفات والمعاملات تلقائياً لتفعيل إضافة أعضاء الفريق عبر البريد الإلكتروني أو @username.'
+                            : 'This organization is currently saved locally only. Upgrade it to a Cloud Organization in one click (migrating all wallets, categories, and transactions) to enable adding team members by Email or @username.'
+                          : isRTL
+                          ? 'هذه المؤسسة محلية على الجهاز فقط. لتفعيل إضافة أعضاء الفريق عبر البريد أو @username، سجّل الدخول بحساب Google أولاً ثم قم بتحويل المؤسسة إلى مؤسسة سحابية.'
+                          : 'This is a local-only organization. Sign in with Google first to upgrade to a Cloud Organization and add team members directly.'}
+                      </p>
+                      {user?.isLoggedIn && activeOrganization && (
+                        <button
+                          type="button"
+                          data-testid="upgrade-local-org-to-cloud-btn"
+                          disabled={isUpgradingOrgToCloud}
+                          onClick={async () => {
+                            setIsUpgradingOrgToCloud(true);
+                            setUpgradeOrgProgress(null);
+                            setTeamFeedback(null);
+                            try {
+                              const res = await upgradeLocalOrgToCloud(
+                                activeOrganization.id,
+                                (done, total) => setUpgradeOrgProgress({ done, total })
+                              );
+                              if (!res.ok) {
+                                setTeamFeedback({
+                                  text:
+                                    res.error ||
+                                    (isRTL
+                                      ? 'تعذر تحويل المؤسسة إلى مؤسسة سحابية. تأكد من اتصالك بالإنترنت وحاول مجدداً.'
+                                      : 'Failed to upgrade organization to Cloud. Check your connection and try again.'),
+                                  error: true,
+                                });
+                              } else {
+                                setTeamFeedback({
+                                  text: isRTL
+                                    ? 'تم تحويل المؤسسة إلى مؤسسة سحابية بنجاح! يمكنك الآن إضافة أعضاء الفريق مباشرة.'
+                                    : 'Organization upgraded to Cloud successfully! You can now add team members directly.',
+                                });
+                              }
+                            } finally {
+                              setIsUpgradingOrgToCloud(false);
+                              setUpgradeOrgProgress(null);
+                            }
+                          }}
+                          className="w-full py-2.5 px-3 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center justify-center gap-2 min-h-[42px] disabled:opacity-60"
+                        >
+                          {isUpgradingOrgToCloud ? (
+                            <>
+                              <RefreshCw className="w-4 h-4 animate-spin" />
+                              <span>
+                                {upgradeOrgProgress && upgradeOrgProgress.total > 0
+                                  ? isRTL
+                                    ? `جاري التحويل للسحابة (${upgradeOrgProgress.done} / ${upgradeOrgProgress.total})...`
+                                    : `Upgrading to Cloud (${upgradeOrgProgress.done} / ${upgradeOrgProgress.total})...`
+                                  : isRTL
+                                  ? 'جاري تحويل المؤسسة إلى مؤسسة سحابية...'
+                                  : 'Upgrading to Cloud Organization...'}
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <Shield className="w-4 h-4" />
+                              <span>
+                                {isRTL
+                                  ? 'تحويل إلى مؤسسة سحابية وتفعيل إضافة الأعضاء'
+                                  : 'Upgrade to Cloud Organization & Enable Team'}
+                              </span>
+                            </>
+                          )}
+                        </button>
+                      )}
                     </div>
                   ) : (
                     <form onSubmit={handleDirectAddMember} className="space-y-2.5">

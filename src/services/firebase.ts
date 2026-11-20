@@ -72,14 +72,18 @@ import {
 import {
   buildWorkspaceTransactionRecord,
   extractTransactionFromWorkspaceDoc,
+  FIRESTORE_BATCH_CONCURRENCY,
+  FIRESTORE_FAST_BATCH_SIZE,
   FIRESTORE_IMPORT_BATCH_SIZE,
   getWorkspaceTransactionDocPath,
   getWorkspaceTransactionsPath,
   isActiveWorkspaceTransaction,
+  isFirestoreServerFetchOfflineError,
   normalizeValidFirestoreId,
   normalizeWorkspaceId,
   reconcileWorkspaceTransactions,
   resolveWorkspaceSyncPriority,
+  runResilientBatchCommits,
   shouldBlockEmptyCloudOverwrite,
   WorkspaceSyncPriority,
 } from './workspaceSync';
@@ -118,8 +122,10 @@ import {
   BackupHistoryRecord,
   BackupHistorySummary,
   buildCompactBackupHistorySnapshotJson,
+  computeBackupHistoryCounts,
   getBackupIdsToPrune,
   MAX_AUTO_CLOUD_BACKUPS,
+  reconcileBackupHistorySummary,
 } from './backupHistory';
 import {
   buildSafeCloudLastSyncedPatch,
@@ -2120,15 +2126,7 @@ export async function signOutGoogle(): Promise<void> {
 }
 
 export function isOfflineFirestoreError(err: unknown): boolean {
-  if (!err || typeof err !== 'object') return false;
-  const code = String((err as { code?: unknown }).code || '').toLowerCase();
-  const msg = String((err as { message?: unknown }).message || '').toLowerCase();
-  return (
-    code === 'unavailable' ||
-    msg.includes('client is offline') ||
-    msg.includes('offline') ||
-    msg.includes('failed to get document because the client is offline')
-  );
+  return isFirestoreServerFetchOfflineError(err);
 }
 
 async function getDocServerFirst<T>(
@@ -2231,6 +2229,7 @@ export async function saveCloudBackup(
     recordHistory?: boolean;
     allowEmptyOverwrite?: boolean;
     onProgress?: (processed: number, total: number) => void;
+    activeCloudOrgCounts?: { transactions: number; wallets: number };
   }
 ): Promise<{
   syncedAt: number;
@@ -2468,68 +2467,62 @@ export async function saveCloudBackup(
         )
       : 0;
 
-    let batch = writeBatch(db);
-    let ops = 0;
-    let batchBytes = 0;
-    let committedTxCount = 0;
     const totalChunkTxs = sanitizedTransactions.length;
-    const flushBatch = async (txsInBatch = 0) => {
-      if (ops > 0) {
-        await batch.commit();
-        committedTxCount = Math.min(totalChunkTxs, committedTxCount + txsInBatch);
-        if (options?.onProgress && totalChunkTxs > 0) {
-          options.onProgress(committedTxCount, totalChunkTxs);
-        }
-        batch = writeBatch(db);
-        ops = 0;
-        batchBytes = 0;
-      }
-    };
 
+    // Write transaction chunks concurrently with bounded parallelism & automatic retry
+    if (chunks.length > 0) {
+      const chunkEntries = chunks.map((txs, idx) => ({
+        idx,
+        txs: stripUndefinedDeep(txs),
+      }));
+      let committedTxs = 0;
+
+      await runResilientBatchCommits({
+        items: chunkEntries,
+        batchSize: 2, // 2 chunks per batch stays safely under 1.8 MB/batch
+        concurrency: FIRESTORE_BATCH_CONCURRENCY,
+        maxRetries: 3,
+        commitChunk: async (group) => {
+          const chunkBatch = writeBatch(db);
+          let groupTxCount = 0;
+          for (const item of group) {
+            const chunkRef = doc(db, 'users', uid, 'backupChunks', `chunk_${item.idx}`);
+            chunkBatch.set(
+              chunkRef,
+              {
+                uid,
+                chunkIndex: item.idx,
+                transactions: item.txs,
+                updatedAt: serverTimestamp(),
+              },
+              { merge: true }
+            );
+            groupTxCount += item.txs.length;
+          }
+          await chunkBatch.commit();
+          committedTxs = Math.min(totalChunkTxs, committedTxs + groupTxCount);
+          if (options?.onProgress && totalChunkTxs > 0) {
+            options.onProgress(committedTxs, totalChunkTxs);
+          }
+        },
+      });
+    }
+
+    // Commit backup metadata and prune any stale chunks after chunks are durably written
+    const metaBatch = writeBatch(db);
     const metaWritePayload = {
       ...metaFields,
       ...(!metaExists ? { createdAt: serverTimestamp() } : {}),
       updatedAt: serverTimestamp(),
     };
-    batch.set(metaRef, metaWritePayload, { merge: true });
-    ops += 1;
-    batchBytes += getUtf8JsonByteLength(metaFields);
-
-    let pendingBatchTxs = 0;
-    for (let idx = 0; idx < chunks.length; idx++) {
-      const cleanedChunkTxs = stripUndefinedDeep(chunks[idx]);
-      const approxChunkBytes = getUtf8JsonByteLength(cleanedChunkTxs);
-      if (ops > 0 && (ops >= 10 || batchBytes + approxChunkBytes > 3_500_000)) {
-        await flushBatch(pendingBatchTxs);
-        pendingBatchTxs = 0;
-      }
-      const chunkRef = doc(db, 'users', uid, 'backupChunks', `chunk_${idx}`);
-      batch.set(
-        chunkRef,
-        {
-          uid,
-          chunkIndex: idx,
-          transactions: cleanedChunkTxs,
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
-      ops += 1;
-      batchBytes += approxChunkBytes;
-      pendingBatchTxs += cleanedChunkTxs.length;
-    }
+    metaBatch.set(metaRef, metaWritePayload, { merge: true });
 
     for (let idx = chunks.length; idx < previousChunkCount; idx++) {
-      if (ops >= 400) {
-        await flushBatch(pendingBatchTxs);
-        pendingBatchTxs = 0;
-      }
       const staleRef = doc(db, 'users', uid, 'backupChunks', `chunk_${idx}`);
-      batch.delete(staleRef);
-      ops += 1;
+      metaBatch.delete(staleRef);
     }
 
-    await flushBatch(pendingBatchTxs);
+    await metaBatch.commit();
     if (options?.onProgress && totalChunkTxs > 0) {
       options.onProgress(totalChunkTxs, totalChunkTxs);
     }
@@ -2558,9 +2551,16 @@ export async function saveCloudBackup(
     try {
       const source = options?.source === 'manual' ? 'manual' : 'auto';
       const historyId = `${source}_${updatedAtMs}`;
+      const historyCounts = computeBackupHistoryCounts(effectiveData, {
+        extraTransactions: options?.activeCloudOrgCounts?.transactions,
+        extraWallets: options?.activeCloudOrgCounts?.wallets,
+      });
       const { snapshotJson, storedTransactionsCount } = buildCompactBackupHistorySnapshotJson({
         ...effectiveData,
         updatedAtMs,
+        ...(options?.activeCloudOrgCounts
+          ? { activeCloudOrgCounts: options.activeCloudOrgCounts }
+          : {}),
       });
 
       const historyRef = doc(db, 'users', uid, 'backupHistory', historyId);
@@ -2569,9 +2569,9 @@ export async function saveCloudBackup(
         uid,
         source,
         createdAtMs: updatedAtMs,
-        totalTransactions: (effectiveData.transactions || []).length,
+        totalTransactions: historyCounts.totalTransactions,
         storedTransactionsCount,
-        walletsCount: (effectiveData.wallets || []).length,
+        walletsCount: historyCounts.walletsCount,
         snapshotJson,
         createdAt: serverTimestamp(),
       });
@@ -2648,7 +2648,7 @@ export async function fetchCloudBackupHistory(
     return snap.docs
       .map((d) => {
         const data = d.data() as Partial<BackupHistoryRecord>;
-        return {
+        const rawSummary: BackupHistorySummary = {
           id: d.id,
           uid,
           source: (data.source === 'manual' ? 'manual' : 'auto') as 'manual' | 'auto',
@@ -2657,6 +2657,10 @@ export async function fetchCloudBackupHistory(
           storedTransactionsCount: Number(data.storedTransactionsCount || 0),
           walletsCount: Number(data.walletsCount || 0),
         };
+        return reconcileBackupHistorySummary(
+          rawSummary,
+          typeof data.snapshotJson === 'string' ? data.snapshotJson : undefined
+        );
       })
       .sort((a, b) => b.createdAtMs - a.createdAtMs)
       .slice(0, MAX_AUTO_CLOUD_BACKUPS);
@@ -2797,6 +2801,10 @@ export async function fetchCloudBackup(
       transactions: sortTransactionsDescending(legacy.transactions || []),
     };
   } catch (error) {
+    if (isOfflineFirestoreError(error)) {
+      console.warn('[fetchCloudBackup] Offline/server-unreachable notice:', error);
+      throw error;
+    }
     console.error('[fetchCloudBackup] Firestore error:', error);
     handleFirestoreError(error, OperationType.GET, metaPath);
   }
@@ -2840,6 +2848,7 @@ export async function batchUpsertWorkspaceTransactionsCloud(
   txs: Transaction[],
   options?: {
     batchSize?: number;
+    concurrency?: number;
     onProgress?: (processed: number, total: number) => void;
   }
 ): Promise<number> {
@@ -2851,43 +2860,37 @@ export async function batchUpsertWorkspaceTransactionsCloud(
   const colPath = getWorkspaceTransactionsPath(uid, safeWs);
   const batchLimit = Math.max(
     1,
-    Math.min(450, Math.floor(options?.batchSize ?? FIRESTORE_IMPORT_BATCH_SIZE))
+    Math.min(450, Math.floor(options?.batchSize ?? FIRESTORE_FAST_BATCH_SIZE))
   );
   const validTxs = txs.filter((tx): tx is Transaction => Boolean(tx && tx.id));
   const total = validTxs.length;
   if (total === 0) return 0;
 
   try {
-    let batch = writeBatch(db);
-    let ops = 0;
-    let written = 0;
-
-    for (const tx of validTxs) {
-      const { record } = buildWorkspaceTransactionRecord(uid, safeWs, tx);
-      const ref = doc(db, 'users', uid, 'workspaces', safeWs, 'transactions', record.id);
-      batch.set(
-        ref,
-        {
-          ...record,
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
-      ops += 1;
-      written += 1;
-      if (ops >= batchLimit) {
+    const result = await runResilientBatchCommits({
+      items: validTxs,
+      batchSize: batchLimit,
+      concurrency: options?.concurrency ?? FIRESTORE_BATCH_CONCURRENCY,
+      maxRetries: 3,
+      onProgress: options?.onProgress,
+      commitChunk: async (chunk) => {
+        const batch = writeBatch(db);
+        for (const tx of chunk) {
+          const { record } = buildWorkspaceTransactionRecord(uid, safeWs, tx);
+          const ref = doc(db, 'users', uid, 'workspaces', safeWs, 'transactions', record.id);
+          batch.set(
+            ref,
+            {
+              ...record,
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
+        }
         await batch.commit();
-        options?.onProgress?.(written, total);
-        batch = writeBatch(db);
-        ops = 0;
-      }
-    }
-
-    if (ops > 0) {
-      await batch.commit();
-      options?.onProgress?.(written, total);
-    }
-    return written;
+      },
+    });
+    return result.committed;
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, colPath);
   }
@@ -2966,6 +2969,13 @@ export async function fetchWorkspaceTransactionsCloud(
     }
     return sortTransactionsDescending(items);
   } catch (error) {
+    if (isOfflineFirestoreError(error)) {
+      if (!forceServer) {
+        return [];
+      }
+      console.warn(`[fetchWorkspaceTransactionsCloud] (${colPath}) server unreachable:`, error);
+      throw error;
+    }
     console.error(`[fetchWorkspaceTransactionsCloud] (${colPath}) error:`, error);
     handleFirestoreError(error, OperationType.LIST, colPath);
   }

@@ -216,6 +216,42 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidOrgOwnerMemberCreate(data, memberUid) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'status', 'joinedAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid',
+          'email',
+          'displayName',
+          'username',
+          'role',
+          'department',
+          'spendingLimit',
+          'spendingLimitMinor',
+          'status',
+          'joinedAt',
+          'updatedAt'
+        ])
+        && data.uid is string
+        && data.uid == memberUid
+        && data.uid == request.auth.uid
+        && isValidId(data.uid)
+        && data.email is string
+        && data.email.size() > 0
+        && data.email.size() <= 254
+        && data.displayName is string
+        && data.displayName.size() > 0
+        && data.displayName.size() <= 120
+        && (!('username' in data) || data.username == null || isValidUsername(data.username))
+        && data.role == 'owner'
+        && (!('department' in data) || data.department == null || (data.department is string && data.department.size() <= 80))
+        && (!('spendingLimit' in data) || data.spendingLimit == null)
+        && (!('spendingLimitMinor' in data) || data.spendingLimitMinor == null)
+        && data.status == 'active'
+        && data.joinedAt is number
+        && data.joinedAt > 0
+        && data.updatedAt is timestamp;
+    }
+
     function isValidOrgRefCreate(data, orgId) {
       return data.keys().hasAll(['orgId', 'orgName', 'role', 'status', 'currency', 'joinedAt'])
         && data.keys().hasOnly(['orgId', 'orgName', 'role', 'status', 'currency', 'joinedAt'])
@@ -232,6 +268,122 @@ service cloud.firestore {
         && data.currency.size() <= 8
         && data.joinedAt is number
         && data.joinedAt > 0;
+    }
+
+    function isValidOrgOwnerRefCreate(data, orgId) {
+      return data.keys().hasAll(['orgId', 'orgName', 'role', 'status', 'currency', 'joinedAt'])
+        && data.keys().hasOnly(['orgId', 'orgName', 'role', 'status', 'currency', 'joinedAt'])
+        && data.orgId is string
+        && data.orgId == orgId
+        && isValidId(data.orgId)
+        && data.orgName is string
+        && data.orgName.size() > 0
+        && data.orgName.size() <= 120
+        && data.role == 'owner'
+        && data.status == 'active'
+        && data.currency is string
+        && data.currency.size() > 0
+        && data.currency.size() <= 8
+        && data.joinedAt is number
+        && data.joinedAt > 0;
+    }
+
+    function isValidOrgCreate(data, orgId) {
+      return data.keys().hasAll([
+        'id',
+        'name',
+        'currency',
+        'vatRate',
+        'approvalThreshold',
+        'ownerUid',
+        'planTier',
+        'billingCycle',
+        'seatLimit',
+        'extraSeats',
+        'createdAt',
+        'updatedAt'
+      ])
+        && data.keys().hasOnly([
+          'id',
+          'name',
+          'currency',
+          'industry',
+          'vatRate',
+          'taxNumber',
+          'approvalThreshold',
+          'lockedUntilDate',
+          'ownerUid',
+          'planTier',
+          'billingCycle',
+          'expiresAt',
+          'seatLimit',
+          'extraSeats',
+          'aiScansUsed',
+          'aiScansMonth',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.id is string
+        && data.id == orgId
+        && isValidId(data.id)
+        && data.name is string
+        && data.name.size() > 0
+        && data.name.size() <= 120
+        && data.currency is string
+        && data.currency.size() > 0
+        && data.currency.size() <= 8
+        && (!('industry' in data) || data.industry in ['retail', 'restaurant', 'tech', 'construction', 'medical', 'general'])
+        && data.vatRate is number
+        && data.vatRate >= 0
+        && data.vatRate <= 100
+        && (!('taxNumber' in data) || data.taxNumber == null || (data.taxNumber is string && data.taxNumber.size() <= 64))
+        && data.approvalThreshold is number
+        && data.approvalThreshold >= 0
+        && data.approvalThreshold <= 1000000000
+        && (!('lockedUntilDate' in data) || data.lockedUntilDate == null || (data.lockedUntilDate is string && data.lockedUntilDate.size() <= 16))
+        && data.ownerUid is string
+        && data.ownerUid == request.auth.uid
+        && isValidId(data.ownerUid)
+        && data.seatLimit is int
+        && data.seatLimit >= 1
+        && data.seatLimit <= 5
+        && data.extraSeats is int
+        && data.extraSeats == 0
+        && (!('aiScansUsed' in data) || (data.aiScansUsed is int && data.aiScansUsed == 0))
+        && (!('aiScansMonth' in data) || (data.aiScansMonth is string && data.aiScansMonth.size() <= 16))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidOrgEntitlementOnCreate(data) {
+      let u = get(/databases/$(database)/documents/users/$(request.auth.uid));
+      let uActive = u != null
+        && (u.data.get('isPro', false) == true || u.data.get('proActive', false) == true)
+        && (
+          u.data.get('planTier', 'free') in ['business_pro', 'business']
+          || u.data.get('proPlan', 'free') in ['business_monthly', 'business_yearly']
+        );
+      let uExp = (u != null && 'proExpiresAt' in u.data && u.data.proExpiresAt is number)
+        ? u.data.proExpiresAt
+        : ((u != null && 'proExpiresAt' in u.data && u.data.proExpiresAt is timestamp)
+          ? u.data.proExpiresAt.toMillis()
+          : ((u != null && 'expiresAt' in u.data && u.data.expiresAt is number)
+            ? u.data.expiresAt
+            : ((u != null && 'expiresAt' in u.data && u.data.expiresAt is timestamp)
+              ? u.data.expiresAt.toMillis()
+              : null)));
+      let uNotExpired = uExp == null || request.time.toMillis() <= uExp + 7 * 86400000;
+      return (
+        data.planTier == 'free'
+        && data.billingCycle == 'free'
+        && (!('expiresAt' in data) || data.expiresAt == null)
+      ) || (
+        uActive
+        && uNotExpired
+        && data.planTier == 'business_pro'
+        && data.billingCycle in ['monthly', 'yearly', 'lifetime', 'trial', 'code']
+        && data.get('expiresAt', null) == uExp
+      );
     }
 
     function isValidUserProfileCreate(data, userId) {
@@ -786,10 +938,21 @@ service cloud.firestore {
         allow create: if isValidId(userId)
           && isValidId(orgId)
           && isVerifiedUser()
-          && isOrgOwnerOrAdmin(orgId)
-          && isOrgWritable(orgId)
-          && isValidOrgRefCreate(incoming(), orgId)
-          && existsAfter(/databases/$(database)/documents/organizations/$(orgId)/members/$(userId));
+          && existsAfter(/databases/$(database)/documents/organizations/$(orgId)/members/$(userId))
+          && (
+            (
+              isOrgOwnerOrAdmin(orgId)
+              && isOrgWritable(orgId)
+              && isValidOrgRefCreate(incoming(), orgId)
+            )
+            ||
+            (
+              userId == request.auth.uid
+              && isValidOrgOwnerRefCreate(incoming(), orgId)
+              && !exists(/databases/$(database)/documents/organizations/$(orgId))
+              && getAfter(/databases/$(database)/documents/organizations/$(orgId)).data.ownerUid == request.auth.uid
+            )
+          );
         allow update: if isValidId(userId)
           && isValidId(orgId)
           && isVerifiedUser()
@@ -802,11 +965,27 @@ service cloud.firestore {
         allow delete: if isValidId(userId)
           && isValidId(orgId)
           && isVerifiedUser()
-          && isOrgOwnerOrAdmin(orgId)
-          && isOrgWritable(orgId)
-          && userId != request.auth.uid
-          && existing().role != 'owner'
-          && !existsAfter(/databases/$(database)/documents/organizations/$(orgId)/members/$(userId));
+          && (
+            (
+              isOrgOwnerOrAdmin(orgId)
+              && isOrgWritable(orgId)
+              && userId != request.auth.uid
+              && existing().role != 'owner'
+              && !existsAfter(/databases/$(database)/documents/organizations/$(orgId)/members/$(userId))
+            )
+            ||
+            (
+              userId == request.auth.uid
+              && existing().role == 'owner'
+              && (
+                !exists(/databases/$(database)/documents/organizations/$(orgId))
+                || (
+                  orgDoc(orgId).data.ownerUid == request.auth.uid
+                  && !existsAfter(/databases/$(database)/documents/organizations/$(orgId))
+                )
+              )
+            )
+          );
       }
 
       // Chunked personal backup metadata (users/{uid}/backup/meta)
@@ -958,8 +1137,18 @@ service cloud.firestore {
     match /organizations/{orgId} {
       allow get: if isValidId(orgId) && (isOrgMemberActive(orgId) || isAdmin());
       allow list: if isAdmin();
-      // Organization lifecycle (create, delete, ownership) is server-only
-      allow create, delete: if false;
+      // Verified users can atomically create a Cloud Organization (entitlement strictly checked against users/{uid})
+      allow create: if isValidId(orgId)
+        && isVerifiedUser()
+        && isValidOrgCreate(incoming(), orgId)
+        && isValidOrgEntitlementOnCreate(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid))
+        && existsAfter(/databases/$(database)/documents/users/$(request.auth.uid)/orgRefs/$(orgId));
+      allow delete: if isValidId(orgId)
+        && isVerifiedUser()
+        && existing().ownerUid == request.auth.uid;
       allow update: if isValidId(orgId)
         && incoming().id == existing().id
         && incoming().ownerUid == existing().ownerUid
@@ -1003,11 +1192,22 @@ service cloud.firestore {
         allow create: if isValidId(orgId)
           && isValidId(memberUid)
           && isVerifiedUser()
-          && isOrgOwnerOrAdmin(orgId)
-          && isOrgWritable(orgId)
-          && isValidOrgMemberCreate(incoming(), memberUid)
           && incoming().updatedAt == request.time
-          && existsAfter(/databases/$(database)/documents/users/$(memberUid)/orgRefs/$(orgId));
+          && existsAfter(/databases/$(database)/documents/users/$(memberUid)/orgRefs/$(orgId))
+          && (
+            (
+              isOrgOwnerOrAdmin(orgId)
+              && isOrgWritable(orgId)
+              && isValidOrgMemberCreate(incoming(), memberUid)
+            )
+            ||
+            (
+              memberUid == request.auth.uid
+              && isValidOrgOwnerMemberCreate(incoming(), memberUid)
+              && !exists(/databases/$(database)/documents/organizations/$(orgId))
+              && getAfter(/databases/$(database)/documents/organizations/$(orgId)).data.ownerUid == request.auth.uid
+            )
+          );
         allow update: if isValidId(orgId)
           && isValidId(memberUid)
           && isVerifiedUser()
@@ -1031,11 +1231,23 @@ service cloud.firestore {
         allow delete: if isValidId(orgId)
           && isValidId(memberUid)
           && isVerifiedUser()
-          && isOrgOwnerOrAdmin(orgId)
-          && isOrgWritable(orgId)
-          && memberUid != request.auth.uid
-          && existing().role != 'owner'
-          && !existsAfter(/databases/$(database)/documents/users/$(memberUid)/orgRefs/$(orgId));
+          && (
+            (
+              isOrgOwnerOrAdmin(orgId)
+              && isOrgWritable(orgId)
+              && memberUid != request.auth.uid
+              && existing().role != 'owner'
+              && !existsAfter(/databases/$(database)/documents/users/$(memberUid)/orgRefs/$(orgId))
+            )
+            ||
+            (
+              memberUid == request.auth.uid
+              && existing().role == 'owner'
+              && orgDoc(orgId) != null
+              && orgDoc(orgId).data.ownerUid == request.auth.uid
+              && !existsAfter(/databases/$(database)/documents/organizations/$(orgId))
+            )
+          );
       }
 
       match /invites/{inviteId} {
