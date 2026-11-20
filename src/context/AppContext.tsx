@@ -3668,6 +3668,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const activeCloudOrgCounts =
         isOrgWorkspace && activeOrganization && !isUsingLocalOrgMode
           ? {
+              orgId: activeOrganization.id,
+              orgName: activeOrganization.name,
               transactions: activeCloudTransactions.filter((tx) => !tx.deletedAt).length,
               wallets: activeCloudWallets.length,
             }
@@ -4228,6 +4230,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       try {
         setCloudSyncStatus('syncing');
 
+        const autoActiveCloudOrgCounts =
+          isOrgWorkspace && activeOrganization && !isUsingLocalOrgMode
+            ? {
+                orgId: activeOrganization.id,
+                orgName: activeOrganization.name,
+                transactions: activeCloudTransactions.filter((tx) => !tx.deletedAt).length,
+                wallets: activeCloudWallets.length,
+              }
+            : undefined;
+
         const { syncedAt, updatedAtMs, skippedAttachmentsCount, blockedEmptyOverwrite } =
           await saveCloudBackup(
             auth.currentUser.uid,
@@ -4245,7 +4257,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               settings: snap.settings,
               hasCompletedOnboarding: snap.hasCompletedOnboarding,
             },
-            { source: 'auto', recordHistory: true, allowEmptyOverwrite: false }
+            {
+              source: 'auto',
+              recordHistory: true,
+              allowEmptyOverwrite: false,
+              activeCloudOrgCounts: autoActiveCloudOrgCounts,
+            }
           );
 
         if (blockedEmptyOverwrite) {
@@ -6327,6 +6344,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               recordHistory: true,
               allowEmptyOverwrite: false,
               activeCloudOrgCounts: {
+                orgId: activeOrganization.id,
+                orgName: activeOrganization.name,
                 transactions: activeOrgTxCount,
                 wallets: mergedWallets.length,
               },

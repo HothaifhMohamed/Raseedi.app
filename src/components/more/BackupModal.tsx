@@ -56,6 +56,7 @@ import {
   tagTransactionsWithWorkspace,
   tagWalletsWithWorkspace,
 } from '../../services/workspaceSync';
+import { resolveBackupHistoryDisplayForWorkspace } from '../../services/backupHistory';
 
 interface BackupModalProps {
   isOpen: boolean;
@@ -74,6 +75,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     moneyCircles,
     queueLegacyOrgsForMigration,
     activeWorkspace,
+    activeOrganization,
     settings,
     user,
     isPro,
@@ -105,6 +107,18 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     t,
     isRTL,
   } = useApp();
+
+  const activeScopeLabel =
+    activeWorkspace === 'personal'
+      ? isRTL
+        ? 'الحساب الشخصي'
+        : 'Personal Workspace'
+      : activeOrganization?.name || (isRTL ? 'المؤسسة الحالية' : 'Current Organization');
+
+  const activeScopeTxCount = useMemo(
+    () => transactions.filter((tx) => !tx.deletedAt).length,
+    [transactions]
+  );
 
   const [activeTab, setActiveTab] = useState<'json' | 'csv'>('json');
   const [message, setMessage] = useState<{
@@ -1509,6 +1523,21 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                         </button>
                       </div>
 
+                      {/* Active Workspace Live Scope Summary */}
+                      <div
+                        data-testid="backup-active-scope-summary"
+                        className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-[var(--color-accent)]/8 border border-[var(--color-accent)]/25 text-[10px]"
+                      >
+                        <span className="font-bold text-[var(--color-ink)] truncate">
+                          {isRTL ? `النطاق النشط: ${activeScopeLabel}` : `Active Scope: ${activeScopeLabel}`}
+                        </span>
+                        <span className="font-semibold text-[var(--color-accent)] num-tabular shrink-0">
+                          {isRTL
+                            ? `${activeScopeTxCount.toLocaleString('en-US')} معاملة • ${wallets.length.toLocaleString('en-US')} محفظة`
+                            : `${activeScopeTxCount.toLocaleString('en-US')} tx • ${wallets.length.toLocaleString('en-US')} wallets`}
+                        </span>
+                      </div>
+
                       {cloudBackupHistory.length === 0 ? (
                         <p className="text-[10px] text-[var(--color-muted)]">
                           {isRefreshingHistory
@@ -1521,73 +1550,89 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                         </p>
                       ) : (
                         <div className="space-y-1.5 max-h-44 overflow-y-auto pe-0.5">
-                          {cloudBackupHistory.slice(0, 7).map((entry, idx) => (
-                            <div
-                              key={entry.id}
-                              className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)]"
-                            >
-                              <div className="min-w-0">
-                                <div className="text-[11px] font-semibold text-[var(--color-ink)] truncate">
-                                  {new Date(entry.createdAtMs).toLocaleString(
-                                    isRTL ? 'ar-EG' : 'en-US',
-                                    { dateStyle: 'short', timeStyle: 'short' }
-                                  )}
-                                  {idx === 0 && (
-                                    <span className="ms-1.5 text-[9px] font-bold text-[var(--color-accent)]">
-                                      {isRTL ? '(الأحدث)' : '(Latest)'}
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="text-[10px] text-[var(--color-muted)] num-tabular">
-                                  {(() => {
-                                    const displayTx = Math.max(
-                                      Number(entry.totalTransactions || 0),
-                                      Number(entry.storedTransactionsCount || 0)
-                                    );
-                                    const displayWallets = Math.max(0, Number(entry.walletsCount || 0));
-                                    return isRTL
-                                      ? `${displayTx.toLocaleString('en-US')} معاملة • ${displayWallets.toLocaleString('en-US')} محفظة`
-                                      : `${displayTx.toLocaleString('en-US')} tx • ${displayWallets.toLocaleString('en-US')} wallets`;
-                                  })()}
-                                </div>
-                              </div>
-                              <button
-                                type="button"
-                                disabled={isCloudSyncing || restoringHistoryId !== null}
-                                onClick={async () => {
-                                  setRestoringHistoryId(entry.id);
-                                  try {
-                                    const ok = await restoreFromBackupHistoryEntry(entry.id);
-                                    setMessage(
-                                      ok
-                                        ? {
-                                            text: isRTL
-                                              ? 'تمت استعادة النسخة السحابية المختارة بنجاح!'
-                                              : 'Selected cloud backup restored!',
-                                          }
-                                        : {
-                                            text: isRTL
-                                              ? 'تعذرت استعادة هذه النسخة.'
-                                              : 'Failed to restore selected backup.',
-                                            error: true,
-                                          }
-                                    );
-                                  } finally {
-                                    setRestoringHistoryId(null);
-                                  }
-                                }}
-                                className="px-2.5 py-1 rounded-md bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 text-[var(--color-accent)] text-[10px] font-bold shrink-0 min-h-[28px] disabled:opacity-50"
+                          {cloudBackupHistory.slice(0, 7).map((entry, idx) => {
+                            const resolved = resolveBackupHistoryDisplayForWorkspace(
+                              entry,
+                              activeWorkspace,
+                              {
+                                isRTL,
+                                activeWorkspaceName: activeOrganization?.name,
+                              }
+                            );
+                            const txSuffix = resolved.isTruncatedEstimate ? '+' : '';
+                            return (
+                              <div
+                                key={entry.id}
+                                data-testid="backup-history-entry"
+                                className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)]"
                               >
-                                {restoringHistoryId === entry.id
-                                  ? isRTL
-                                    ? 'جاري...'
-                                    : '...'
-                                  : isRTL
-                                  ? 'استعادة'
-                                  : 'Restore'}
-                              </button>
-                            </div>
-                          ))}
+                                <div className="min-w-0 space-y-0.5">
+                                  <div className="flex items-center gap-1.5 flex-wrap text-[11px] font-semibold text-[var(--color-ink)]">
+                                    <span className="truncate">
+                                      {new Date(entry.createdAtMs).toLocaleString(
+                                        isRTL ? 'ar-EG' : 'en-US',
+                                        { dateStyle: 'short', timeStyle: 'short' }
+                                      )}
+                                    </span>
+                                    {idx === 0 && (
+                                      <span className="text-[9px] font-bold text-[var(--color-accent)]">
+                                        {isRTL ? '(الأحدث)' : '(Latest)'}
+                                      </span>
+                                    )}
+                                    <span
+                                      className={`px-1.5 py-0.5 rounded text-[9px] font-bold truncate max-w-[140px] ${
+                                        resolved.matchesActiveWorkspace
+                                          ? 'bg-[var(--color-accent)]/12 text-[var(--color-accent)]'
+                                          : 'bg-[var(--color-bg)] border border-[var(--color-line)] text-[var(--color-muted)]'
+                                      }`}
+                                    >
+                                      {resolved.scopeLabel}
+                                    </span>
+                                  </div>
+                                  <div className="text-[10px] text-[var(--color-muted)] num-tabular">
+                                    {isRTL
+                                      ? `${resolved.transactionsCount.toLocaleString('en-US')}${txSuffix} معاملة • ${resolved.walletsCount.toLocaleString('en-US')} محفظة`
+                                      : `${resolved.transactionsCount.toLocaleString('en-US')}${txSuffix} tx • ${resolved.walletsCount.toLocaleString('en-US')} wallets`}
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  disabled={isCloudSyncing || restoringHistoryId !== null}
+                                  onClick={async () => {
+                                    setRestoringHistoryId(entry.id);
+                                    try {
+                                      const ok = await restoreFromBackupHistoryEntry(entry.id);
+                                      setMessage(
+                                        ok
+                                          ? {
+                                              text: isRTL
+                                                ? 'تمت استعادة النسخة السحابية المختارة بنجاح!'
+                                                : 'Selected cloud backup restored!',
+                                            }
+                                          : {
+                                              text: isRTL
+                                                ? 'تعذرت استعادة هذه النسخة.'
+                                                : 'Failed to restore selected backup.',
+                                              error: true,
+                                            }
+                                      );
+                                    } finally {
+                                      setRestoringHistoryId(null);
+                                    }
+                                  }}
+                                  className="px-2.5 py-1 rounded-md bg-[var(--color-accent)]/10 hover:bg-[var(--color-accent)]/20 text-[var(--color-accent)] text-[10px] font-bold shrink-0 min-h-[28px] disabled:opacity-50"
+                                >
+                                  {restoringHistoryId === entry.id
+                                    ? isRTL
+                                      ? 'جاري...'
+                                      : '...'
+                                    : isRTL
+                                    ? 'استعادة'
+                                    : 'Restore'}
+                                </button>
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
                     </div>

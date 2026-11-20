@@ -2229,7 +2229,12 @@ export async function saveCloudBackup(
     recordHistory?: boolean;
     allowEmptyOverwrite?: boolean;
     onProgress?: (processed: number, total: number) => void;
-    activeCloudOrgCounts?: { transactions: number; wallets: number };
+    activeCloudOrgCounts?: {
+      orgId?: string;
+      orgName?: string;
+      transactions: number;
+      wallets: number;
+    };
   }
 ): Promise<{
   syncedAt: number;
@@ -2552,12 +2557,18 @@ export async function saveCloudBackup(
       const source = options?.source === 'manual' ? 'manual' : 'auto';
       const historyId = `${source}_${updatedAtMs}`;
       const historyCounts = computeBackupHistoryCounts(effectiveData, {
+        extraOrgId: options?.activeCloudOrgCounts?.orgId,
+        extraOrgName: options?.activeCloudOrgCounts?.orgName,
         extraTransactions: options?.activeCloudOrgCounts?.transactions,
         extraWallets: options?.activeCloudOrgCounts?.wallets,
       });
       const { snapshotJson, storedTransactionsCount } = buildCompactBackupHistorySnapshotJson({
         ...effectiveData,
         updatedAtMs,
+        ...(options?.activeCloudOrgCounts?.orgName &&
+        effectiveData.activeWorkspace === options.activeCloudOrgCounts.orgId
+          ? { activeWorkspaceName: options.activeCloudOrgCounts.orgName }
+          : {}),
         ...(options?.activeCloudOrgCounts
           ? { activeCloudOrgCounts: options.activeCloudOrgCounts }
           : {}),

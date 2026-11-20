@@ -6,6 +6,7 @@ import {
   collection,
   doc,
   getDoc,
+  getDocFromServer,
   getDocs,
   getDocsFromServer,
   limit,
@@ -230,50 +231,87 @@ function parseBudgetDoc(docData: Record<string, unknown>): Budget | null {
   };
 }
 
+function sanitizeOrgDateForCloud(rawDate: unknown): string {
+  const s = typeof rawDate === 'string' ? rawDate.trim() : '';
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  if (s.length > 0) return s.slice(0, 16);
+  return new Date().toISOString().slice(0, 10);
+}
+
 function buildOrgTxPayloadForCloud(orgId: string, tx: Transaction): Record<string, unknown> {
-  const currency = tx.currency || 'EGP';
-  const amountMinor = toMinor(tx.amount, currency);
+  const safeId = normalizeValidFirestoreId(tx.id, 'tx');
+  const currency = (tx.currency || 'EGP').trim().toUpperCase().slice(0, 8) || 'EGP';
+  const rawAmount = Number(tx.amount);
+  const safeAmount = Number.isFinite(rawAmount) ? Math.min(1_000_000_000, Math.abs(rawAmount)) : 0;
+  const amountMinor = Math.max(0, Math.round(toMinor(safeAmount, currency)));
+  const safeDate = sanitizeOrgDateForCloud(tx.date);
   const canonicalStatus = normalizeApprovalStatus(tx.approvalStatus) || 'approved';
+  const safeSubmittedBy = typeof tx.submittedBy === 'string' ? tx.submittedBy.trim().slice(0, 128) : '';
+  const safeApprovedBy =
+    typeof tx.approvedBy === 'string' && tx.approvedBy.trim().length > 0
+      ? tx.approvedBy.trim().slice(0, 128)
+      : null;
+  const safeDeletedAt =
+    typeof tx.deletedAt === 'number' && Number.isFinite(tx.deletedAt) && tx.deletedAt > 0
+      ? tx.deletedAt
+      : null;
+
+  // Strip oversized inline base64 attachments so org ledger docs always fit Firestore limits
+  const { attachments: _inlineAttachments, ...txWithoutInlineAttachments } = tx;
   const cleanTx: Transaction = stripUndefinedDeep({
-    ...tx,
+    ...txWithoutInlineAttachments,
+    id: safeId,
+    amount: safeAmount,
+    currency,
+    date: safeDate,
     amountMinor,
+    submittedBy: safeSubmittedBy || undefined,
+    approvedBy: safeApprovedBy ?? undefined,
     approvalStatus: canonicalStatus,
-    deletedAt: tx.deletedAt ?? null,
+    deletedAt: safeDeletedAt,
     updatedAt: Date.now(),
   });
   return {
-    id: tx.id,
+    id: safeId,
     orgId,
-    date: tx.date,
+    date: safeDate,
     amountMinor,
-    submittedBy: tx.submittedBy || '',
-    approvedBy: tx.approvedBy ?? null,
+    submittedBy: safeSubmittedBy,
+    approvedBy: safeApprovedBy,
     approvalStatus: canonicalStatus,
-    deletedAt: tx.deletedAt ?? null,
+    deletedAt: safeDeletedAt,
     payload: cleanTx,
     updatedAt: serverTimestamp(),
   };
 }
 
 function buildOrgWalletPayloadForCloud(orgId: string, wallet: Wallet): Record<string, unknown> {
-  const balanceMinor =
-    typeof wallet.balanceMinor === 'number'
+  const safeId = normalizeValidFirestoreId(wallet.id, 'w');
+  const currency = (wallet.currency || 'EGP').trim().toUpperCase().slice(0, 8) || 'EGP';
+  const rawBalance = Number.isFinite(Number(wallet.balance)) ? Number(wallet.balance) : 0;
+  const rawInitial = Number.isFinite(Number(wallet.initialBalance)) ? Number(wallet.initialBalance) : 0;
+  const balanceMinor = Math.round(
+    typeof wallet.balanceMinor === 'number' && Number.isFinite(wallet.balanceMinor)
       ? wallet.balanceMinor
-      : toMinor(wallet.balance, wallet.currency);
-  const initialBalanceMinor =
-    typeof wallet.initialBalanceMinor === 'number'
+      : toMinor(rawBalance, currency)
+  );
+  const initialBalanceMinor = Math.round(
+    typeof wallet.initialBalanceMinor === 'number' && Number.isFinite(wallet.initialBalanceMinor)
       ? wallet.initialBalanceMinor
-      : toMinor(wallet.initialBalance, wallet.currency);
+      : toMinor(rawInitial, currency)
+  );
   const cleanWallet: Wallet = stripUndefinedDeep(
     stripSensitivePinFromWallet({
       ...wallet,
+      id: safeId,
+      currency,
       balanceMinor,
       initialBalanceMinor,
-      balance: fromMinor(balanceMinor, wallet.currency),
+      balance: fromMinor(balanceMinor, currency),
     })
   );
   return {
-    id: wallet.id,
+    id: safeId,
     orgId,
     balanceMinor,
     payload: cleanWallet,
@@ -282,9 +320,10 @@ function buildOrgWalletPayloadForCloud(orgId: string, wallet: Wallet): Record<st
 }
 
 function buildOrgCategoryPayloadForCloud(orgId: string, cat: Category): Record<string, unknown> {
-  const cleanCat = stripUndefinedDeep({ ...cat });
+  const safeId = normalizeValidFirestoreId(cat.id, 'cat');
+  const cleanCat = stripUndefinedDeep({ ...cat, id: safeId });
   return {
-    id: cat.id,
+    id: safeId,
     orgId,
     payload: cleanCat,
     updatedAt: serverTimestamp(),
@@ -292,16 +331,19 @@ function buildOrgCategoryPayloadForCloud(orgId: string, cat: Category): Record<s
 }
 
 function buildOrgBudgetPayloadForCloud(orgId: string, budget: Budget, orgCurrency: string): Record<string, unknown> {
-  const amountMinor =
-    typeof budget.amountMinor === 'number'
-      ? budget.amountMinor
-      : toMinor(budget.amount, orgCurrency);
+  const safeId = normalizeValidFirestoreId(budget.id, 'bgt');
+  const currency = (orgCurrency || 'EGP').trim().toUpperCase().slice(0, 8) || 'EGP';
+  const rawAmount = Number(budget.amount);
+  const safeAmount = Number.isFinite(rawAmount) ? Math.min(1_000_000_000, Math.abs(rawAmount)) : 0;
+  const amountMinor = Math.max(0, Math.round(toMinor(safeAmount, currency)));
   const cleanBudget = stripUndefinedDeep({
     ...budget,
+    id: safeId,
+    amount: safeAmount,
     amountMinor,
   });
   return {
-    id: budget.id,
+    id: safeId,
     orgId,
     amountMinor,
     payload: cleanBudget,
@@ -1585,71 +1627,119 @@ export async function migrateLegacyOrgToCloud(
   actor: OrgActorInfo,
   onProgress?: (completed: number, total: number) => void
 ): Promise<void> {
-  const orgCurrency = legacyWorkspace.organization.currency || 'EGP';
+  const orgCurrency = (legacyWorkspace.organization.currency || 'EGP').trim().toUpperCase().slice(0, 8) || 'EGP';
   const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
 
+  const walletIdMap = new Map<string, string>();
+  const categoryIdMap = new Map<string, string>();
+  const costCenterIdMap = new Map<string, string>();
+  const partyIdMap = new Map<string, string>();
+
   for (const w of legacyWorkspace.wallets || []) {
-    const cloudDoc = buildOrgWalletPayloadForCloud(cloudOrgId, w);
-    ops.push((batch) => batch.set(doc(db, 'organizations', cloudOrgId, 'wallets', w.id), cloudDoc));
+    const safeId = normalizeValidFirestoreId(w.id, 'w');
+    walletIdMap.set(w.id, safeId);
+    const cloudDoc = buildOrgWalletPayloadForCloud(cloudOrgId, { ...w, id: safeId, workspaceId: cloudOrgId });
+    ops.push((batch) => batch.set(doc(db, 'organizations', cloudOrgId, 'wallets', safeId), cloudDoc));
   }
   for (const c of legacyWorkspace.categories || []) {
-    const cloudDoc = buildOrgCategoryPayloadForCloud(cloudOrgId, c);
-    ops.push((batch) => batch.set(doc(db, 'organizations', cloudOrgId, 'categories', c.id), cloudDoc));
+    const safeId = normalizeValidFirestoreId(c.id, 'cat');
+    categoryIdMap.set(c.id, safeId);
+    const cloudDoc = buildOrgCategoryPayloadForCloud(cloudOrgId, { ...c, id: safeId });
+    ops.push((batch) => batch.set(doc(db, 'organizations', cloudOrgId, 'categories', safeId), cloudDoc));
   }
   for (const cc of legacyWorkspace.costCenters || []) {
-    const budgetAllocatedMinor = toMinor(cc.budgetAllocated || 0, orgCurrency);
+    const safeId = normalizeValidFirestoreId(cc.id, 'cc');
+    costCenterIdMap.set(cc.id, safeId);
+    const safeBudget = Number.isFinite(Number(cc.budgetAllocated))
+      ? Math.max(0, Math.min(1_000_000_000, Number(cc.budgetAllocated)))
+      : 0;
+    const budgetAllocatedMinor = Math.max(0, Math.round(toMinor(safeBudget, orgCurrency)));
+    const safeType =
+      cc.type === 'department' || cc.type === 'project' || cc.type === 'branch'
+        ? cc.type
+        : 'department';
+    const safeCode = (cc.code || 'CC').trim().slice(0, 32) || 'CC';
+    const safeNameAr = (cc.nameAr || cc.name || safeCode || 'مركز تكلفة').trim().slice(0, 120) || 'مركز تكلفة';
+    const safeNameEn = (cc.nameEn || cc.name || cc.nameAr || 'Cost Center').trim().slice(0, 120) || 'Cost Center';
     ops.push((batch) =>
       batch.set(
-        doc(db, 'organizations', cloudOrgId, 'costCenters', cc.id),
+        doc(db, 'organizations', cloudOrgId, 'costCenters', safeId),
         stripUndefinedDeep({
-          id: cc.id,
+          id: safeId,
           orgId: cloudOrgId,
-          code: (cc.code || 'CC').slice(0, 32),
-          name: (cc.name || cc.nameAr || cc.code).slice(0, 120),
-          nameAr: (cc.nameAr || cc.name || 'مركز تكلفة').slice(0, 120),
-          nameEn: (cc.nameEn || cc.nameAr || 'Cost Center').slice(0, 120),
-          type: cc.type || 'department',
-          budgetAllocated: Number(cc.budgetAllocated || 0),
+          code: safeCode,
+          name: (cc.name || safeNameAr).trim().slice(0, 120) || safeNameAr,
+          nameAr: safeNameAr,
+          nameEn: safeNameEn,
+          type: safeType,
+          budgetAllocated: safeBudget,
           budgetAllocatedMinor,
           isActive: Boolean(cc.isActive ?? true),
-          createdAt: cc.createdAt || Date.now(),
+          createdAt: typeof cc.createdAt === 'number' && cc.createdAt >= 0 ? cc.createdAt : Date.now(),
           updatedAt: serverTimestamp(),
         })
       )
     );
   }
   for (const p of legacyWorkspace.parties || []) {
-    const balanceMinor = toMinor(p.balance || 0, p.currency || orgCurrency);
+    const safeId = normalizeValidFirestoreId(p.id, 'party');
+    partyIdMap.set(p.id, safeId);
+    const safeCurrency = (p.currency || orgCurrency).trim().toUpperCase().slice(0, 8) || orgCurrency;
+    const safeBalance = Number.isFinite(Number(p.balance))
+      ? Math.max(-1_000_000_000, Math.min(1_000_000_000, Number(p.balance)))
+      : 0;
+    const balanceMinor = Math.round(toMinor(safeBalance, safeCurrency));
+    const safePartyType =
+      p.type === 'vendor' || p.type === 'client' || p.type === 'both' ? p.type : 'vendor';
+    const safeName = (p.name || 'طرف تجاري').trim().slice(0, 120) || 'طرف تجاري';
+    const safeCreditLimit =
+      typeof p.creditLimit === 'number' && Number.isFinite(p.creditLimit)
+        ? Math.max(0, Math.min(1_000_000_000, p.creditLimit))
+        : undefined;
     ops.push((batch) =>
       batch.set(
-        doc(db, 'organizations', cloudOrgId, 'parties', p.id),
+        doc(db, 'organizations', cloudOrgId, 'parties', safeId),
         stripUndefinedDeep({
-          id: p.id,
+          id: safeId,
           orgId: cloudOrgId,
-          type: p.type,
-          name: p.name.slice(0, 120),
-          currency: (p.currency || orgCurrency).slice(0, 8),
-          balance: Number(p.balance || 0),
+          type: safePartyType,
+          name: safeName,
+          currency: safeCurrency,
+          balance: safeBalance,
           balanceMinor,
-          ...(p.phone ? { phone: p.phone.slice(0, 40) } : {}),
-          ...(p.email ? { email: p.email.slice(0, 254) } : {}),
-          ...(p.taxId ? { taxId: p.taxId.slice(0, 64) } : {}),
-          ...(typeof p.creditLimit === 'number' ? { creditLimit: p.creditLimit } : {}),
-          ...(p.dueDate ? { dueDate: p.dueDate.slice(0, 16) } : {}),
-          ...(p.notes ? { notes: p.notes.slice(0, 400) } : {}),
-          createdAt: p.createdAt || Date.now(),
+          ...(p.phone ? { phone: String(p.phone).trim().slice(0, 40) } : {}),
+          ...(p.email ? { email: String(p.email).trim().slice(0, 254) } : {}),
+          ...(p.taxId ? { taxId: String(p.taxId).trim().slice(0, 64) } : {}),
+          ...(safeCreditLimit !== undefined ? { creditLimit: safeCreditLimit } : {}),
+          ...(p.dueDate ? { dueDate: String(p.dueDate).trim().slice(0, 16) } : {}),
+          ...(p.notes ? { notes: String(p.notes).trim().slice(0, 400) } : {}),
+          createdAt: typeof p.createdAt === 'number' && p.createdAt >= 0 ? p.createdAt : Date.now(),
           updatedAt: serverTimestamp(),
         })
       )
     );
   }
   for (const b of legacyWorkspace.budgets || []) {
-    const cloudDoc = buildOrgBudgetPayloadForCloud(cloudOrgId, b, orgCurrency);
-    ops.push((batch) => batch.set(doc(db, 'organizations', cloudOrgId, 'budgets', b.id), cloudDoc));
+    const safeId = normalizeValidFirestoreId(b.id, 'bgt');
+    const remappedCategoryId = b.categoryId ? categoryIdMap.get(b.categoryId) || b.categoryId : b.categoryId;
+    const cloudDoc = buildOrgBudgetPayloadForCloud(
+      cloudOrgId,
+      { ...b, id: safeId, categoryId: remappedCategoryId },
+      orgCurrency
+    );
+    ops.push((batch) => batch.set(doc(db, 'organizations', cloudOrgId, 'budgets', safeId), cloudDoc));
   }
   for (const tx of legacyWorkspace.transactions || []) {
+    const safeId = normalizeValidFirestoreId(tx.id, 'tx');
     const normalizedTx: Transaction = {
       ...tx,
+      id: safeId,
+      workspaceId: cloudOrgId,
+      walletId: walletIdMap.get(tx.walletId) || tx.walletId,
+      ...(tx.toWalletId ? { toWalletId: walletIdMap.get(tx.toWalletId) || tx.toWalletId } : {}),
+      categoryId: categoryIdMap.get(tx.categoryId) || tx.categoryId,
+      ...(tx.costCenterId ? { costCenterId: costCenterIdMap.get(tx.costCenterId) || tx.costCenterId } : {}),
+      ...(tx.partyId ? { partyId: partyIdMap.get(tx.partyId) || tx.partyId } : {}),
       submittedBy:
         !tx.submittedBy || tx.submittedBy === 'local-owner' || tx.submittedBy === 'local-member'
           ? actor.uid
@@ -1657,7 +1747,7 @@ export async function migrateLegacyOrgToCloud(
       approvalStatus: normalizeApprovalStatus(tx.approvalStatus) || 'approved',
     };
     const cloudDoc = buildOrgTxPayloadForCloud(cloudOrgId, normalizedTx);
-    ops.push((batch) => batch.set(doc(db, 'organizations', cloudOrgId, 'transactions', tx.id), cloudDoc));
+    ops.push((batch) => batch.set(doc(db, 'organizations', cloudOrgId, 'transactions', safeId), cloudDoc));
   }
 
   const audit = makeAuditDocPayload(
@@ -1747,8 +1837,8 @@ export async function createCloudOrganizationDirect(
       ? input.taxNumber.trim().slice(0, 64)
       : null;
 
-  // Read verified user profile from Firestore to match isValidOrgEntitlementOnCreate strictly
-  const userSnap = await getDoc(doc(db, 'users', uid));
+  // Read authoritative user profile from Firestore server first so entitlement strictly matches firestore.rules
+  const userSnap = await getDocFromServer(doc(db, 'users', uid)).catch(() => getDoc(doc(db, 'users', uid)));
   const uData = (userSnap.exists() ? userSnap.data() : {}) as Record<string, unknown>;
   const uPlanTier = String(uData.planTier || 'free');
   const uProPlan = String(uData.proPlan || 'free');
@@ -1797,53 +1887,55 @@ export async function createCloudOrganizationDirect(
     .trim()
     .slice(0, 120);
 
-  let orgId = input.preferredOrgId?.trim()
+  // Avoid spurious permission-denied reads on non-existent organizations/{id}:
+  // Check the owner's own users/{uid}/orgRefs/{preferredOrgId} first.
+  const normalizedPreferred = input.preferredOrgId?.trim()
     ? normalizeValidFirestoreId(input.preferredOrgId.trim(), 'org')
-    : `org-${now}-${Math.random().toString(36).slice(2, 8)}`;
+    : '';
+  let orgId = `org-${now}-${Math.random().toString(36).slice(2, 8)}`;
 
-  // Avoid ID collision if upgrading a local org whose ID already exists on Firestore
-  try {
-    const existingOrgSnap = await getDoc(doc(db, 'organizations', orgId));
-    if (existingOrgSnap.exists()) {
-      const existingData = existingOrgSnap.data() as Record<string, unknown>;
-      if (existingData.ownerUid === uid) {
-        // Already exists and owned by this user — ensure orgRef is returned
-        const orgRef: OrgRef = {
-          orgId,
-          orgName: String(existingData.name || cleanName),
-          role: 'owner',
-          status: 'active',
-          currency: String(existingData.currency || cleanCurrency),
-          joinedAt: now,
-        };
-        const organization: Organization = {
-          id: orgId,
-          name: orgRef.orgName,
-          currency: orgRef.currency,
-          mainCurrency: orgRef.currency,
-          industry: (existingData.industry as OrganizationIndustry) || cleanIndustry,
-          vatRate: Number(existingData.vatRate ?? cleanVatRate),
-          ...(existingData.taxNumber ? { taxNumber: String(existingData.taxNumber) } : {}),
-          approvalThreshold: Number(existingData.approvalThreshold ?? cleanApprovalThreshold),
-          ownerUid: uid,
-          ownerId: uid,
-          planTier: (existingData.planTier as PlanTier) || planTier,
-          billingCycle: (existingData.billingCycle as BillingCycle) || billingCycle,
-          expiresAt: readTimestampOrNumberMs(existingData.expiresAt),
-          seatLimit: Number(existingData.seatLimit ?? 5),
-          extraSeats: Number(existingData.extraSeats ?? 0),
-          localFirstMode: false,
-          createdAt: now,
-          updatedAt: now,
-        };
-        return { orgId, organization, orgRef };
+  if (normalizedPreferred) {
+    try {
+      const existingRefSnap = await getDoc(doc(db, 'users', uid, 'orgRefs', normalizedPreferred));
+      if (existingRefSnap.exists()) {
+        const existingOrgSnap = await getDoc(doc(db, 'organizations', normalizedPreferred));
+        if (existingOrgSnap.exists()) {
+          const existingData = existingOrgSnap.data() as Record<string, unknown>;
+          if (existingData.ownerUid === uid) {
+            const orgRef: OrgRef = {
+              orgId: normalizedPreferred,
+              orgName: String(existingData.name || cleanName),
+              role: 'owner',
+              status: 'active',
+              currency: String(existingData.currency || cleanCurrency),
+              joinedAt: now,
+            };
+            const organization: Organization = {
+              id: normalizedPreferred,
+              name: orgRef.orgName,
+              currency: orgRef.currency,
+              mainCurrency: orgRef.currency,
+              industry: (existingData.industry as OrganizationIndustry) || cleanIndustry,
+              vatRate: Number(existingData.vatRate ?? cleanVatRate),
+              ...(existingData.taxNumber ? { taxNumber: String(existingData.taxNumber) } : {}),
+              approvalThreshold: Number(existingData.approvalThreshold ?? cleanApprovalThreshold),
+              ownerUid: uid,
+              ownerId: uid,
+              planTier: (existingData.planTier as PlanTier) || planTier,
+              billingCycle: (existingData.billingCycle as BillingCycle) || billingCycle,
+              expiresAt: readTimestampOrNumberMs(existingData.expiresAt),
+              seatLimit: Number(existingData.seatLimit ?? 5),
+              extraSeats: Number(existingData.extraSeats ?? 0),
+              localFirstMode: false,
+              createdAt: now,
+              updatedAt: now,
+            };
+            return { orgId: normalizedPreferred, organization, orgRef };
+          }
+        }
       }
-      orgId = `org-${now}-${Math.random().toString(36).slice(2, 8)}`;
-    }
-  } catch {
-    // Expected when non-member or doc doesn't exist (permission-denied on get for non-member)
-    if (input.preferredOrgId?.trim()) {
-      orgId = `org-${now}-${Math.random().toString(36).slice(2, 8)}`;
+    } catch {
+      // Ignore lookup failures and proceed with a clean collision-free orgId
     }
   }
 
@@ -1892,11 +1984,11 @@ export async function createCloudOrganizationDirect(
     joinedAt: now,
   };
 
-  await runTransaction(db, async (tx) => {
-    tx.set(orgDocRef, orgPayload);
-    tx.set(memberDocRef, ownerMemberPayload);
-    tx.set(userOrgRefDoc, orgRefPayload);
-  });
+  const bootstrapBatch = writeBatch(db);
+  bootstrapBatch.set(orgDocRef, orgPayload);
+  bootstrapBatch.set(memberDocRef, ownerMemberPayload);
+  bootstrapBatch.set(userOrgRefDoc, orgRefPayload);
+  await bootstrapBatch.commit();
 
   const actor: OrgActorInfo = { uid, name: cleanDisplayName };
 

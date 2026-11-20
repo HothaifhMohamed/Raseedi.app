@@ -73,42 +73,53 @@ service cloud.firestore {
     }
 
     function isOrgMemberActive(orgId) {
-      let m = memberDoc(orgId);
-      return isSignedIn() && m != null && m.data.status == 'active';
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid))
+        && memberDoc(orgId).data.status == 'active';
     }
 
     function isOrgOwnerOrAdmin(orgId) {
-      let m = memberDoc(orgId);
-      return isSignedIn() && m != null && m.data.status == 'active' && m.data.role in ['owner', 'admin'];
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid))
+        && memberDoc(orgId).data.status == 'active'
+        && memberDoc(orgId).data.role in ['owner', 'admin'];
     }
 
     function isOrgAccountantOrAbove(orgId) {
-      let m = memberDoc(orgId);
-      return isSignedIn() && m != null && m.data.status == 'active' && m.data.role in ['owner', 'admin', 'accountant'];
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid))
+        && memberDoc(orgId).data.status == 'active'
+        && memberDoc(orgId).data.role in ['owner', 'admin', 'accountant'];
     }
 
     function isOrgContributorOrAbove(orgId) {
-      let m = memberDoc(orgId);
-      return isSignedIn() && m != null && m.data.status == 'active' && m.data.role in ['owner', 'admin', 'accountant', 'employee'];
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid))
+        && memberDoc(orgId).data.status == 'active'
+        && memberDoc(orgId).data.role in ['owner', 'admin', 'accountant', 'employee'];
     }
 
     // Free orgs are always writable; paid/trial orgs stay writable through 7-day grace window
     function isOrgWritable(orgId) {
-      let o = orgDoc(orgId);
-      return o != null
+      return exists(/databases/$(database)/documents/organizations/$(orgId))
         && (
-          o.data.get('planTier', 'business_pro') == 'free'
-          || o.data.get('billingCycle', 'monthly') == 'free'
-          || !('expiresAt' in o.data)
-          || o.data.expiresAt == null
-          || request.time.toMillis() <= o.data.expiresAt + 7 * 86400000
+          orgDoc(orgId).data.get('planTier', 'business_pro') == 'free'
+          || orgDoc(orgId).data.get('billingCycle', 'monthly') == 'free'
+          || !('expiresAt' in orgDoc(orgId).data)
+          || orgDoc(orgId).data.expiresAt == null
+          || (orgDoc(orgId).data.expiresAt is number && request.time.toMillis() <= orgDoc(orgId).data.expiresAt + 7 * 86400000)
+          || (orgDoc(orgId).data.expiresAt is timestamp && request.time.toMillis() <= orgDoc(orgId).data.expiresAt.toMillis() + 7 * 86400000)
         );
     }
 
     function isAfterPeriodLock(orgId, dateStr) {
-      let o = orgDoc(orgId);
-      return o != null
-        && (!('lockedUntilDate' in o.data) || o.data.lockedUntilDate == null || o.data.lockedUntilDate == '' || dateStr > o.data.lockedUntilDate);
+      return exists(/databases/$(database)/documents/organizations/$(orgId))
+        && (
+          !('lockedUntilDate' in orgDoc(orgId).data)
+          || orgDoc(orgId).data.lockedUntilDate == null
+          || orgDoc(orgId).data.lockedUntilDate == ''
+          || dateStr > orgDoc(orgId).data.lockedUntilDate
+        );
     }
 
     function currencyMinorFactor(currencyCode) {
@@ -116,10 +127,11 @@ service cloud.firestore {
     }
 
     function isConsistentAmountMinor(orgId, data) {
-      let o = orgDoc(orgId);
       let curr = ('currency' in data.payload && data.payload.currency is string)
         ? data.payload.currency
-        : (o != null ? o.data.get('currency', 'EGP') : 'EGP');
+        : (exists(/databases/$(database)/documents/organizations/$(orgId))
+          ? orgDoc(orgId).data.get('currency', 'EGP')
+          : 'EGP');
       let factor = currencyMinorFactor(curr);
       return data.payload.amount is number
         && data.payload.amount >= 0
@@ -355,34 +367,43 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    function isValidOrgEntitlementOnCreate(data) {
-      let u = get(/databases/$(database)/documents/users/$(request.auth.uid));
-      let uActive = u != null
-        && (u.data.get('isPro', false) == true || u.data.get('proActive', false) == true)
+    function isMatchingUserBusinessEntitlement(uData, data) {
+      let uActive = (uData.get('isPro', false) == true || uData.get('proActive', false) == true)
         && (
-          u.data.get('planTier', 'free') in ['business_pro', 'business']
-          || u.data.get('proPlan', 'free') in ['business_monthly', 'business_yearly']
+          uData.get('planTier', 'free') in ['business_pro', 'business']
+          || uData.get('proPlan', 'free') in ['business_monthly', 'business_yearly']
         );
-      let uExp = (u != null && 'proExpiresAt' in u.data && u.data.proExpiresAt is number)
-        ? u.data.proExpiresAt
-        : ((u != null && 'proExpiresAt' in u.data && u.data.proExpiresAt is timestamp)
-          ? u.data.proExpiresAt.toMillis()
-          : ((u != null && 'expiresAt' in u.data && u.data.expiresAt is number)
-            ? u.data.expiresAt
-            : ((u != null && 'expiresAt' in u.data && u.data.expiresAt is timestamp)
-              ? u.data.expiresAt.toMillis()
+      let uExp = ('proExpiresAt' in uData && uData.proExpiresAt is number && uData.proExpiresAt > 0)
+        ? uData.proExpiresAt
+        : (('proExpiresAt' in uData && uData.proExpiresAt is timestamp)
+          ? uData.proExpiresAt.toMillis()
+          : (('expiresAt' in uData && uData.expiresAt is number && uData.expiresAt > 0)
+            ? uData.expiresAt
+            : (('expiresAt' in uData && uData.expiresAt is timestamp)
+              ? uData.expiresAt.toMillis()
               : null)));
       let uNotExpired = uExp == null || request.time.toMillis() <= uExp + 7 * 86400000;
+      return uActive
+        && uNotExpired
+        && data.planTier == 'business_pro'
+        && data.billingCycle in ['monthly', 'yearly', 'lifetime', 'trial', 'code']
+        && (
+          (uExp == null && (!('expiresAt' in data) || data.expiresAt == null))
+          || (uExp != null && 'expiresAt' in data && data.expiresAt is number && data.expiresAt > 0 && data.expiresAt <= uExp)
+        );
+    }
+
+    function isValidOrgEntitlementOnCreate(data) {
       return (
         data.planTier == 'free'
         && data.billingCycle == 'free'
         && (!('expiresAt' in data) || data.expiresAt == null)
       ) || (
-        uActive
-        && uNotExpired
-        && data.planTier == 'business_pro'
-        && data.billingCycle in ['monthly', 'yearly', 'lifetime', 'trial', 'code']
-        && data.get('expiresAt', null) == uExp
+        exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && isMatchingUserBusinessEntitlement(
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data,
+          data
+        )
       );
     }
 
@@ -941,16 +962,16 @@ service cloud.firestore {
           && existsAfter(/databases/$(database)/documents/organizations/$(orgId)/members/$(userId))
           && (
             (
-              isOrgOwnerOrAdmin(orgId)
-              && isOrgWritable(orgId)
-              && isValidOrgRefCreate(incoming(), orgId)
-            )
-            ||
-            (
               userId == request.auth.uid
               && isValidOrgOwnerRefCreate(incoming(), orgId)
               && !exists(/databases/$(database)/documents/organizations/$(orgId))
               && getAfter(/databases/$(database)/documents/organizations/$(orgId)).data.ownerUid == request.auth.uid
+            )
+            ||
+            (
+              isValidOrgRefCreate(incoming(), orgId)
+              && isOrgOwnerOrAdmin(orgId)
+              && isOrgWritable(orgId)
             )
           );
         allow update: if isValidId(userId)
@@ -967,14 +988,6 @@ service cloud.firestore {
           && isVerifiedUser()
           && (
             (
-              isOrgOwnerOrAdmin(orgId)
-              && isOrgWritable(orgId)
-              && userId != request.auth.uid
-              && existing().role != 'owner'
-              && !existsAfter(/databases/$(database)/documents/organizations/$(orgId)/members/$(userId))
-            )
-            ||
-            (
               userId == request.auth.uid
               && existing().role == 'owner'
               && (
@@ -984,6 +997,14 @@ service cloud.firestore {
                   && !existsAfter(/databases/$(database)/documents/organizations/$(orgId))
                 )
               )
+            )
+            ||
+            (
+              userId != request.auth.uid
+              && existing().role != 'owner'
+              && isOrgOwnerOrAdmin(orgId)
+              && isOrgWritable(orgId)
+              && !existsAfter(/databases/$(database)/documents/organizations/$(orgId)/members/$(userId))
             )
           );
       }
@@ -1196,16 +1217,16 @@ service cloud.firestore {
           && existsAfter(/databases/$(database)/documents/users/$(memberUid)/orgRefs/$(orgId))
           && (
             (
-              isOrgOwnerOrAdmin(orgId)
-              && isOrgWritable(orgId)
-              && isValidOrgMemberCreate(incoming(), memberUid)
-            )
-            ||
-            (
               memberUid == request.auth.uid
               && isValidOrgOwnerMemberCreate(incoming(), memberUid)
               && !exists(/databases/$(database)/documents/organizations/$(orgId))
               && getAfter(/databases/$(database)/documents/organizations/$(orgId)).data.ownerUid == request.auth.uid
+            )
+            ||
+            (
+              isValidOrgMemberCreate(incoming(), memberUid)
+              && isOrgOwnerOrAdmin(orgId)
+              && isOrgWritable(orgId)
             )
           );
         allow update: if isValidId(orgId)
@@ -1233,19 +1254,19 @@ service cloud.firestore {
           && isVerifiedUser()
           && (
             (
-              isOrgOwnerOrAdmin(orgId)
-              && isOrgWritable(orgId)
-              && memberUid != request.auth.uid
-              && existing().role != 'owner'
-              && !existsAfter(/databases/$(database)/documents/users/$(memberUid)/orgRefs/$(orgId))
+              memberUid == request.auth.uid
+              && existing().role == 'owner'
+              && exists(/databases/$(database)/documents/organizations/$(orgId))
+              && orgDoc(orgId).data.ownerUid == request.auth.uid
+              && !existsAfter(/databases/$(database)/documents/organizations/$(orgId))
             )
             ||
             (
-              memberUid == request.auth.uid
-              && existing().role == 'owner'
-              && orgDoc(orgId) != null
-              && orgDoc(orgId).data.ownerUid == request.auth.uid
-              && !existsAfter(/databases/$(database)/documents/organizations/$(orgId))
+              memberUid != request.auth.uid
+              && existing().role != 'owner'
+              && isOrgOwnerOrAdmin(orgId)
+              && isOrgWritable(orgId)
+              && !existsAfter(/databases/$(database)/documents/users/$(memberUid)/orgRefs/$(orgId))
             )
           );
       }
