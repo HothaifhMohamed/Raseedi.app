@@ -85,7 +85,7 @@ export const AuthGateScreen: React.FC = () => {
               title={isRTL ? 'رَصِيدِي' : 'Raseedi'}
             />
             <div>
-              <h1 className="font-title text-xl font-bold text-[var(--color-ink)] tracking-tight">
+              <h1 className="font-title text-xl font-bold text-[var(--color-ink)]">
                 {isRTL ? 'رَصِيدِي' : 'Raseedi'}
               </h1>
               <p className="text-xs text-[var(--color-muted)]">

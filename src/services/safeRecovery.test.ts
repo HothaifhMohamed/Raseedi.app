@@ -118,6 +118,19 @@ test('formatFirestoreErrorForDisplay produces clear diagnostic messages for inde
   assert.match(idxMsg, /failed-precondition/);
   assert.match(idxMsg, /requires an index/);
 
+  const permAr = formatFirestoreErrorForDisplay(
+    { code: 'permission-denied', message: 'Missing or insufficient permissions.' },
+    true
+  );
+  assert.match(permAr, /صلاحية/);
+  assert.doesNotMatch(permAr, /Missing or insufficient permissions/);
+
+  const permEn = formatFirestoreErrorForDisplay(
+    { code: 'permission-denied', message: 'Missing or insufficient permissions.' },
+    false
+  );
+  assert.match(permEn, /Permission denied/i);
+
   const offlineMsg = formatFirestoreErrorForDisplay(
     { code: 'unavailable', message: 'client is offline' },
     false

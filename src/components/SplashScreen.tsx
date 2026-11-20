@@ -11,7 +11,7 @@ export const SplashScreen: React.FC = () => {
       {/* Brand Emblem */}
       <BrandLogo className="w-20 h-20 rounded-2xl mb-4 shadow-sm" title={t('appName')} />
 
-      <h1 className="font-title text-2xl font-bold text-[var(--color-ink)] tracking-tight mb-1">
+      <h1 className="font-title text-2xl font-bold text-[var(--color-ink)] mb-1">
         {t('appName')}
       </h1>
       <p className="text-xs text-[var(--color-muted)] font-medium mb-8">

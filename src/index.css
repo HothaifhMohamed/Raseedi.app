@@ -76,6 +76,11 @@
   font-feature-settings: 'tnum';
 }
 
+/* Preserve connected Arabic glyphs in RTL while keeping code/PIN inputs untouched */
+html[dir="rtl"] *:not(.font-mono):not(input):not(textarea) {
+  letter-spacing: normal;
+}
+
 /* Subtle 3% geometric lattice pattern for wallet cards */
 .pattern-wallet-lines {
   background-image:

@@ -319,7 +319,7 @@ export const Navbar: React.FC = () => {
           <BrandLogo className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl object-cover shadow-sm shrink-0" title={t('appName')} />
           <span
             data-testid="navbar-app-title"
-            className="hidden sm:inline font-title text-base sm:text-lg font-bold text-[var(--color-ink)] leading-normal tracking-tight whitespace-nowrap"
+            className="hidden sm:inline font-title text-base sm:text-lg font-bold text-[var(--color-ink)] leading-normal whitespace-nowrap"
           >
             {t('appName')}
           </span>

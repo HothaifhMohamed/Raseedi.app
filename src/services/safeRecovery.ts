@@ -118,9 +118,10 @@ export function formatFirestoreErrorForDisplay(err: unknown, isRTL: boolean): st
       : `Firestore Index Error (${code || 'failed-precondition'}): ${rawMessage}`;
   }
   if (code === 'permission-denied') {
+    console.warn('[firestore] permission-denied:', rawMessage, err);
     return isRTL
-      ? `صلاحيات الوصول مرفوضة (${code}): ${rawMessage}`
-      : `Firestore permission denied (${code}): ${rawMessage}`;
+      ? 'ليس لديك صلاحية تنفيذ هذه العملية حالياً. تأكد من تسجيل الدخول بحساب Google المفعّل وتحديث الصفحة ثم حاول مرة أخرى.'
+      : 'Permission denied for this action. Please ensure you are signed in with a verified Google account, refresh the page, and try again.';
   }
   if (code === 'unavailable' || rawMessage.toLowerCase().includes('offline')) {
     return isRTL

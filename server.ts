@@ -1247,7 +1247,10 @@ async function createApp() {
 
         const ai = new GoogleGenAI({
           apiKey,
-          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+          httpOptions: {
+            timeout: 45_000,
+            headers: { 'User-Agent': 'aistudio-build' },
+          },
         });
 
         const response = await ai.models.generateContent({
@@ -1276,6 +1279,9 @@ Return JSON matching the schema with:
             },
           ],
           config: {
+            temperature: 0,
+            maxOutputTokens: 512,
+            httpOptions: { timeout: 45_000 },
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.OBJECT,
@@ -1332,7 +1338,19 @@ Return JSON matching the schema with:
           respondCloudAdminUnavailable(res);
           return;
         }
+        const isTimeoutError =
+          error instanceof Error &&
+          (error.name === 'AbortError' ||
+            error.name === 'TimeoutError' ||
+            /timeout|timed out/i.test(error.message));
         console.error('Receipt scan error:', error);
+        if (isTimeoutError) {
+          res.status(504).json({
+            error: 'TIMEOUT',
+            message: 'استغرق تحليل الفاتورة وقتاً طويلاً. حاول مرة أخرى بصورة أوضح أو أصغر حجماً.',
+          });
+          return;
+        }
         res.status(500).json({
           error: 'SCAN_FAILED',
           message: 'تعذر تحليل الفاتورة عبر الذكاء الاصطناعي. تأكد من وضوح الصورة والاتصال بالإنترنت.',

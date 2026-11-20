@@ -1062,7 +1062,7 @@ export const OrganizationHubModal: React.FC = () => {
             <div className="p-3 rounded-xl bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/30 text-xs text-[var(--color-expense)] flex items-center justify-between gap-2 no-print">
               <div className="flex items-center gap-2 min-w-0">
                 <AlertTriangle className="w-4 h-4 shrink-0" />
-                <span className="font-semibold">{orgActionError}</span>
+                <span dir="auto" className="font-semibold">{orgActionError}</span>
               </div>
               <button
                 type="button"
@@ -1910,7 +1910,7 @@ export const OrganizationHubModal: React.FC = () => {
                       : 'bg-[var(--color-income)]/10 border border-[var(--color-income)]/30 text-[var(--color-income)]'
                   }`}
                 >
-                  <span>{teamFeedback.text}</span>
+                  <span dir="auto">{teamFeedback.text}</span>
                 </div>
               )}
 

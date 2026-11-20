@@ -120,11 +120,15 @@ export async function scanReceiptWithAI(
     Authorization: `Bearer ${idToken}`,
   };
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 45_000);
+
   let response: Response;
   try {
     response = await fetch('/api/scan-receipt', {
       method: 'POST',
       headers,
+      signal: controller.signal,
       body: JSON.stringify({
         imageBase64,
         mimeType,
@@ -139,13 +143,26 @@ export async function scanReceiptWithAI(
           })),
       }),
     });
-  } catch {
+  } catch (err) {
+    if (
+      controller.signal.aborted ||
+      (err instanceof Error && err.name === 'AbortError')
+    ) {
+      throw new ReceiptScanError(
+        'TIMEOUT',
+        isRTL
+          ? 'انتهت مهلة تحليل الفاتورة (45 ثانية). حاول مرة أخرى بصورة أوضح أو تحقق من الاتصال.'
+          : 'Receipt analysis timed out (45s). Please try again with a clearer image or check your connection.'
+      );
+    }
     throw new ReceiptScanError(
       'NETWORK_ERROR',
       isRTL
         ? 'تعذر الاتصال بخدمة مسح الفواتير. تحقق من اتصالك بالإنترنت وحاول مرة أخرى.'
         : 'Could not reach the receipt scanner service. Check your connection and try again.'
     );
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   let payload: Partial<ScannedReceiptResult> & {

@@ -4753,6 +4753,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
 
       try {
+        await auth.currentUser.reload().catch(() => null);
+        await auth.currentUser.getIdToken(true).catch(() => null);
+        if (auth.currentUser.emailVerified === false) {
+          return {
+            ok: false,
+            error: isAr
+              ? 'يرجى تأكيد بريدك الإلكتروني في حساب Google أولاً ثم إعادة المحاولة.'
+              : 'Please verify your Google account email address first, then try again.',
+          };
+        }
+
         await ensureUserProfile(auth.currentUser).catch(() => null);
         const result = await createCloudOrganizationDirect({
           name: localWs.organization.name,
@@ -4794,7 +4805,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return { ok: true, orgId: result.orgId };
       } catch (err) {
         const msg = formatFirestoreErrorForDisplay(err, isAr);
-        setOrgActionError(msg);
         return { ok: false, error: msg };
       }
     },
