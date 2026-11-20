@@ -131,6 +131,10 @@ import {
   buildSafeUserProfileUpdatePatch,
   isPermissionDeniedFirestoreError,
 } from './userProfileSync';
+import {
+  buildFallbackCloudUserProfile,
+  executeGoogleSignInWithRecovery,
+} from './googleAuthFlow';
 
 const isPlaceholderConfig =
   !firebaseConfig?.projectId ||
@@ -2064,11 +2068,41 @@ export async function adminCancelOrganizationSubscription(
 export async function signInWithGoogle(): Promise<{
   firebaseUser: User;
   profile: CloudUserProfile;
+  profileSyncDeferred?: boolean;
 }> {
-  const result = await signInWithPopup(auth, googleProvider);
-  const firebaseUser = result.user;
-  const profile = await ensureUserProfile(firebaseUser);
-  return { firebaseUser, profile };
+  const { firebaseUser, profile, profileSyncDeferred } = await executeGoogleSignInWithRecovery<
+    User,
+    CloudUserProfile
+  >({
+    signInWithPopup: async () => {
+      const result = await signInWithPopup(auth, googleProvider);
+      return result.user;
+    },
+    getCurrentUser: () => auth.currentUser,
+    waitAuthStateReady: async () => {
+      if (typeof auth.authStateReady === 'function') {
+        await auth.authStateReady();
+      }
+    },
+    ensureUserProfile: (u) => ensureUserProfile(u),
+    buildFallbackProfile: (u) =>
+      buildFallbackCloudUserProfile({
+        uid: u.uid,
+        email: resolveFirebaseUserEmail(u) || u.email || '',
+        displayName: u.displayName,
+        photoURL: u.photoURL,
+      }),
+    scheduleDeferredProfileSync: (u) => {
+      if (typeof window !== 'undefined') {
+        window.setTimeout(() => {
+          if (auth.currentUser?.uid === u.uid) {
+            void ensureUserProfile(u).catch(() => {});
+          }
+        }, 2500);
+      }
+    },
+  });
+  return { firebaseUser, profile, profileSyncDeferred };
 }
 
 export async function reauthenticateWithGoogle(): Promise<User> {

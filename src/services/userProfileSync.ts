@@ -3,6 +3,8 @@
  * owner-scoped updates, transient error classification, and user-facing error formatting.
  */
 
+import { formatDetailedGoogleAuthError } from './googleAuthFlow';
+
 export interface InitialUserProfileInput {
   uid: string;
   email?: string | null;
@@ -219,39 +221,5 @@ export function shouldSurfaceCloudDiagnosticsError(params: {
  * Converts raw Firebase / wrapped JSON errors into clean, user-friendly Arabic/English copy.
  */
 export function formatUserFriendlyAuthError(err: unknown, isRTL: boolean): string {
-  const rawMessage = err instanceof Error ? err.message : String(err || '');
-  const lower = rawMessage.toLowerCase();
-
-  if (
-    lower.includes('popup-closed-by-user') ||
-    lower.includes('cancelled-popup-request') ||
-    lower.includes('popup-blocked')
-  ) {
-    return isRTL
-      ? 'تم إلغاء نافذة تسجيل الدخول بحساب جوجل. يمكنك المحاولة مرة أخرى.'
-      : 'Google sign-in popup was closed or blocked. Please try again.';
-  }
-
-  if (lower.includes('network-request-failed') || lower.includes('offline')) {
-    return isRTL
-      ? 'تعذر الاتصال بالإنترنت أثناء تسجيل الدخول. تحقق من الشبكة وحاول مرة أخرى.'
-      : 'Network connection error during sign-in. Check your connection and try again.';
-  }
-
-  if (isPermissionDeniedFirestoreError(err)) {
-    return isRTL
-      ? 'جاري إكمال تهيئة حسابك السحابي. يرجى المحاولة مرة أخرى خلال لحظة.'
-      : 'Finalizing your cloud account setup. Please try again in a moment.';
-  }
-
-  // Avoid leaking raw serialized FirestoreErrorInfo JSON payloads to end users
-  if (rawMessage.trim().startsWith('{') && rawMessage.includes('"operationType"')) {
-    return isRTL
-      ? 'حدث تعذر مؤقت أثناء الاتصال بالسحابة. يرجى المحاولة مرة أخرى.'
-      : 'A temporary cloud connection issue occurred. Please try again.';
-  }
-
-  return isRTL
-    ? 'تعذر إتمام تسجيل الدخول بحساب جوجل. حاول مرة أخرى أو جرب الدخول كزائر.'
-    : 'Could not complete Google sign-in. Please try again or continue as Guest.';
+  return formatDetailedGoogleAuthError(err, isRTL);
 }

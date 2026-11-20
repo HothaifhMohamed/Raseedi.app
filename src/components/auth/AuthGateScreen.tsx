@@ -9,11 +9,13 @@ import {
   Globe,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { auth } from '../../services/firebase';
 import { BrandLogo } from '../common/BrandLogo';
 import { DirectPWAInstallButton } from '../common/PWAInstallPrompt';
 
 export const AuthGateScreen: React.FC = () => {
   const {
+    user,
     signInWithGoogleAccount,
     enterGuestMode,
     loadDemoData,
@@ -24,7 +26,7 @@ export const AuthGateScreen: React.FC = () => {
   } = useApp();
 
   const [isSigningIn, setIsSigningIn] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
+  const [signInFailedFallback, setSignInFailedFallback] = useState(false);
 
   // Support automated verification jump (?autostart=1) directly into demo session
   useEffect(() => {
@@ -35,23 +37,38 @@ export const AuthGateScreen: React.FC = () => {
     }
   }, [loadDemoData]);
 
+  // Clear transient error notice immediately if user becomes authenticated
+  useEffect(() => {
+    if (user?.isLoggedIn) {
+      setSignInFailedFallback(false);
+    }
+  }, [user?.isLoggedIn]);
+
   const handleGoogleSignIn = async () => {
-    setAuthError(null);
+    if (isSigningIn) return;
+    setSignInFailedFallback(false);
     setIsSigningIn(true);
     try {
       const res = await signInWithGoogleAccount();
-      if (!res) {
-        setAuthError(
-          cloudSyncError ||
-            (isRTL
-              ? 'تعذر إتمام تسجيل الدخول بحساب جوجل. حاول مرة أخرى أو جرب الدخول كزائر.'
-              : 'Could not complete Google sign-in. Please try again or continue as Guest.')
-        );
+      // Never show an error if login actually succeeded or Firebase Auth has an active user
+      if (!res && !auth.currentUser) {
+        setSignInFailedFallback(true);
       }
     } finally {
       setIsSigningIn(false);
     }
   };
+
+  // Prefer live cloudSyncError (exact cause from Firebase Auth) over generic fallback;
+  // never capture a stale cloudSyncError inside the async click closure.
+  const displayedAuthError = user?.isLoggedIn
+    ? null
+    : cloudSyncError ||
+      (signInFailedFallback
+        ? isRTL
+          ? 'تعذر إتمام تسجيل الدخول بحساب جوجل. حاول مرة أخرى أو جرب الدخول كزائر.'
+          : 'Could not complete Google sign-in. Please try again or continue as Guest.'
+        : null);
 
   return (
     <div
@@ -147,13 +164,14 @@ export const AuthGateScreen: React.FC = () => {
         </div>
 
         {/* Auth Error Notice */}
-        {(authError || cloudSyncError) && (
+        {displayedAuthError && (
           <div
             role="alert"
+            data-testid="auth-gate-error-banner"
             className="p-3 rounded-xl bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/30 text-[11px] text-[var(--color-expense)] flex items-start gap-2"
           >
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-            <span>{authError || cloudSyncError}</span>
+            <span>{displayedAuthError}</span>
           </div>
         )}
 

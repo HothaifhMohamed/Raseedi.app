@@ -165,6 +165,7 @@ import {
   formatUserFriendlyAuthError,
   shouldSurfaceCloudDiagnosticsError,
 } from '../services/userProfileSync';
+import { shouldIgnoreAuthStateChangeDuringInteractiveSignIn } from '../services/googleAuthFlow';
 import {
   canPerformAutomaticCloudWrite,
   isActiveWorkspaceTransaction,
@@ -742,6 +743,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const workspaceSyncEpochRef = React.useRef(0);
   const syncRequestIdRef = React.useRef<number>(0);
   const activeInteractiveGoogleSignInRef = React.useRef<boolean>(false);
+  const inFlightGoogleSignInPromiseRef = React.useRef<
+    Promise<{ restored: boolean; isProRestored: boolean } | null> | null
+  >(null);
   const pendingLocalTxIdsRef = React.useRef<Set<string>>(new Set());
   const locallyDeletedTxIdsRef = React.useRef<Set<string>>(new Set());
   const isEmergencyRecoveryActiveRef = React.useRef(false);
@@ -2385,6 +2389,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Firebase Auth listener
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      // CRITICAL: Check interactive sign-in guard BEFORE incrementing syncRequestIdRef.
+      // When signInWithPopup succeeds, Firebase emits onAuthStateChanged immediately while
+      // signInWithGoogleAccount is still running; incrementing syncRequestIdRef here used
+      // to invalidate Attempt 1 and force a spurious failure on the first login click.
+      if (shouldIgnoreAuthStateChangeDuringInteractiveSignIn(activeInteractiveGoogleSignInRef.current)) {
+        return;
+      }
+
       const reqId = ++syncRequestIdRef.current;
       if (!firebaseUser) {
         hasCompletedInitialCloudSyncRef.current = false;
@@ -2401,11 +2413,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setActiveWorkspace('personal');
           saveActiveWorkspacePref('personal');
         }
-        return;
-      }
-
-      if (activeInteractiveGoogleSignInRef.current) {
-        // signInWithGoogleAccount owns the interactive sign-in & initial profile/onboarding flow
         return;
       }
 
@@ -3287,144 +3294,169 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     restored: boolean;
     isProRestored: boolean;
   } | null> => {
-    activeInteractiveGoogleSignInRef.current = true;
-    const reqId = ++syncRequestIdRef.current;
-    setIsCloudSyncing(true);
-    setCloudSyncError(null);
-    setCloudDiagnosticsError(null);
-    const wasActiveGuest = isGuestModeRef.current;
-    const previousLocalUserId = latestPersonalRef.current.user?.id || null;
-    try {
-      const { firebaseUser, profile } = await signInWithGoogle();
-      if (reqId !== syncRequestIdRef.current) return null;
-      const resolvedEmail = resolveFirebaseUserEmail(firebaseUser);
-      const nextUser: UserAccount = {
-        id: firebaseUser.uid,
-        name: firebaseUser.displayName || resolvedEmail.split('@')[0] || 'Raseedi User',
-        email: resolvedEmail,
-        username: profile.username,
-        avatarUrl: firebaseUser.photoURL || undefined,
-        isLoggedIn: true,
-      };
-      setFirebaseAuthUser({
-        uid: firebaseUser.uid,
-        email: resolvedEmail,
-        emailVerified: firebaseUser.emailVerified,
-      });
-      setUser(nextUser);
-      void refreshAdminStatus(firebaseUser);
+    if (inFlightGoogleSignInPromiseRef.current) {
+      return inFlightGoogleSignInPromiseRef.current;
+    }
 
-      const active = isEntitlementActive(profile);
-      await applyVerifiedProState({
-        uid: firebaseUser.uid,
-        isPro: active,
-        proPlan: active ? profile.proPlan || 'code' : 'free',
-        planTier: resolvePlanTierFromProfile(profile),
-        billingCycle: active ? profile.billingCycle || 'lifetime' : 'free',
-        expiresAt: profile.proExpiresAt ?? profile.expiresAt ?? null,
-        proExpiresAt: profile.proExpiresAt ?? profile.expiresAt ?? null,
-        verifiedAt: Date.now(),
-      });
-      void refreshScanQuota();
-
-      const [cloudMeta, unifiedPersonalTxs] = await Promise.all([
-        fetchCloudBackupMeta(firebaseUser.uid, { forceServer: true }).catch(() => null),
-        fetchWorkspaceTransactionsCloud(firebaseUser.uid, 'personal', { forceServer: true }).catch(
-          () => []
-        ),
-      ]);
-      const hasCloudData = Boolean(cloudMeta) || unifiedPersonalTxs.length > 0;
-      setLastCloudBackupExists(hasCloudData);
-
-      const snap = latestPersonalRef.current;
-      const postAction = resolvePostGoogleSignInAction({
-        hasCloudBackup: hasCloudData,
-        wasActiveGuest,
-        hasLocalOnboarding: Boolean(snap.hasCompletedOnboarding),
-        localTransactionsCount: snap.transactions.length,
-        sameSignedInUser: previousLocalUserId === firebaseUser.uid,
-        hasCloudOnboarding: Boolean(profile.hasCompletedOnboarding),
-      });
-
-      saveGuestModePref(false);
-      setIsGuestMode(false);
-
-      let restored = false;
-      if (postAction === 'restore_cloud_and_enter') {
-        const cloudBackup = await fetchCloudBackup(firebaseUser.uid, { forceServer: true }).catch(
-          () => null
-        );
-        const resolvedUnified =
-          unifiedPersonalTxs.length > 0
-            ? reconcileWorkspaceTransactions(
-                unifiedPersonalTxs,
-                cloudBackup?.transactions || [],
-                { activeWorkspaceId: 'personal', hasServerSnapshot: true }
-              )
-            : (cloudBackup?.transactions || []).filter((tx) =>
-                isActiveWorkspaceTransaction(tx, 'personal')
-              );
-
-        if (cloudBackup) {
-          applyCloudBackupLocally(
-            { ...cloudBackup, transactions: resolvedUnified },
-            nextUser
-          );
-          restored = true;
-        } else if (resolvedUnified.length > 0) {
-          skipNextAutoSyncRef.current = true;
-          setPersonalTransactions(resolvedUnified);
-          setHasCompletedOnboarding(true);
-          savePersonalState(
-            {
-              user: nextUser,
-              transactions: resolvedUnified,
-              hasCompletedOnboarding: true,
-            },
-            { skipDirty: true, immediate: true }
-          );
-          restored = true;
-        }
-      } else if (postAction === 'start_onboarding') {
-        setHasCompletedOnboarding(false);
-        setCloudConflict(null);
-        savePersonalState(
-          { user: nextUser, hasCompletedOnboarding: false },
-          { skipDirty: true, immediate: true }
-        );
-      } else {
-        const shouldMarkOnboarded = Boolean(
-          snap.hasCompletedOnboarding || profile.hasCompletedOnboarding
-        );
-        if (shouldMarkOnboarded && !snap.hasCompletedOnboarding) {
-          setHasCompletedOnboarding(true);
-        }
-        setCloudConflict(null);
-        savePersonalState(
-          { user: nextUser, hasCompletedOnboarding: shouldMarkOnboarded },
-          { skipDirty: true, immediate: true }
-        );
-      }
-
-      hasCompletedInitialCloudSyncRef.current = true;
-      isCloudLoadedRef.current = true;
-      setIsCloudLoaded(true);
+    const task = (async (): Promise<{ restored: boolean; isProRestored: boolean } | null> => {
+      activeInteractiveGoogleSignInRef.current = true;
+      const reqId = ++syncRequestIdRef.current;
+      setIsCloudSyncing(true);
       setCloudSyncError(null);
       setCloudDiagnosticsError(null);
+      const wasActiveGuest = isGuestModeRef.current;
+      const previousLocalUserId = latestPersonalRef.current.user?.id || null;
+      try {
+        const { firebaseUser, profile } = await signInWithGoogle();
+        if (reqId !== syncRequestIdRef.current) return null;
+        const resolvedEmail = resolveFirebaseUserEmail(firebaseUser);
+        const nextUser: UserAccount = {
+          id: firebaseUser.uid,
+          name: firebaseUser.displayName || resolvedEmail.split('@')[0] || 'Raseedi User',
+          email: resolvedEmail,
+          username: profile.username,
+          avatarUrl: firebaseUser.photoURL || undefined,
+          isLoggedIn: true,
+        };
+        setFirebaseAuthUser({
+          uid: firebaseUser.uid,
+          email: resolvedEmail,
+          emailVerified: firebaseUser.emailVerified,
+        });
+        setUser(nextUser);
+        void refreshAdminStatus(firebaseUser);
 
-      void fetchCloudBackupHistory(firebaseUser.uid)
-        .then((list) => setCloudBackupHistory(list))
-        .catch(() => {});
+        const active = isEntitlementActive(profile);
+        await applyVerifiedProState({
+          uid: firebaseUser.uid,
+          isPro: active,
+          proPlan: active ? profile.proPlan || 'code' : 'free',
+          planTier: resolvePlanTierFromProfile(profile),
+          billingCycle: active ? profile.billingCycle || 'lifetime' : 'free',
+          expiresAt: profile.proExpiresAt ?? profile.expiresAt ?? null,
+          proExpiresAt: profile.proExpiresAt ?? profile.expiresAt ?? null,
+          verifiedAt: Date.now(),
+        }).catch((entErr) => {
+          console.warn('[signInWithGoogleAccount] Non-fatal entitlement cache warning:', entErr);
+        });
+        void refreshScanQuota();
 
-      return { restored, isProRestored: active };
-    } catch (err: unknown) {
-      console.warn('[signInWithGoogleAccount] Sign-in warning:', err);
-      const isAr = latestPersonalRef.current.settings.language !== 'en';
-      setCloudSyncError(formatUserFriendlyAuthError(err, isAr));
-      return null;
+        const [cloudMeta, unifiedPersonalTxs] = await Promise.all([
+          fetchCloudBackupMeta(firebaseUser.uid, { forceServer: true }).catch(() =>
+            fetchCloudBackupMeta(firebaseUser.uid, { forceServer: false }).catch(() => null)
+          ),
+          fetchWorkspaceTransactionsCloud(firebaseUser.uid, 'personal', {
+            forceServer: true,
+          }).catch(() =>
+            fetchWorkspaceTransactionsCloud(firebaseUser.uid, 'personal', {
+              forceServer: false,
+            }).catch(() => [])
+          ),
+        ]);
+        const hasCloudData = Boolean(cloudMeta) || unifiedPersonalTxs.length > 0;
+        setLastCloudBackupExists(hasCloudData);
+
+        const snap = latestPersonalRef.current;
+        const postAction = resolvePostGoogleSignInAction({
+          hasCloudBackup: hasCloudData,
+          wasActiveGuest,
+          hasLocalOnboarding: Boolean(snap.hasCompletedOnboarding),
+          localTransactionsCount: snap.transactions.length,
+          sameSignedInUser: previousLocalUserId === firebaseUser.uid,
+          hasCloudOnboarding: Boolean(profile.hasCompletedOnboarding),
+        });
+
+        saveGuestModePref(false);
+        setIsGuestMode(false);
+
+        let restored = false;
+        if (postAction === 'restore_cloud_and_enter') {
+          const cloudBackup = await fetchCloudBackup(firebaseUser.uid, {
+            forceServer: true,
+          }).catch(() =>
+            fetchCloudBackup(firebaseUser.uid, { forceServer: false }).catch(() => null)
+          );
+          const resolvedUnified =
+            unifiedPersonalTxs.length > 0
+              ? reconcileWorkspaceTransactions(
+                  unifiedPersonalTxs,
+                  cloudBackup?.transactions || [],
+                  { activeWorkspaceId: 'personal', hasServerSnapshot: true }
+                )
+              : (cloudBackup?.transactions || []).filter((tx) =>
+                  isActiveWorkspaceTransaction(tx, 'personal')
+                );
+
+          if (cloudBackup) {
+            applyCloudBackupLocally(
+              { ...cloudBackup, transactions: resolvedUnified },
+              nextUser
+            );
+            restored = true;
+          } else if (resolvedUnified.length > 0) {
+            skipNextAutoSyncRef.current = true;
+            setPersonalTransactions(resolvedUnified);
+            setHasCompletedOnboarding(true);
+            savePersonalState(
+              {
+                user: nextUser,
+                transactions: resolvedUnified,
+                hasCompletedOnboarding: true,
+              },
+              { skipDirty: true, immediate: true }
+            );
+            restored = true;
+          }
+        } else if (postAction === 'start_onboarding') {
+          setHasCompletedOnboarding(false);
+          setCloudConflict(null);
+          savePersonalState(
+            { user: nextUser, hasCompletedOnboarding: false },
+            { skipDirty: true, immediate: true }
+          );
+        } else {
+          const shouldMarkOnboarded = Boolean(
+            snap.hasCompletedOnboarding || profile.hasCompletedOnboarding
+          );
+          if (shouldMarkOnboarded && !snap.hasCompletedOnboarding) {
+            setHasCompletedOnboarding(true);
+          }
+          setCloudConflict(null);
+          savePersonalState(
+            { user: nextUser, hasCompletedOnboarding: shouldMarkOnboarded },
+            { skipDirty: true, immediate: true }
+          );
+        }
+
+        hasCompletedInitialCloudSyncRef.current = true;
+        isCloudLoadedRef.current = true;
+        setIsCloudLoaded(true);
+        setCloudSyncError(null);
+        setCloudDiagnosticsError(null);
+
+        void fetchCloudBackupHistory(firebaseUser.uid)
+          .then((list) => setCloudBackupHistory(list))
+          .catch(() => {});
+
+        return { restored, isProRestored: active };
+      } catch (err: unknown) {
+        console.warn('[signInWithGoogleAccount] Sign-in warning:', err);
+        const isAr = latestPersonalRef.current.settings.language !== 'en';
+        setCloudSyncError(formatUserFriendlyAuthError(err, isAr));
+        return null;
+      } finally {
+        activeInteractiveGoogleSignInRef.current = false;
+        setIsCloudSyncing(false);
+      }
+    })();
+
+    inFlightGoogleSignInPromiseRef.current = task;
+    try {
+      return await task;
     } finally {
-      activeInteractiveGoogleSignInRef.current = false;
-      setIsCloudSyncing(false);
+      if (inFlightGoogleSignInPromiseRef.current === task) {
+        inFlightGoogleSignInPromiseRef.current = null;
+      }
     }
   }, [applyCloudBackupLocally, applyVerifiedProState, refreshAdminStatus, refreshScanQuota, savePersonalState]);
 
