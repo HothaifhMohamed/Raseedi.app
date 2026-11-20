@@ -19,12 +19,22 @@ import {
   CheckCircle2,
   KeyRound,
   ShieldCheck,
+  AtSign,
+  Copy,
+  Check,
+  Loader2,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import {
+  formatUsernameHandle,
+  normalizeUsername,
+  validateUsernameFormat,
+} from '../../services/usernameService';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { hashPin } from '../../services/security';
 import { auth, resolveFirebaseUserEmail } from '../../services/firebase';
 import { canUserAccessAdminPanelUi } from '../../services/adminAuth';
+import { getForceCloudSyncAvailability } from '../../services/workspaceSync';
 import {
   CURRENCIES,
   getCurrency,
@@ -70,6 +80,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     isCloudSyncing,
     cloudDiagnosticsError,
     clearCloudDiagnosticsError,
+    checkUsernameAvailable,
+    updateUsername,
     t,
     isRTL,
   } = useApp();
@@ -89,7 +101,29 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
   const [confirmDeleteAccount, setConfirmDeleteAccount] = useState(false);
+  const [confirmForceCloudSync, setConfirmForceCloudSync] = useState(false);
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator === 'undefined' ? true : navigator.onLine
+  );
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  const forceSyncAvailability = getForceCloudSyncAvailability({
+    isLoggedIn: Boolean(user?.isLoggedIn),
+    isOnline,
+    isCloudSyncing,
+  });
   const [deleteAccountError, setDeleteAccountError] = useState<string | null>(null);
   const [needsRecentReauth, setNeedsRecentReauth] = useState(false);
   const [pinInput, setPinInput] = useState('');
@@ -112,6 +146,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     text: string;
     isError?: boolean;
   } | null>(null);
+  const [usernameDraft, setUsernameDraft] = useState(user?.username || '');
+  const [isCheckingUsername, setIsCheckingUsername] = useState(false);
+  const [isSavingUsername, setIsSavingUsername] = useState(false);
+  const [copiedUsername, setCopiedUsername] = useState(false);
+  const [usernameFeedback, setUsernameFeedback] = useState<{
+    text: string;
+    type: 'ok' | 'error' | 'info';
+  } | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -121,10 +163,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setRateDrafts({});
     setRateSyncFeedback(null);
     setEmergencyFeedback(null);
+    setUsernameDraft(user?.username || '');
+    setUsernameFeedback(null);
+    setCopiedUsername(false);
   }, [
     isOpen,
     activeOrganization?.id,
     activeOrganization?.lockedUntilDate,
+    user?.username,
   ]);
 
   const editableCurrencyCodes = useMemo(() => {
@@ -219,6 +265,76 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setPinInput('');
   };
 
+  const handleCheckUsernameAvailability = async () => {
+    const normalized = normalizeUsername(usernameDraft);
+    const fmt = validateUsernameFormat(normalized);
+    if (!fmt.valid) {
+      setUsernameFeedback({
+        text: isRTL ? fmt.errorAr || '' : fmt.errorEn || '',
+        type: 'error',
+      });
+      return;
+    }
+    setIsCheckingUsername(true);
+    setUsernameFeedback(null);
+    try {
+      const res = await checkUsernameAvailable(normalized);
+      if (res.available) {
+        setUsernameFeedback({
+          text: isRTL
+            ? `اسم المستخدم ${formatUsernameHandle(res.normalized)} متاح للاستخدام.`
+            : `Username ${formatUsernameHandle(res.normalized)} is available.`,
+          type: 'ok',
+        });
+      } else {
+        setUsernameFeedback({
+          text: isRTL
+            ? res.errorAr || 'اسم المستخدم غير متاح.'
+            : res.errorEn || 'Username is not available.',
+          type: 'error',
+        });
+      }
+    } finally {
+      setIsCheckingUsername(false);
+    }
+  };
+
+  const handleSaveUsername = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const normalized = normalizeUsername(usernameDraft);
+    const fmt = validateUsernameFormat(normalized);
+    if (!fmt.valid) {
+      setUsernameFeedback({
+        text: isRTL ? fmt.errorAr || '' : fmt.errorEn || '',
+        type: 'error',
+      });
+      return;
+    }
+    setIsSavingUsername(true);
+    setUsernameFeedback(null);
+    try {
+      const res = await updateUsername(normalized);
+      if (res.ok && res.username) {
+        setUsernameDraft(res.username);
+        setUsernameFeedback({
+          text: isRTL
+            ? `تم حفظ اسم المستخدم ${formatUsernameHandle(res.username)} بنجاح!`
+            : `Username ${formatUsernameHandle(res.username)} saved successfully!`,
+          type: 'ok',
+        });
+      } else {
+        setUsernameFeedback({
+          text:
+            res.error ||
+            (isRTL ? 'تعذر حفظ اسم المستخدم.' : 'Failed to save username.'),
+          type: 'error',
+        });
+      }
+    } finally {
+      setIsSavingUsername(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="w-full max-w-md max-h-[90vh] flex flex-col bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl text-[var(--color-ink)] shadow-xl overflow-hidden">
@@ -238,6 +354,110 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         {/* Settings Form Body */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {/* 0. Account Identity & Unique @username */}
+          {user?.isLoggedIn && (
+            <form
+              onSubmit={handleSaveUsername}
+              data-testid="settings-username-card"
+              className="p-4 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl space-y-3"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <h4 className="text-xs font-bold text-[var(--color-ink)] flex items-center gap-1.5">
+                  <AtSign className="w-3.5 h-3.5 text-[var(--color-accent)]" />
+                  <span>{isRTL ? 'اسم المستخدم الفريد (@username)' : 'Unique Handle (@username)'}</span>
+                </h4>
+                {user.username && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard?.writeText(formatUsernameHandle(user.username || ''));
+                      setCopiedUsername(true);
+                      setTimeout(() => setCopiedUsername(false), 1800);
+                    }}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[var(--color-accent)]/12 text-[var(--color-accent)] text-[10px] font-mono font-bold"
+                    dir="ltr"
+                  >
+                    <span>{formatUsernameHandle(user.username)}</span>
+                    {copiedUsername ? (
+                      <Check className="w-3 h-3 text-[var(--color-income)]" />
+                    ) : (
+                      <Copy className="w-3 h-3" />
+                    )}
+                  </button>
+                )}
+              </div>
+
+              <p className="text-[11px] text-[var(--color-muted)] leading-relaxed">
+                {isRTL
+                  ? 'يُستخدم اسم المستخدم الفريد لإضافتك مباشرة إلى فرق المؤسسات بدون أكواد دعوة. يُسمح بالأحرف الإنجليزية والأرقام والشرطة السفلية (_).'
+                  : 'Used by organization owners to add you directly to teams without invite codes. Lowercase letters, numbers, and underscores only.'}
+              </p>
+
+              <div className="flex items-center gap-1.5">
+                <div className="relative flex-1 min-w-0">
+                  <AtSign className="w-3.5 h-3.5 text-[var(--color-muted)] absolute top-1/2 -translate-y-1/2 start-2.5 pointer-events-none" />
+                  <input
+                    type="text"
+                    dir="ltr"
+                    data-testid="settings-username-input"
+                    value={usernameDraft}
+                    onChange={(e) => {
+                      setUsernameDraft(e.target.value.replace(/^@+/, ''));
+                      setUsernameFeedback(null);
+                    }}
+                    placeholder="ahmed_acc"
+                    className="w-full ps-7 pe-2.5 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs font-mono text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[38px]"
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={isCheckingUsername || isSavingUsername || !usernameDraft.trim()}
+                  onClick={() => void handleCheckUsernameAvailability()}
+                  className="px-2.5 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-[var(--color-ink)] text-[11px] font-semibold min-h-[38px] shrink-0 disabled:opacity-45"
+                >
+                  {isCheckingUsername ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : isRTL ? (
+                    'فحص'
+                  ) : (
+                    'Check'
+                  )}
+                </button>
+                <button
+                  type="submit"
+                  data-testid="settings-username-save-btn"
+                  disabled={
+                    isSavingUsername ||
+                    !usernameDraft.trim() ||
+                    normalizeUsername(usernameDraft) === user.username
+                  }
+                  className="px-3 py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-[11px] font-bold min-h-[38px] shrink-0 disabled:opacity-45"
+                >
+                  {isSavingUsername ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : isRTL ? (
+                    'حفظ'
+                  ) : (
+                    'Save'
+                  )}
+                </button>
+              </div>
+
+              {usernameFeedback && (
+                <div
+                  data-testid="settings-username-feedback"
+                  className={`p-2 rounded-lg text-[11px] font-medium border ${
+                    usernameFeedback.type === 'error'
+                      ? 'bg-[var(--color-expense)]/10 border-[var(--color-expense)]/30 text-[var(--color-expense)]'
+                      : 'bg-[var(--color-income)]/10 border-[var(--color-income)]/30 text-[var(--color-income)]'
+                  }`}
+                >
+                  {usernameFeedback.text}
+                </div>
+              )}
+            </form>
+          )}
+
           {/* 1. Language & Theme */}
           <div className="p-4 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl space-y-3">
             <h4 className="text-xs font-bold text-[var(--color-ink)]">
@@ -964,34 +1184,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <button
               type="button"
               data-testid="settings-emergency-recovery-btn"
-              disabled={isCloudSyncing}
-              onClick={async () => {
-                setEmergencyFeedback(null);
-                const res = await emergencyCloudRecovery();
-                if (res.ok) {
-                  const totalRecovered = res.recoveredPersonalCount + res.recoveredOrgCount;
-                  setEmergencyFeedback({
-                    text: isRTL
-                      ? totalRecovered > 0
-                        ? `تم استرجاع ${totalRecovered} معاملة بنجاح مباشرة من الخادم السحابي (الشخصي: ${res.recoveredPersonalCount}، المؤسسة: ${res.recoveredOrgCount}).`
-                        : 'اكتمل الاتصال المباشر بالخادم السحابي ولا توجد معاملات إضافية للاسترجاع.'
-                      : totalRecovered > 0
-                      ? `Restored ${totalRecovered} transactions directly from server (Personal: ${res.recoveredPersonalCount}, Org: ${res.recoveredOrgCount}).`
-                      : 'Direct server sync finished; no additional remote transactions were found.',
-                    isError: false,
-                  });
-                } else {
-                  setEmergencyFeedback({
-                    text:
-                      res.errorMessage ||
-                      (isRTL
-                        ? 'فشلت المزامنة السحابية الإجبارية.'
-                        : 'Force cloud recovery failed.'),
-                    isError: true,
-                  });
-                }
-              }}
-              className="w-full py-2.5 px-3 bg-[var(--color-accent)] text-[var(--color-on-accent)] hover:opacity-95 font-bold rounded-lg text-xs flex items-center justify-center gap-2 transition-opacity min-h-[44px] disabled:opacity-60"
+              disabled={!forceSyncAvailability.canExecute}
+              onClick={() => setConfirmForceCloudSync(true)}
+              className="w-full py-2.5 px-3 bg-[var(--color-accent)] text-[var(--color-on-accent)] hover:opacity-95 font-bold rounded-lg text-xs flex items-center justify-center gap-2 transition-opacity min-h-[44px] disabled:opacity-45 disabled:cursor-not-allowed"
             >
               {isCloudSyncing ? (
                 <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
@@ -1004,6 +1199,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   : 'Force Cloud Sync (Recover Data)'}
               </span>
             </button>
+
+            {!forceSyncAvailability.canExecute && forceSyncAvailability.reason !== 'syncing' && (
+              <p className="text-[10px] text-[var(--color-muted)] leading-relaxed">
+                {forceSyncAvailability.reason === 'guest'
+                  ? isRTL
+                    ? 'متاح فقط بعد تسجيل الدخول بحساب Google (معطّل في وضع الضيف).'
+                    : 'Available only after signing in with Google (disabled in Guest mode).'
+                  : isRTL
+                  ? 'غير متاح حالياً لعدم توفر اتصال بالإنترنت.'
+                  : 'Unavailable while offline. Connect to the internet to use cloud recovery.'}
+              </p>
+            )}
 
             {(emergencyFeedback || cloudDiagnosticsError) && (
               <div
@@ -1198,6 +1405,50 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         }
         confirmLabel={isRTL ? 'نعم، احذف الحساب والبيانات' : 'Delete Account & Data'}
         cancelLabel={t('cancel')}
+      />
+
+      {/* Force Cloud Sync Confirmation */}
+      <ConfirmationModal
+        isOpen={confirmForceCloudSync}
+        onClose={() => setConfirmForceCloudSync(false)}
+        onConfirm={() => {
+          void (async () => {
+            if (!forceSyncAvailability.canExecute) return;
+            setEmergencyFeedback(null);
+            const res = await emergencyCloudRecovery();
+            if (res.ok) {
+              const totalRecovered = res.recoveredPersonalCount + res.recoveredOrgCount;
+              setEmergencyFeedback({
+                text: isRTL
+                  ? totalRecovered > 0
+                    ? `تم استرجاع ${totalRecovered} معاملة بنجاح مباشرة من الخادم السحابي (الشخصي: ${res.recoveredPersonalCount}، المؤسسة: ${res.recoveredOrgCount}).`
+                    : 'اكتمل الاتصال المباشر بالخادم السحابي ولا توجد معاملات إضافية للاسترجاع.'
+                  : totalRecovered > 0
+                  ? `Restored ${totalRecovered} transactions directly from server (Personal: ${res.recoveredPersonalCount}, Org: ${res.recoveredOrgCount}).`
+                  : 'Direct server sync finished; no additional remote transactions were found.',
+                isError: false,
+              });
+            } else {
+              setEmergencyFeedback({
+                text:
+                  res.errorMessage ||
+                  (isRTL
+                    ? 'فشلت المزامنة السحابية الإجبارية.'
+                    : 'Force cloud recovery failed.'),
+                isError: true,
+              });
+            }
+          })();
+        }}
+        title={isRTL ? 'تأكيد المزامنة السحابية الإجبارية' : 'Confirm Force Cloud Sync'}
+        message={
+          isRTL
+            ? 'سيقوم هذا الإجراء بمسح الكاش المحلي للمعاملات على هذا الجهاز وإعادة تحميل أحدث نسخة محفوظة مباشرة من السحابة.\n\nتنبيه مهم: إذا كانت لديك تعديلات حديثة أو عمليات استيراد لم تكتمل مزامنتها السحابية بعد، فقد يتم استبدالها بالنسخة المحفوظة في السحابة.'
+            : 'This action will clear the local transaction cache on this device and re-download the latest saved copy directly from the Cloud.\n\nImportant warning: Any recent local edits or imports that have not finished syncing to the Cloud yet may be replaced by the cloud copy.'
+        }
+        confirmLabel={isRTL ? 'نعم، استرجاع من السحابة' : 'Yes, Recover from Cloud'}
+        cancelLabel={t('cancel')}
+        isDestructive={true}
       />
     </div>
   );

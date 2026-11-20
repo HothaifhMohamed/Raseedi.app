@@ -6,6 +6,22 @@ const VALID_ID_REGEX = /^[a-zA-Z0-9_\-]+$/;
 const ALLOWED_TX_TYPES = new Set<TransactionType>(['expense', 'income', 'transfer']);
 const MAX_INLINE_ATTACHMENT_CHARS = 24_000;
 
+/**
+ * Optimal Firestore WriteBatch size for bulk imports (within 400–450 ops,
+ * safely under Firestore's 500-operation hard batch limit).
+ */
+export const FIRESTORE_IMPORT_BATCH_SIZE = 425;
+
+export function chunkArray<T>(items: readonly T[], chunkSize = FIRESTORE_IMPORT_BATCH_SIZE): T[][] {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  const safeSize = Math.max(1, Math.min(450, Math.floor(chunkSize) || FIRESTORE_IMPORT_BATCH_SIZE));
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += safeSize) {
+    chunks.push(items.slice(i, i + safeSize));
+  }
+  return chunks;
+}
+
 export function normalizeWorkspaceId(workspaceId?: string | null): string {
   const trimmed = typeof workspaceId === 'string' ? workspaceId.trim() : '';
   if (!trimmed) return 'personal';
@@ -69,6 +85,30 @@ export function canPerformAutomaticCloudWrite(params: {
   return Boolean(
     params.isAuthenticated && params.isCloudLoaded && !params.isEmergencyRecoveryActive
   );
+}
+
+export type ForceCloudSyncUnavailableReason = 'guest' | 'offline' | 'syncing' | null;
+
+export interface ForceCloudSyncAvailability {
+  canExecute: boolean;
+  reason: ForceCloudSyncUnavailableReason;
+}
+
+export function getForceCloudSyncAvailability(params: {
+  isLoggedIn: boolean;
+  isOnline: boolean;
+  isCloudSyncing: boolean;
+}): ForceCloudSyncAvailability {
+  if (!params.isLoggedIn) {
+    return { canExecute: false, reason: 'guest' };
+  }
+  if (!params.isOnline) {
+    return { canExecute: false, reason: 'offline' };
+  }
+  if (params.isCloudSyncing) {
+    return { canExecute: false, reason: 'syncing' };
+  }
+  return { canExecute: true, reason: null };
 }
 
 export type WorkspaceSyncPriority =

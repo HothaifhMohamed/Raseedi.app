@@ -38,6 +38,8 @@ import {
 } from '../../services/dashboardStats';
 import { MoneyText } from '../common/MoneyText';
 import { HairlineEmptyState } from '../common/HairlineVisuals';
+import { DashboardSkeleton } from '../common/SkeletonLoaders';
+import { indexById } from '../../services/lookupCache';
 
 interface HomeDashboardProps {
   onOpenFullLedger: () => void;
@@ -54,6 +56,7 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
 }) => {
   const {
     isOrgWorkspace,
+    isOrgLoading,
     activeOrganization,
     activeOrgRole,
     canOrgWrite,
@@ -190,7 +193,14 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
     [wallets]
   );
 
+  const categoriesById = useMemo(() => indexById(categories), [categories]);
+  const walletsById = useMemo(() => indexById(wallets), [wallets]);
+
   const canWriteTx = !isOrgWorkspace || (!isOrgReadOnly && canOrgWrite);
+
+  if (isOrgWorkspace && isOrgLoading && transactions.length === 0 && wallets.length === 0) {
+    return <DashboardSkeleton isRTL={isRTL} />;
+  }
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto px-4 pt-3 pb-28 space-y-4" dir={isRTL ? 'rtl' : 'ltr'} data-testid="home-smart-dashboard">
@@ -639,11 +649,9 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
             />
           ) : (
             recentTransactions.map((tx) => {
-              const cat = categories.find((c) => c.id === tx.categoryId);
-              const wallet = wallets.find((w) => w.id === tx.walletId);
-              const toWallet = tx.toWalletId
-                ? wallets.find((w) => w.id === tx.toWalletId)
-                : null;
+              const cat = categoriesById.get(tx.categoryId);
+              const wallet = walletsById.get(tx.walletId);
+              const toWallet = tx.toWalletId ? walletsById.get(tx.toWalletId) : undefined;
               const catName = isRTL ? cat?.nameAr || 'عام' : cat?.nameEn || 'General';
               const isApprovedEmployeeLocked =
                 isOrgWorkspace &&

@@ -443,13 +443,28 @@ export function resolvePostGoogleSignInAction(params: {
   wasActiveGuest: boolean;
   hasLocalOnboarding: boolean;
   localTransactionsCount: number;
+  sameSignedInUser?: boolean;
+  hasCloudOnboarding?: boolean;
 }): PostGoogleSignInAction {
-  const { hasCloudBackup, wasActiveGuest, hasLocalOnboarding, localTransactionsCount } = params;
+  const {
+    hasCloudBackup,
+    wasActiveGuest,
+    hasLocalOnboarding,
+    localTransactionsCount,
+    sameSignedInUser = false,
+    hasCloudOnboarding = false,
+  } = params;
   if (!wasActiveGuest) {
-    return hasCloudBackup ? 'restore_cloud_and_enter' : 'start_onboarding';
+    if (hasCloudBackup) return 'restore_cloud_and_enter';
+    if (hasCloudOnboarding || (sameSignedInUser && hasLocalOnboarding)) {
+      return 'preserve_local_session';
+    }
+    return 'start_onboarding';
   }
   if (!hasLocalOnboarding && localTransactionsCount === 0) {
-    return hasCloudBackup ? 'restore_cloud_and_enter' : 'start_onboarding';
+    if (hasCloudBackup) return 'restore_cloud_and_enter';
+    if (hasCloudOnboarding) return 'preserve_local_session';
+    return 'start_onboarding';
   }
   return 'preserve_local_session';
 }

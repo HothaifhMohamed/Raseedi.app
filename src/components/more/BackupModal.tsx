@@ -14,13 +14,16 @@ import {
   FileSpreadsheet,
   KeyRound,
   Cloud,
+  CloudDownload,
   RefreshCw,
   LogOut,
   Crown,
   RotateCcw,
   History,
+  AlertTriangle,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { ConfirmationModal } from '../common/ConfirmationModal';
 import {
   mergeSettingsWithDefaults,
   persistData,
@@ -32,14 +35,24 @@ import {
   isEncryptedBackupPayload,
 } from '../../services/security';
 import {
-  parseImportFileBuffer,
+  parseImportFileBufferAsync,
   autoDetectCsvMapping,
-  mapCsvRowsToTransactions,
+  mapCsvRowsToTransactionsChunked,
   commitImportedTransactionsWithCloudSync,
   CsvColumnMapping,
+  CsvImportMappingResult,
 } from '../../services/csvImport';
+import {
+  IMPORT_STAGES,
+  IMPORT_STAGE_ORDER,
+  ImportProgressState,
+  buildImportProgressState,
+  formatImportProgressCounter,
+  yieldToMainThread,
+} from '../../services/importProgress';
 import { formatLocalDate } from '../../services/calculations';
 import {
+  getForceCloudSyncAvailability,
   tagTransactionsWithWorkspace,
   tagWalletsWithWorkspace,
 } from '../../services/workspaceSync';
@@ -79,6 +92,9 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     setIsLogoutModalOpen,
     syncToCloudNow,
     restoreFromCloudNow,
+    emergencyCloudRecovery,
+    cloudDiagnosticsError,
+    clearCloudDiagnosticsError,
     updateSettings,
     importSpreadsheetBatchLocally,
     syncWorkspaceBackupNow,
@@ -93,6 +109,60 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     localOnly?: boolean;
     retryWorkspaceId?: string;
   } | null>(null);
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator === 'undefined' ? true : navigator.onLine
+  );
+  const [isForceSyncConfirmOpen, setIsForceSyncConfirmOpen] = useState(false);
+  const [emergencyFeedback, setEmergencyFeedback] = useState<{
+    text: string;
+    isError?: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  const forceSyncAvailability = getForceCloudSyncAvailability({
+    isLoggedIn: Boolean(user?.isLoggedIn),
+    isOnline,
+    isCloudSyncing,
+  });
+
+  const handleConfirmForceCloudSync = async () => {
+    if (!forceSyncAvailability.canExecute) return;
+    setEmergencyFeedback(null);
+    const res = await emergencyCloudRecovery();
+    if (res.ok) {
+      const totalRecovered = res.recoveredPersonalCount + res.recoveredOrgCount;
+      setEmergencyFeedback({
+        text: isRTL
+          ? totalRecovered > 0
+            ? `تمت المزامنة السحابية الإجبارية واسترجاع ${totalRecovered} معاملة بنجاح من الخادم.`
+            : 'اكتمل الفحص المباشر من الخادم، ولا توجد معاملات إضافية غير متزامنة.'
+          : totalRecovered > 0
+          ? `Force cloud recovery succeeded: ${totalRecovered} transactions restored from server.`
+          : 'Direct server fetch completed with no additional remote transactions.',
+        isError: false,
+      });
+    } else {
+      setEmergencyFeedback({
+        text:
+          res.errorMessage ||
+          (isRTL
+            ? 'تعذرت المزامنة السحابية الإجبارية.'
+            : 'Force cloud sync failed.'),
+        isError: true,
+      });
+    }
+  };
 
   // JSON encryption / decryption state
   const [useEncryption, setUseEncryption] = useState(false);
@@ -122,11 +192,43 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
   const [targetWalletId, setTargetWalletId] = useState(wallets[0]?.id || '');
   const [skipDuplicates, setSkipDuplicates] = useState(true);
   const [isImportingCsv, setIsImportingCsv] = useState(false);
+  const [isParsingImportFile, setIsParsingImportFile] = useState(false);
+  const [importProgress, setImportProgress] = useState<ImportProgressState | null>(null);
+  const [csvPreviewResult, setCsvPreviewResult] = useState<CsvImportMappingResult>({
+    previewRows: [],
+    validCount: 0,
+    invalidCount: 0,
+    duplicateCount: 0,
+    autoCreatedWallets: [],
+    autoCreatedCategories: [],
+  });
   const [isRefreshingHistory, setIsRefreshingHistory] = useState(false);
   const [restoringHistoryId, setRestoringHistoryId] = useState<string | null>(null);
   const importFileBytesRef = useRef<{ bytes: Uint8Array; fileName: string; mimeType: string } | null>(
     null
   );
+  const previewJobIdRef = useRef(0);
+
+  const isImportLocked = Boolean(
+    importProgress?.active || isImportingCsv || isParsingImportFile || isProcessingJson
+  );
+
+  const handleSafeClose = () => {
+    if (isImportLocked) return;
+    onClose();
+  };
+
+  useEffect(() => {
+    if (!isImportLocked || typeof window === 'undefined') return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [isImportLocked]);
 
   useEffect(() => {
     if (!isOpen || activeTab !== 'json' || !user?.isLoggedIn) return;
@@ -271,55 +373,178 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
   };
 
   const restoreFromPlainJsonText = async (plainText: string) => {
-    const parsed = JSON.parse(plainText);
-    const validation = validateBackupSchema(parsed);
-    if (!validation.valid) {
-      throw new Error(
-        validation.reason || (isRTL ? 'الملف غير مطابق لصيغة رَصِيدِي' : 'Invalid Raseedi backup file')
+    const hasCloudSync = Boolean(user?.isLoggedIn);
+    setIsProcessingJson(true);
+    setImportProgress(
+      buildImportProgressState({
+        stage: 'parsing',
+        processed: 0,
+        total: 1,
+        hasCloudSync,
+      })
+    );
+    try {
+      await yieldToMainThread();
+      const parsed = JSON.parse(plainText);
+      const rawTransactions = Array.isArray(parsed?.transactions) ? parsed.transactions : [];
+      const txTotal = rawTransactions.length;
+
+      setImportProgress(
+        buildImportProgressState({
+          stage: 'parsing',
+          processed: 1,
+          total: 1,
+          hasCloudSync,
+        })
       );
+      await yieldToMainThread();
+
+      setImportProgress(
+        buildImportProgressState({
+          stage: 'validating',
+          processed: 0,
+          total: Math.max(1, txTotal),
+          hasCloudSync,
+        })
+      );
+      const validation = validateBackupSchema(parsed);
+      if (!validation.valid) {
+        throw new Error(
+          validation.reason || (isRTL ? 'الملف غير مطابق لصيغة رَصِيدِي' : 'Invalid Raseedi backup file')
+        );
+      }
+
+      const taggedTransactions: typeof transactions = [];
+      const CHUNK_SIZE = 200;
+      for (let i = 0; i < rawTransactions.length; i += CHUNK_SIZE) {
+        const slice = rawTransactions.slice(i, i + CHUNK_SIZE) as typeof transactions;
+        taggedTransactions.push(...tagTransactionsWithWorkspace(slice, 'personal'));
+        setImportProgress(
+          buildImportProgressState({
+            stage: 'validating',
+            processed: Math.min(txTotal, i + slice.length),
+            total: Math.max(1, txTotal),
+            hasCloudSync,
+          })
+        );
+        await yieldToMainThread();
+      }
+      if (txTotal === 0) {
+        setImportProgress(
+          buildImportProgressState({
+            stage: 'validating',
+            processed: 1,
+            total: 1,
+            hasCloudSync,
+          })
+        );
+      }
+
+      setImportProgress(
+        buildImportProgressState({
+          stage: 'saving_local',
+          processed: 0,
+          total: Math.max(1, txTotal),
+          hasCloudSync,
+        })
+      );
+      await yieldToMainThread();
+      await createPreRestoreSnapshot();
+
+      await persistData({
+        transactions: taggedTransactions,
+        wallets: tagWalletsWithWorkspace(parsed.wallets || [], 'personal'),
+        categories: parsed.categories || categories,
+        budgets: parsed.budgets || [],
+        debts: parsed.debts || [],
+        goals: parsed.goals || [],
+        templates: parsed.templates || [],
+        moneyCircles: parsed.moneyCircles || [],
+        settings: mergeSettingsWithDefaults(parsed.settings || settings),
+        user: user || null,
+        hasCompletedOnboarding: true,
+      });
+
+      setImportProgress(
+        buildImportProgressState({
+          stage: 'saving_local',
+          processed: Math.max(1, txTotal),
+          total: Math.max(1, txTotal),
+          hasCloudSync,
+        })
+      );
+      await yieldToMainThread();
+
+      let cloudSynced = false;
+      if (hasCloudSync) {
+        setImportProgress(
+          buildImportProgressState({
+            stage: 'syncing_cloud',
+            processed: 0,
+            total: Math.max(1, txTotal),
+            hasCloudSync: true,
+          })
+        );
+        const cloudRes = await syncWorkspaceBackupNow('personal', taggedTransactions, {
+          onProgress: (processed, total) => {
+            setImportProgress(
+              buildImportProgressState({
+                stage: 'syncing_cloud',
+                processed,
+                total: Math.max(1, total),
+                hasCloudSync: true,
+              })
+            );
+          },
+        });
+        cloudSynced = cloudRes.ok;
+      }
+
+      let hasQueuedLegacyOrgs = false;
+      if (
+        parsed.orgWorkspaces &&
+        typeof parsed.orgWorkspaces === 'object' &&
+        !Array.isArray(parsed.orgWorkspaces) &&
+        Object.keys(parsed.orgWorkspaces).length > 0
+      ) {
+        queueLegacyOrgsForMigration(parsed.orgWorkspaces);
+        hasQueuedLegacyOrgs = true;
+      }
+
+      setImportProgress(
+        buildImportProgressState({
+          stage: hasCloudSync ? 'syncing_cloud' : 'saving_local',
+          processed: Math.max(1, txTotal),
+          total: Math.max(1, txTotal),
+          hasCloudSync,
+          active: false,
+        })
+      );
+
+      setPendingEncryptedPayload(null);
+      setDecryptPassword('');
+      setMessage({
+        text: hasQueuedLegacyOrgs
+          ? isRTL
+            ? 'تمت استعادة البيانات الشخصية وتجهيز المؤسسات للترحيل السحابي! سيتم تحديث الصفحة...'
+            : 'Personal data restored & legacy organizations queued for Cloud migration! Refreshing...'
+          : hasCloudSync && !cloudSynced
+          ? isRTL
+            ? 'تمت استعادة البيانات محلياً بنجاح (ستُستكمل المزامنة السحابية بعد التحديث). سيتم تحديث الصفحة...'
+            : 'Personal data restored locally (cloud sync will resume after reload). Refreshing...'
+          : isRTL
+          ? 'تمت استعادة البيانات الشخصية ومزامنتها بنجاح! سيتم تحديث الصفحة...'
+          : 'Personal data restored successfully! Refreshing...',
+      });
+      setTimeout(() => {
+        window.location.reload();
+      }, 900);
+    } catch (err) {
+      setImportProgress(null);
+      throw err;
+    } finally {
+      setIsProcessingJson(false);
     }
-
-    await createPreRestoreSnapshot();
-
-    await persistData({
-      transactions: tagTransactionsWithWorkspace(parsed.transactions || [], 'personal'),
-      wallets: tagWalletsWithWorkspace(parsed.wallets || [], 'personal'),
-      categories: parsed.categories || categories,
-      budgets: parsed.budgets || [],
-      debts: parsed.debts || [],
-      goals: parsed.goals || [],
-      templates: parsed.templates || [],
-      moneyCircles: parsed.moneyCircles || [],
-      settings: mergeSettingsWithDefaults(parsed.settings || settings),
-      user: user || null,
-      hasCompletedOnboarding: true,
-    });
-
-    let hasQueuedLegacyOrgs = false;
-    if (
-      parsed.orgWorkspaces &&
-      typeof parsed.orgWorkspaces === 'object' &&
-      !Array.isArray(parsed.orgWorkspaces) &&
-      Object.keys(parsed.orgWorkspaces).length > 0
-    ) {
-      queueLegacyOrgsForMigration(parsed.orgWorkspaces);
-      hasQueuedLegacyOrgs = true;
-    }
-
-    setPendingEncryptedPayload(null);
-    setDecryptPassword('');
-    setMessage({
-      text: hasQueuedLegacyOrgs
-        ? isRTL
-          ? 'تمت استعادة البيانات الشخصية وتجهيز المؤسسات للترحيل السحابي! سيتم تحديث الصفحة...'
-          : 'Personal data restored & legacy organizations queued for Cloud migration! Refreshing...'
-        : isRTL
-        ? 'تمت استعادة البيانات الشخصية بنجاح! سيتم تحديث الصفحة...'
-        : 'Personal data restored successfully! Refreshing...',
-    });
-    setTimeout(() => {
-      window.location.reload();
-    }, 1000);
   };
 
   const MAX_IMPORT_FILE_BYTES = 25 * 1024 * 1024; // 25MB safety cap
@@ -327,7 +552,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
   // Import full JSON (detects encrypted payload automatically)
   const handleImportJSON = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || isImportLocked) return;
     e.target.value = '';
 
     if (file.size > MAX_IMPORT_FILE_BYTES) {
@@ -367,7 +592,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
 
   const handleDecryptAndRestore = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!pendingEncryptedPayload || !decryptPassword.trim()) return;
+    if (!pendingEncryptedPayload || !decryptPassword.trim() || isImportLocked) return;
 
     setIsProcessingJson(true);
     try {
@@ -384,55 +609,90 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
   };
 
   const resetImportPreviewState = () => {
+    previewJobIdRef.current += 1;
     setCsvHeaders([]);
     setCsvRows([]);
     setCsvRecords([]);
     setCsvFileName('');
     setImportSheetNames([]);
     setImportActiveSheet('');
+    setCsvPreviewResult({
+      previewRows: [],
+      validCount: 0,
+      invalidCount: 0,
+      duplicateCount: 0,
+      autoCreatedWallets: [],
+      autoCreatedCategories: [],
+    });
     importFileBytesRef.current = null;
   };
 
-  // Excel (.xlsx / .xls) & CSV Import Handlers
-  const applyParsedImportData = (
+  // Excel (.xlsx / .xls) & CSV Import Handlers (non-blocking chunked parsing)
+  const applyParsedImportData = async (
     bytes: Uint8Array,
     fileName: string,
     mimeType: string,
     sheetName?: string
   ) => {
-    const result = parseImportFileBuffer({
-      bytes,
-      fileName,
-      mimeType,
-      sheetName,
-    });
-
-    if (!result.ok) {
-      resetImportPreviewState();
-      setMessage({
-        text: isRTL ? result.errorAr : result.errorEn,
-        error: true,
-      });
-      return;
-    }
-
-    importFileBytesRef.current = { bytes, fileName, mimeType };
-    setCsvFileName(fileName);
-    setCsvHeaders(result.data.headers);
-    setCsvRows(result.data.rows);
-    setCsvRecords(result.data.records);
-    setImportSheetNames(result.data.sheetNames || []);
-    setImportActiveSheet(result.data.activeSheet || '');
-    setCsvMapping({ ...autoDetectCsvMapping(result.data.headers), typeIndex: -1 });
-    if (!targetWalletId && wallets[0]) {
-      setTargetWalletId(wallets[0].id);
-    }
+    const hasCloudSync = Boolean(user?.isLoggedIn);
+    setIsParsingImportFile(true);
     setMessage(null);
+    setImportProgress(
+      buildImportProgressState({
+        stage: 'parsing',
+        processed: 0,
+        total: 1,
+        hasCloudSync,
+      })
+    );
+    try {
+      const result = await parseImportFileBufferAsync({
+        bytes,
+        fileName,
+        mimeType,
+        sheetName,
+        onProgress: (processed, total) => {
+          setImportProgress(
+            buildImportProgressState({
+              stage: 'parsing',
+              processed,
+              total: Math.max(1, total),
+              hasCloudSync,
+            })
+          );
+        },
+      });
+
+      if (!result.ok) {
+        resetImportPreviewState();
+        setImportProgress(null);
+        setMessage({
+          text: isRTL ? result.errorAr : result.errorEn,
+          error: true,
+        });
+        return;
+      }
+
+      importFileBytesRef.current = { bytes, fileName, mimeType };
+      setCsvFileName(fileName);
+      setCsvHeaders(result.data.headers);
+      setCsvRows(result.data.rows);
+      setCsvRecords(result.data.records);
+      setImportSheetNames(result.data.sheetNames || []);
+      setImportActiveSheet(result.data.activeSheet || '');
+      setCsvMapping({ ...autoDetectCsvMapping(result.data.headers), typeIndex: -1 });
+      if (!targetWalletId && wallets[0]) {
+        setTargetWalletId(wallets[0].id);
+      }
+      setMessage(null);
+    } finally {
+      setIsParsingImportFile(false);
+    }
   };
 
   const handleCsvFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || isImportLocked) return;
     e.target.value = '';
 
     if (file.size > MAX_IMPORT_FILE_BYTES) {
@@ -449,9 +709,10 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     try {
       const buffer = await file.arrayBuffer();
       const bytes = new Uint8Array(buffer);
-      applyParsedImportData(bytes, file.name, file.type);
+      await applyParsedImportData(bytes, file.name, file.type);
     } catch {
       resetImportPreviewState();
+      setImportProgress(null);
       setMessage({
         text: isRTL
           ? 'تعذرت قراءة الملف المختار. تأكد من أن الملف بصيغة Excel أو CSV صالحة.'
@@ -463,33 +724,86 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
 
   const handleImportSheetChange = (nextSheet: string) => {
     const cached = importFileBytesRef.current;
-    if (!cached) return;
-    applyParsedImportData(cached.bytes, cached.fileName, cached.mimeType, nextSheet);
+    if (!cached || isImportLocked) return;
+    void applyParsedImportData(cached.bytes, cached.fileName, cached.mimeType, nextSheet);
   };
 
   const importDefaultCurrency = settings.mainCurrency || wallets[0]?.currency || 'EGP';
 
-  const csvPreviewResult = useMemo(() => {
+  useEffect(() => {
     if (csvRows.length === 0) {
-      return {
+      setCsvPreviewResult({
         previewRows: [],
         validCount: 0,
         invalidCount: 0,
         duplicateCount: 0,
         autoCreatedWallets: [],
         autoCreatedCategories: [],
-      };
+      });
+      return;
     }
-    return mapCsvRowsToTransactions({
-      rows: csvRows,
-      mapping: { ...csvMapping, typeIndex: -1 },
-      categories,
-      existingTransactions: transactions,
-      wallets,
-      defaultCurrency: importDefaultCurrency,
-      workspaceId: activeWorkspace,
-    });
-  }, [csvRows, csvMapping, categories, transactions, wallets, importDefaultCurrency, activeWorkspace]);
+
+    const jobId = ++previewJobIdRef.current;
+    const hasCloudSync = Boolean(user?.isLoggedIn);
+    let cancelled = false;
+
+    const runPreviewMapping = async () => {
+      const shouldShowProgress = csvRows.length >= 150 || isParsingImportFile;
+      if (shouldShowProgress) {
+        setImportProgress(
+          buildImportProgressState({
+            stage: 'validating',
+            processed: 0,
+            total: csvRows.length,
+            hasCloudSync,
+          })
+        );
+      }
+      const mapped = await mapCsvRowsToTransactionsChunked({
+        rows: csvRows,
+        mapping: { ...csvMapping, typeIndex: -1 },
+        categories,
+        existingTransactions: transactions,
+        wallets,
+        defaultCurrency: importDefaultCurrency,
+        workspaceId: activeWorkspace,
+        onProgress: (processed, total) => {
+          if (cancelled || jobId !== previewJobIdRef.current) return;
+          if (shouldShowProgress) {
+            setImportProgress(
+              buildImportProgressState({
+                stage: 'validating',
+                processed,
+                total,
+                hasCloudSync,
+              })
+            );
+          }
+        },
+      });
+      if (cancelled || jobId !== previewJobIdRef.current) return;
+      setCsvPreviewResult(mapped);
+      setImportProgress((prev) =>
+        prev && (prev.stage === 'parsing' || prev.stage === 'validating') && !isImportingCsv
+          ? null
+          : prev
+      );
+    };
+
+    void runPreviewMapping();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    csvRows,
+    csvMapping,
+    categories,
+    transactions,
+    wallets,
+    importDefaultCurrency,
+    activeWorkspace,
+    user?.isLoggedIn,
+  ]);
 
   const rowsReadyToImport = useMemo(() => {
     return csvPreviewResult.previewRows.filter(
@@ -515,15 +829,24 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
   }, [rowsReadyToImport, csvPreviewResult.autoCreatedCategories]);
 
   const handleConfirmCsvImport = async () => {
-    if (rowsReadyToImport.length === 0 || isImportingCsv) return;
+    if (rowsReadyToImport.length === 0 || isImportLocked) return;
 
     const skippedInvalid = csvPreviewResult.invalidCount;
     const skippedDup = skipDuplicates ? csvPreviewResult.duplicateCount : 0;
     const createdWalletsCount = readyWalletsToCreate.length;
     const createdCatsCount = readyCategoriesToCreate.length;
+    const hasCloudSync = Boolean(user?.isLoggedIn);
 
     setIsImportingCsv(true);
     setMessage(null);
+    setImportProgress(
+      buildImportProgressState({
+        stage: 'validating',
+        processed: 0,
+        total: rowsReadyToImport.length,
+        hasCloudSync,
+      })
+    );
     try {
       const result = await commitImportedTransactionsWithCloudSync({
         rows: rowsReadyToImport,
@@ -533,10 +856,15 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
         fallbackWalletId: targetWalletId,
         defaultCurrency: importDefaultCurrency,
         workspaceId: activeWorkspace,
-        persistImportLocally: async ({ transactions: txs, newWallets, newCategories }) => {
+        hasCloudSync,
+        onProgress: (state) => {
+          setImportProgress(state);
+        },
+        persistImportLocally: async ({ transactions: txs, newWallets, newCategories, onProgress }) => {
           const localRes = await importSpreadsheetBatchLocally(txs, {
             newWallets,
             newCategories,
+            onProgress,
           });
           return {
             importedCount: localRes.importedCount,
@@ -544,12 +872,13 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
           };
         },
         syncToCloud: user?.isLoggedIn
-          ? async ({ workspaceId: wsId, createdTransactions }) =>
-              syncWorkspaceBackupNow(wsId, createdTransactions)
+          ? async ({ workspaceId: wsId, createdTransactions, onProgress }) =>
+              syncWorkspaceBackupNow(wsId, createdTransactions, { onProgress })
           : undefined,
       });
 
       if (result.importedCount <= 0) {
+        setImportProgress(null);
         setMessage({
           text: isRTL
             ? 'لم يتم استيراد أي معاملات جديدة (تحقق من الصلاحيات أو الفترة المحاسبية).'
@@ -578,6 +907,17 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
 
       // Clear preview table once persisted locally so duplicate clicks can't re-insert the same file
       resetImportPreviewState();
+      setImportProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              active: false,
+              percent: 100,
+              processed: result.importedCount,
+              total: result.importedCount,
+            }
+          : null
+      );
 
       if (result.cloudSynced) {
         setMessage({
@@ -612,6 +952,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
         localOnly: true,
       });
     } catch (err) {
+      setImportProgress(null);
       const errDetail = err instanceof Error ? err.message : '';
       setMessage({
         text: isRTL
@@ -662,8 +1003,11 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
             <h3 className="text-sm font-bold text-[var(--color-ink)]">{t('backupAndRestore')}</h3>
           </div>
           <button
-            onClick={onClose}
-            className="p-1 text-[var(--color-muted)] hover:text-[var(--color-ink)] min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg"
+            type="button"
+            disabled={isImportLocked}
+            onClick={handleSafeClose}
+            aria-label={t('close')}
+            className="p-1 text-[var(--color-muted)] hover:text-[var(--color-ink)] min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg disabled:opacity-35 disabled:cursor-not-allowed"
           >
             <X className="w-5 h-5" />
           </button>
@@ -673,11 +1017,13 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
         <div className="grid grid-cols-2 gap-1 p-1 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl shrink-0">
           <button
             type="button"
+            disabled={isImportLocked}
             onClick={() => {
+              if (isImportLocked) return;
               setActiveTab('json');
               setMessage(null);
             }}
-            className={`py-2 rounded-lg text-xs font-semibold transition-colors min-h-[38px] ${
+            className={`py-2 rounded-lg text-xs font-semibold transition-colors min-h-[38px] disabled:opacity-50 disabled:cursor-not-allowed ${
               activeTab === 'json'
                 ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
                 : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
@@ -694,11 +1040,13 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
           <button
             type="button"
             data-testid="tab-import-spreadsheet"
+            disabled={isImportLocked}
             onClick={() => {
+              if (isImportLocked) return;
               setActiveTab('csv');
               setMessage(null);
             }}
-            className={`py-2 rounded-lg text-xs font-semibold transition-colors min-h-[38px] ${
+            className={`py-2 rounded-lg text-xs font-semibold transition-colors min-h-[38px] disabled:opacity-50 disabled:cursor-not-allowed ${
               activeTab === 'csv'
                 ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
                 : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
@@ -713,6 +1061,105 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
             )}
           </button>
         </div>
+
+        {/* Live 4-Stage Import Progress Indicator */}
+        {importProgress && (
+          <div
+            data-testid="import-progress-panel"
+            className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-accent)]/35 space-y-2.5 shrink-0"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                {importProgress.active ? (
+                  <RefreshCw className="w-4 h-4 text-[var(--color-accent)] animate-spin shrink-0" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 text-[var(--color-income)] shrink-0" />
+                )}
+                <span className="text-xs font-bold text-[var(--color-ink)] truncate">
+                  {isRTL ? importProgress.labelAr : importProgress.labelEn}
+                </span>
+              </div>
+              <span
+                data-testid="import-progress-percent"
+                className="text-xs font-bold text-[var(--color-accent)] num-tabular shrink-0"
+              >
+                {importProgress.percent}%
+              </span>
+            </div>
+
+            <div
+              role="progressbar"
+              aria-valuenow={importProgress.percent}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              className="w-full h-2.5 rounded-full bg-[var(--color-surface)] border border-[var(--color-line)] overflow-hidden"
+            >
+              <div
+                className={`h-full rounded-full transition-all duration-200 ${
+                  importProgress.active ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-income)]'
+                }`}
+                style={{ width: `${importProgress.percent}%` }}
+              />
+            </div>
+
+            <div
+              data-testid="import-progress-counter"
+              className="text-[11px] font-medium text-[var(--color-muted)] num-tabular"
+            >
+              {formatImportProgressCounter(
+                importProgress.processed,
+                importProgress.total,
+                importProgress.percent,
+                isRTL
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5 pt-1">
+              {IMPORT_STAGES.map((stageMeta) => {
+                const currentStep = IMPORT_STAGE_ORDER[importProgress.stage];
+                const isDone = !importProgress.active || stageMeta.stepNumber < currentStep;
+                const isCurrent = importProgress.active && stageMeta.stepNumber === currentStep;
+                const isSkippedCloud = stageMeta.id === 'syncing_cloud' && !user?.isLoggedIn;
+                return (
+                  <div
+                    key={stageMeta.id}
+                    className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-[10px] border ${
+                      isCurrent
+                        ? 'bg-[var(--color-accent)]/12 border-[var(--color-accent)]/40 text-[var(--color-ink)] font-bold'
+                        : isDone && !isSkippedCloud
+                        ? 'bg-[var(--color-income)]/10 border-[var(--color-income)]/25 text-[var(--color-income)] font-semibold'
+                        : 'bg-[var(--color-surface)] border-[var(--color-line)] text-[var(--color-muted)]'
+                    }`}
+                  >
+                    {isCurrent ? (
+                      <RefreshCw className="w-3 h-3 animate-spin shrink-0 text-[var(--color-accent)]" />
+                    ) : isDone && !isSkippedCloud ? (
+                      <CheckCircle2 className="w-3 h-3 shrink-0" />
+                    ) : (
+                      <span className="w-3.5 h-3.5 rounded-full border border-current flex items-center justify-center text-[9px] shrink-0">
+                        {stageMeta.stepNumber}
+                      </span>
+                    )}
+                    <span className="truncate">
+                      {isRTL ? stageMeta.labelAr : stageMeta.labelEn}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {importProgress.active && (
+              <div className="p-2 rounded-lg bg-[var(--color-warning)]/12 border border-[var(--color-warning)]/30 text-[var(--color-warning-text)] text-[11px] font-semibold flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  {isRTL
+                    ? 'يرجى عدم إغلاق الصفحة حتى اكتمال الحفظ والمزامنة'
+                    : 'Please do not close this page until saving and syncing complete'}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Status Message */}
         {message && (
@@ -799,6 +1246,8 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                           <img
                             src={user.avatarUrl}
                             alt={user.name}
+                            loading="lazy"
+                            decoding="async"
                             className="w-8 h-8 rounded-full border border-[var(--color-line)] shrink-0"
                             referrerPolicy="no-referrer"
                           />
@@ -1094,6 +1543,100 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                     </span>
                   </div>
                 )}
+
+                {/* Safe Recovery Mode: Force Cloud Sync (with confirmation & guest/offline guard) */}
+                <div
+                  data-testid="backup-force-cloud-sync-card"
+                  className="pt-2.5 border-t border-[var(--color-line)] space-y-2"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="space-y-0.5 min-w-0">
+                      <div className="text-[11px] font-bold text-[var(--color-ink)] flex items-center gap-1.5">
+                        <CloudDownload className="w-3.5 h-3.5 text-[var(--color-accent)] shrink-0" />
+                        <span>
+                          {isRTL
+                            ? 'مزامنة سحابية إجبارية (استرجاع البيانات)'
+                            : 'Force Cloud Sync (Recover Data)'}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-[var(--color-muted)] leading-relaxed">
+                        {isRTL
+                          ? 'مسح الكاش المحلي للمعاملات على هذا الجهاز وإعادة جلب أحدث نسخة محفوظة مباشرة من السحابة.'
+                          : 'Clear local transaction cache on this device and fetch the latest saved copy directly from Cloud.'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    data-testid="backup-force-cloud-sync-btn"
+                    disabled={!forceSyncAvailability.canExecute}
+                    onClick={() => setIsForceSyncConfirmOpen(true)}
+                    className="w-full py-2 px-3 rounded-lg bg-[var(--color-surface)] hover:bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/40 text-[var(--color-accent)] text-xs font-bold flex items-center justify-center gap-2 transition-colors min-h-[42px] disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-[var(--color-surface)]"
+                  >
+                    {isCloudSyncing ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+                    ) : (
+                      <CloudDownload className="w-3.5 h-3.5 shrink-0" />
+                    )}
+                    <span>
+                      {isRTL
+                        ? 'مزامنة سحابية إجبارية (استرجاع البيانات)'
+                        : 'Force Cloud Sync (Recover Data)'}
+                    </span>
+                  </button>
+
+                  {!forceSyncAvailability.canExecute &&
+                    forceSyncAvailability.reason !== 'syncing' && (
+                      <p
+                        data-testid="backup-force-cloud-sync-hint"
+                        className="text-[10px] text-[var(--color-muted)] leading-relaxed"
+                      >
+                        {forceSyncAvailability.reason === 'guest'
+                          ? isRTL
+                            ? 'متاح فقط بعد تسجيل الدخول بحساب Google (معطّل في وضع الضيف).'
+                            : 'Available only after signing in with Google (disabled in Guest mode).'
+                          : isRTL
+                          ? 'غير متاح حالياً لعدم توفر اتصال بالإنترنت.'
+                          : 'Unavailable while offline. Connect to the internet to use cloud recovery.'}
+                      </p>
+                    )}
+
+                  {(emergencyFeedback || cloudDiagnosticsError) && (
+                    <div
+                      data-testid="backup-cloud-diagnostics-banner"
+                      className={`p-2.5 rounded-lg border text-[11px] space-y-1 ${
+                        emergencyFeedback?.isError || cloudDiagnosticsError
+                          ? 'bg-[var(--color-expense)]/10 border-[var(--color-expense)]/35 text-[var(--color-expense)]'
+                          : 'bg-[var(--color-income)]/10 border-[var(--color-income)]/35 text-[var(--color-income)]'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-start gap-2 min-w-0">
+                          {emergencyFeedback?.isError || cloudDiagnosticsError ? (
+                            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                          ) : (
+                            <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                          )}
+                          <p className="leading-relaxed break-words select-text">
+                            {cloudDiagnosticsError || emergencyFeedback?.text}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          aria-label={isRTL ? 'إغلاق الرسالة' : 'Dismiss message'}
+                          onClick={() => {
+                            setEmergencyFeedback(null);
+                            clearCloudDiagnosticsError();
+                          }}
+                          className="p-0.5 rounded hover:bg-black/10 shrink-0"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Pre-Restore Snapshot Undo Safety */}
@@ -1308,8 +1851,9 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
             <div className="space-y-3">
               <button
                 type="button"
+                disabled={isImportLocked}
                 onClick={() => csvFileInputRef.current?.click()}
-                className="w-full p-3.5 bg-[var(--color-bg)] hover:bg-[var(--color-surface)] border border-dashed border-[var(--color-line)] rounded-xl flex items-center justify-between text-xs transition-colors min-h-[52px]"
+                className="w-full p-3.5 bg-[var(--color-bg)] hover:bg-[var(--color-surface)] border border-dashed border-[var(--color-line)] rounded-xl flex items-center justify-between text-xs transition-colors min-h-[52px] disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <div className="flex items-center gap-3 min-w-0">
                   <FileSpreadsheet className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
@@ -1715,7 +2259,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                   <button
                     type="button"
                     data-testid="confirm-spreadsheet-import"
-                    disabled={rowsReadyToImport.length === 0 || isImportingCsv}
+                    disabled={rowsReadyToImport.length === 0 || isImportLocked}
                     onClick={handleConfirmCsvImport}
                     className="w-full py-2.5 bg-[var(--color-accent)] disabled:opacity-40 text-[var(--color-on-accent)] font-semibold rounded-xl text-xs min-h-[44px] flex items-center justify-center gap-2"
                   >
@@ -1737,12 +2281,39 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
         </div>
 
         <button
-          onClick={onClose}
-          className="w-full py-2.5 bg-[var(--color-bg)] hover:bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-muted)] hover:text-[var(--color-ink)] font-semibold rounded-lg text-xs min-h-[44px] shrink-0"
+          type="button"
+          disabled={isImportLocked}
+          onClick={handleSafeClose}
+          className="w-full py-2.5 bg-[var(--color-bg)] hover:bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-muted)] hover:text-[var(--color-ink)] font-semibold rounded-lg text-xs min-h-[44px] shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          {t('close')}
+          {isImportLocked
+            ? isRTL
+              ? 'جاري التنفيذ — يرجى الانتظار...'
+              : 'Processing — please wait...'
+            : t('close')}
         </button>
       </div>
+
+      <ConfirmationModal
+        isOpen={isForceSyncConfirmOpen}
+        onClose={() => setIsForceSyncConfirmOpen(false)}
+        onConfirm={() => {
+          void handleConfirmForceCloudSync();
+        }}
+        title={
+          isRTL
+            ? 'تأكيد المزامنة السحابية الإجبارية'
+            : 'Confirm Force Cloud Sync'
+        }
+        message={
+          isRTL
+            ? 'سيقوم هذا الإجراء بمسح الكاش المحلي للمعاملات على هذا الجهاز وإعادة تحميل أحدث نسخة محفوظة مباشرة من السحابة.\n\nتنبيه مهم: إذا كانت لديك تعديلات حديثة أو عمليات استيراد لم تكتمل مزامنتها السحابية بعد، فقد يتم استبدالها بالنسخة المحفوظة في السحابة.'
+            : 'This action will clear the local transaction cache on this device and re-download the latest saved copy directly from the Cloud.\n\nImportant warning: Any recent local edits or imports that have not finished syncing to the Cloud yet may be replaced by the cloud copy.'
+        }
+        confirmLabel={isRTL ? 'نعم، استرجاع من السحابة' : 'Yes, Recover from Cloud'}
+        cancelLabel={t('cancel')}
+        isDestructive={true}
+      />
     </div>
   );
 };

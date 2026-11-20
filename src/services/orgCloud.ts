@@ -5,6 +5,7 @@
 import {
   collection,
   doc,
+  getDoc,
   getDocs,
   getDocsFromServer,
   limit,
@@ -12,6 +13,7 @@ import {
   orderBy,
   query,
   QueryDocumentSnapshot,
+  runTransaction,
   serverTimestamp,
   writeBatch,
   DocumentData,
@@ -44,10 +46,19 @@ import { getEffectiveTransactionAmount } from './calculations';
 import { normalizeApprovalStatus } from './entitlements';
 import { stripSensitivePinFromWallet } from './security';
 import {
+  invalidateUserLookupCache,
+  userDirectoryLookupCache,
+} from './lookupCache';
+import {
   filterTransactionsByDateRange,
   isFirestoreMissingIndexError,
   sortTransactionsDescending,
 } from './orgTransactionQuery';
+import {
+  checkOrgSeatAvailability,
+  computeEmailLookupHash,
+  parseMemberLookupQuery,
+} from './usernameService';
 
 export interface OrgActorInfo {
   uid: string;
@@ -373,6 +384,7 @@ export function subscribeActiveOrganization(
               uid: String(m.uid || d.id),
               email: String(m.email || ''),
               displayName: String(m.displayName || m.email || 'Member'),
+              username: typeof m.username === 'string' && m.username.trim() ? m.username.trim() : undefined,
               role: (m.role as OrganizationRole) || 'employee',
               department: typeof m.department === 'string' ? m.department : undefined,
               spendingLimit:
@@ -1116,13 +1128,16 @@ export async function importOrgTransactionsBatchCloud(
   newTransactions: Transaction[],
   wallets: Wallet[],
   customRates: Record<string, number>,
-  actor: OrgActorInfo
+  actor: OrgActorInfo,
+  onProgress?: (processed: number, total: number) => void
 ): Promise<void> {
   if (newTransactions.length === 0) return;
-  const CHUNK_SIZE = 320;
+  const CHUNK_SIZE = 420;
+  const total = newTransactions.length;
   const totalDeltas = new Map<string, number>();
+  let committed = 0;
 
-  for (let i = 0; i < newTransactions.length; i += CHUNK_SIZE) {
+  for (let i = 0; i < total; i += CHUNK_SIZE) {
     const slice = newTransactions.slice(i, i + CHUNK_SIZE);
     const batch = writeBatch(db);
     for (const tx of slice) {
@@ -1142,11 +1157,13 @@ export async function importOrgTransactionsBatchCloud(
         'transaction',
         slice[0].id,
         actor,
-        `استيراد دفعة معاملات (${newTransactions.length})`
+        `استيراد دفعة معاملات (${total})`
       );
       batch.set(doc(db, 'organizations', orgId, 'auditLogs', audit.id), audit.data);
     }
     await batch.commit();
+    committed = Math.min(total, committed + slice.length);
+    onProgress?.(committed, total);
   }
 
   if (totalDeltas.size > 0) {
@@ -1683,3 +1700,331 @@ export async function deleteOrganizationWorkspaceCloud(params: {
     ]);
   }
 }
+
+export interface DirectOrgUserLookupResult {
+  uid: string;
+  email: string;
+  displayName: string;
+  username?: string;
+}
+
+export { invalidateUserLookupCache };
+
+/**
+ * Looks up a registered Raseedi user directly via Firestore using either their
+ * exact `@username` (`usernames/{username}`) or exact email address (`userEmailIndex/{emailHash}`).
+ * Uses a bounded 2-minute in-memory TTL cache to avoid repeated reads for the same query.
+ * Never queries `users` directly and never performs collection listing.
+ */
+export async function lookupUserForOrgDirectAdd(
+  identifier: string
+): Promise<DirectOrgUserLookupResult | null> {
+  const parsed = parseMemberLookupQuery(identifier);
+  if (parsed.kind === 'invalid') {
+    throw new Error(parsed.errorAr);
+  }
+
+  const cacheKey = `${parsed.kind}:${parsed.normalized}`;
+  const cached = userDirectoryLookupCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  if (parsed.kind === 'username') {
+    const snap = await getDoc(doc(db, 'usernames', parsed.normalized));
+    if (!snap.exists()) {
+      userDirectoryLookupCache.set(cacheKey, null, 20_000);
+      return null;
+    }
+    const data = snap.data() as Record<string, unknown>;
+    const uid = String(data.uid || '').trim();
+    if (!uid) {
+      userDirectoryLookupCache.set(cacheKey, null, 20_000);
+      return null;
+    }
+    const result: DirectOrgUserLookupResult = {
+      uid,
+      email: String(data.email || '').trim().toLowerCase(),
+      displayName: String(data.displayName || data.username || data.email || 'مستخدم').trim(),
+      username: String(data.username || parsed.normalized).trim().toLowerCase(),
+    };
+    userDirectoryLookupCache.set(cacheKey, result);
+    return result;
+  }
+
+  const emailHash = await computeEmailLookupHash(parsed.normalized);
+  const snap = await getDoc(doc(db, 'userEmailIndex', emailHash));
+  if (!snap.exists()) {
+    userDirectoryLookupCache.set(cacheKey, null, 20_000);
+    return null;
+  }
+  const data = snap.data() as Record<string, unknown>;
+  const uid = String(data.uid || '').trim();
+  if (!uid) {
+    userDirectoryLookupCache.set(cacheKey, null, 20_000);
+    return null;
+  }
+  const result: DirectOrgUserLookupResult = {
+    uid,
+    email: String(data.email || parsed.normalized).trim().toLowerCase(),
+    displayName: String(data.displayName || data.email || 'مستخدم').trim(),
+    username:
+      typeof data.username === 'string' && data.username.trim()
+        ? data.username.trim().toLowerCase()
+        : undefined,
+  };
+  userDirectoryLookupCache.set(cacheKey, result);
+  return result;
+}
+
+/**
+ * Directly adds a registered user to a Cloud Organization via an atomic Firestore Transaction
+ * (zero dependency on server `/api/org/invites`).
+ * Writes:
+ *  - `organizations/{orgId}/members/{targetUid}`
+ *  - `users/{targetUid}/orgRefs/{orgId}`
+ *  - `organizations/{orgId}/auditLogs/{logId}`
+ */
+export async function addOrgMemberDirectlyCloud(params: {
+  orgId: string;
+  identifier: string;
+  targetUser?: DirectOrgUserLookupResult | null;
+  role: Exclude<OrganizationRole, 'owner'>;
+  department?: string;
+  spendingLimit?: number;
+  actor: OrgActorInfo;
+}): Promise<OrganizationMember> {
+  const { orgId, identifier, role, department, spendingLimit, actor } = params;
+  const cleanOrgId = String(orgId || '').trim();
+  if (!cleanOrgId) throw new Error('ORG_ID_REQUIRED');
+
+  const resolvedUser = params.targetUser || (await lookupUserForOrgDirectAdd(identifier));
+  if (!resolvedUser || !resolvedUser.uid) {
+    throw new Error('USER_NOT_FOUND');
+  }
+
+  // Fetch current members snapshot first to enforce seat limit reliably
+  const membersSnap = await getDocs(collection(db, 'organizations', cleanOrgId, 'members'));
+  const currentMembers = membersSnap.docs.map((d) => {
+    const m = d.data() as Record<string, unknown>;
+    return {
+      uid: String(m.uid || d.id),
+      status: ((m.status as OrganizationMember['status']) || 'active') as OrganizationMember['status'],
+    };
+  });
+
+  const now = Date.now();
+  const orgRef = doc(db, 'organizations', cleanOrgId);
+  const memberRef = doc(db, 'organizations', cleanOrgId, 'members', resolvedUser.uid);
+  const userOrgRef = doc(db, 'users', resolvedUser.uid, 'orgRefs', cleanOrgId);
+
+  let createdMember: OrganizationMember | null = null;
+
+  await runTransaction(db, async (tx) => {
+    const [orgSnap, existingMemberSnap] = await Promise.all([
+      tx.get(orgRef),
+      tx.get(memberRef),
+    ]);
+
+    if (!orgSnap.exists()) {
+      throw new Error('ORG_NOT_FOUND');
+    }
+
+    const orgData = orgSnap.data() as Record<string, unknown>;
+    const orgName = String(orgData.name || 'المؤسسة').slice(0, 120);
+    const orgCurrency = String(orgData.currency || 'EGP').slice(0, 8);
+    const seatLimit = typeof orgData.seatLimit === 'number' ? orgData.seatLimit : 5;
+    const extraSeats = typeof orgData.extraSeats === 'number' ? orgData.extraSeats : 0;
+
+    if (existingMemberSnap.exists()) {
+      throw new Error('ALREADY_MEMBER');
+    }
+
+    const seatCheck = checkOrgSeatAvailability(
+      currentMembers,
+      seatLimit,
+      extraSeats,
+      resolvedUser.uid
+    );
+    if (!seatCheck.canAdd) {
+      throw new Error(seatCheck.reason || 'SEAT_LIMIT_REACHED');
+    }
+
+    const cleanDept = department?.trim() ? department.trim().slice(0, 80) : undefined;
+    const cleanLimit =
+      typeof spendingLimit === 'number' && Number.isFinite(spendingLimit) && spendingLimit > 0
+        ? spendingLimit
+        : undefined;
+    const cleanLimitMinor =
+      cleanLimit !== undefined ? toMinor(cleanLimit, orgCurrency) : undefined;
+
+    const memberPayload = stripUndefinedDeep({
+      uid: resolvedUser.uid,
+      email: (resolvedUser.email || `${resolvedUser.uid}@firebase.local`).slice(0, 254),
+      displayName: (resolvedUser.displayName || resolvedUser.email || 'عضو').slice(0, 120),
+      ...(resolvedUser.username ? { username: resolvedUser.username.slice(0, 30) } : {}),
+      role,
+      ...(cleanDept ? { department: cleanDept } : {}),
+      ...(cleanLimit !== undefined ? { spendingLimit: cleanLimit } : {}),
+      ...(cleanLimitMinor !== undefined ? { spendingLimitMinor: cleanLimitMinor } : {}),
+      status: 'active' as const,
+      joinedAt: now,
+      updatedAt: serverTimestamp(),
+    });
+
+    const orgRefPayload = {
+      orgId: cleanOrgId,
+      orgName,
+      role,
+      status: 'active' as const,
+      currency: orgCurrency,
+      joinedAt: now,
+    };
+
+    const audit = makeAuditDocPayload(
+      cleanOrgId,
+      'member_join',
+      'member',
+      resolvedUser.uid,
+      actor,
+      `إضافة عضو مباشر: ${resolvedUser.displayName} (${resolvedUser.username ? `@${resolvedUser.username}` : resolvedUser.email}) بصلاحية ${role}`
+    );
+
+    tx.set(memberRef, memberPayload);
+    tx.set(userOrgRef, orgRefPayload);
+    tx.set(doc(db, 'organizations', cleanOrgId, 'auditLogs', audit.id), audit.data);
+
+    createdMember = {
+      uid: resolvedUser.uid,
+      email: resolvedUser.email,
+      displayName: resolvedUser.displayName,
+      username: resolvedUser.username,
+      role,
+      department: cleanDept,
+      spendingLimit: cleanLimit,
+      spendingLimitMinor: cleanLimitMinor,
+      status: 'active',
+      joinedAt: now,
+      updatedAt: now,
+    };
+  });
+
+  if (!createdMember) {
+    throw new Error('MEMBER_ADD_FAILED');
+  }
+  return createdMember;
+}
+
+/**
+ * Directly manages an organization member (change role, suspend, reactivate, spending limit, remove)
+ * via an atomic Firestore Transaction syncing both `organizations/{orgId}/members/{targetUid}`
+ * and `users/{targetUid}/orgRefs/{orgId}` (works reliably without a custom Express server).
+ */
+export async function manageOrgMemberDirectlyCloud(params: {
+  orgId: string;
+  targetUid: string;
+  action: 'change_role' | 'suspend' | 'reactivate' | 'set_spending_limit' | 'remove';
+  role?: Exclude<OrganizationRole, 'owner'>;
+  spendingLimit?: number | null;
+  department?: string | null;
+  actor: OrgActorInfo;
+}): Promise<void> {
+  const { orgId, targetUid, action, role, spendingLimit, department, actor } = params;
+  const cleanOrgId = String(orgId || '').trim();
+  const cleanTargetUid = String(targetUid || '').trim();
+  if (!cleanOrgId || !cleanTargetUid) throw new Error('INVALID_MEMBER_MANAGE_ARGS');
+
+  const orgRef = doc(db, 'organizations', cleanOrgId);
+  const memberRef = doc(db, 'organizations', cleanOrgId, 'members', cleanTargetUid);
+  const userOrgRef = doc(db, 'users', cleanTargetUid, 'orgRefs', cleanOrgId);
+
+  await runTransaction(db, async (tx) => {
+    const [orgSnap, memberSnap, userOrgSnap] = await Promise.all([
+      tx.get(orgRef),
+      tx.get(memberRef),
+      tx.get(userOrgRef),
+    ]);
+
+    if (!orgSnap.exists()) throw new Error('ORG_NOT_FOUND');
+    if (!memberSnap.exists()) throw new Error('MEMBER_NOT_FOUND');
+
+    const orgData = orgSnap.data() as Record<string, unknown>;
+    const orgCurrency = String(orgData.currency || 'EGP').slice(0, 8);
+    const memberData = memberSnap.data() as Record<string, unknown>;
+    const currentRole = String(memberData.role || 'employee') as OrganizationRole;
+    const memberLabel = String(memberData.displayName || memberData.email || cleanTargetUid);
+
+    if (currentRole === 'owner') {
+      throw new Error('CANNOT_MODIFY_OWNER');
+    }
+
+    if (action === 'remove') {
+      if (cleanTargetUid === actor.uid) {
+        throw new Error('CANNOT_REMOVE_SELF');
+      }
+      tx.delete(memberRef);
+      if (userOrgSnap.exists()) {
+        tx.delete(userOrgRef);
+      }
+      const audit = makeAuditDocPayload(
+        cleanOrgId,
+        'member_remove',
+        'member',
+        cleanTargetUid,
+        actor,
+        `إزالة العضو: ${memberLabel}`
+      );
+      tx.set(doc(db, 'organizations', cleanOrgId, 'auditLogs', audit.id), audit.data);
+      return;
+    }
+
+    const memberUpdates: Record<string, unknown> = {
+      updatedAt: serverTimestamp(),
+    };
+    const orgRefUpdates: Record<string, unknown> = {};
+    let auditAction: AuditLogAction = 'update';
+    let auditSummary = `تحديث بيانات العضو: ${memberLabel}`;
+
+    if (action === 'change_role' && role) {
+      memberUpdates.role = role;
+      orgRefUpdates.role = role;
+      auditAction = 'role_change';
+      auditSummary = `تغيير صلاحية ${memberLabel} إلى ${role}`;
+    } else if (action === 'suspend') {
+      memberUpdates.status = 'suspended';
+      orgRefUpdates.status = 'suspended';
+      auditSummary = `تعليق حساب العضو: ${memberLabel}`;
+    } else if (action === 'reactivate') {
+      memberUpdates.status = 'active';
+      orgRefUpdates.status = 'active';
+      auditSummary = `إعادة تفعيل العضو: ${memberLabel}`;
+    } else if (action === 'set_spending_limit') {
+      if (typeof spendingLimit === 'number' && Number.isFinite(spendingLimit) && spendingLimit > 0) {
+        memberUpdates.spendingLimit = spendingLimit;
+        memberUpdates.spendingLimitMinor = toMinor(spendingLimit, orgCurrency);
+      } else {
+        memberUpdates.spendingLimit = null;
+        memberUpdates.spendingLimitMinor = null;
+      }
+      if (department !== undefined) {
+        memberUpdates.department = department ? department.trim().slice(0, 80) : null;
+      }
+      auditSummary = `تحديث حد الصرف للعضو: ${memberLabel}`;
+    }
+
+    tx.update(memberRef, memberUpdates);
+    if (userOrgSnap.exists() && Object.keys(orgRefUpdates).length > 0) {
+      tx.update(userOrgRef, orgRefUpdates);
+    }
+    const audit = makeAuditDocPayload(
+      cleanOrgId,
+      auditAction,
+      'member',
+      cleanTargetUid,
+      actor,
+      auditSummary
+    );
+    tx.set(doc(db, 'organizations', cleanOrgId, 'auditLogs', audit.id), audit.data);
+  });
+}
+

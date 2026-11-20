@@ -363,5 +363,40 @@ describe('subscriptionHelpers tier resolution, expiry alerts & auth gate transit
       }),
       'preserve_local_session'
     );
+    // Same signed-in user refreshes right after onboarding before first cloud backup finishes
+    assert.equal(
+      resolvePostGoogleSignInAction({
+        hasCloudBackup: false,
+        wasActiveGuest: false,
+        hasLocalOnboarding: true,
+        localTransactionsCount: 0,
+        sameSignedInUser: true,
+      }),
+      'preserve_local_session'
+    );
+    // Cloud user profile already marked hasCompletedOnboarding on another device
+    assert.equal(
+      resolvePostGoogleSignInAction({
+        hasCloudBackup: false,
+        wasActiveGuest: false,
+        hasLocalOnboarding: false,
+        localTransactionsCount: 0,
+        sameSignedInUser: false,
+        hasCloudOnboarding: true,
+      }),
+      'preserve_local_session'
+    );
+    // Switching to a brand-new different Google account still starts onboarding cleanly
+    assert.equal(
+      resolvePostGoogleSignInAction({
+        hasCloudBackup: false,
+        wasActiveGuest: false,
+        hasLocalOnboarding: true,
+        localTransactionsCount: 0,
+        sameSignedInUser: false,
+        hasCloudOnboarding: false,
+      }),
+      'start_onboarding'
+    );
   });
 });

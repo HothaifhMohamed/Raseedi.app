@@ -20,18 +20,10 @@ import { SplashScreen } from './components/SplashScreen';
 import { OnboardingModal } from './components/OnboardingModal';
 import { HomeDashboard } from './components/home/HomeDashboard';
 import { TransactionsTab } from './components/home/TransactionsTab';
-import { StatisticsTab } from './components/home/StatisticsTab';
-import { TemplatesTab } from './components/home/TemplatesTab';
 import { WalletsPage } from './components/wallets/WalletsPage';
 import { WalletDetailPage } from './components/wallets/WalletDetailPage';
 import { BudgetPage } from './components/budget/BudgetPage';
 import { MoreMenu } from './components/more/MoreMenu';
-import { TransactionModal } from './components/TransactionModal';
-import { FilterModal } from './components/home/FilterModal';
-import { CurrencyPickerModal } from './components/common/CurrencyPickerModal';
-import { UpgradeModal } from './components/common/UpgradeModal';
-import { SettingsModal } from './components/more/SettingsModal';
-import { BackupModal } from './components/more/BackupModal';
 import { UndoSnackbar } from './components/common/UndoSnackbar';
 import { ToastNotification } from './components/common/ToastNotification';
 import { PinLockModal } from './components/common/PinLockModal';
@@ -39,15 +31,58 @@ import { PWAInstallPrompt, OfflineIndicator } from './components/common/PWAInsta
 import { AppUpdateBanner } from './components/common/AppUpdateBanner';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
 import {
+  InlineSectionSkeleton,
+  ModalOverlaySkeleton,
+} from './components/common/SkeletonLoaders';
+import {
   AdConsentBanner,
   hasAdSenseConsent,
   subscribeAdConsentChanges,
 } from './components/common/AdConsentBanner';
-import { OrganizationHubModal } from './components/organization/OrganizationHubModal';
-import { OrgMigrationWizardModal } from './components/organization/OrgMigrationWizardModal';
 import { AuthGateScreen } from './components/auth/AuthGateScreen';
 import { LogoutConfirmationModal } from './components/more/LogoutConfirmationModal';
-import { AdminCodePanelModal } from './components/more/AdminCodePanelModal';
+
+const StatisticsTab = React.lazy(() =>
+  import('./components/home/StatisticsTab').then((m) => ({ default: m.StatisticsTab }))
+);
+const TemplatesTab = React.lazy(() =>
+  import('./components/home/TemplatesTab').then((m) => ({ default: m.TemplatesTab }))
+);
+const TransactionModal = React.lazy(() =>
+  import('./components/TransactionModal').then((m) => ({ default: m.TransactionModal }))
+);
+const FilterModal = React.lazy(() =>
+  import('./components/home/FilterModal').then((m) => ({ default: m.FilterModal }))
+);
+const CurrencyPickerModal = React.lazy(() =>
+  import('./components/common/CurrencyPickerModal').then((m) => ({
+    default: m.CurrencyPickerModal,
+  }))
+);
+const UpgradeModal = React.lazy(() =>
+  import('./components/common/UpgradeModal').then((m) => ({ default: m.UpgradeModal }))
+);
+const SettingsModal = React.lazy(() =>
+  import('./components/more/SettingsModal').then((m) => ({ default: m.SettingsModal }))
+);
+const BackupModal = React.lazy(() =>
+  import('./components/more/BackupModal').then((m) => ({ default: m.BackupModal }))
+);
+const AdminCodePanelModal = React.lazy(() =>
+  import('./components/more/AdminCodePanelModal').then((m) => ({
+    default: m.AdminCodePanelModal,
+  }))
+);
+const OrganizationHubModal = React.lazy(() =>
+  import('./components/organization/OrganizationHubModal').then((m) => ({
+    default: m.OrganizationHubModal,
+  }))
+);
+const OrgMigrationWizardModal = React.lazy(() =>
+  import('./components/organization/OrgMigrationWizardModal').then((m) => ({
+    default: m.OrgMigrationWizardModal,
+  }))
+);
 
 const MainLayout: React.FC = () => {
   const {
@@ -85,6 +120,8 @@ const MainLayout: React.FC = () => {
     setIsAdminCodeModalOpen,
     isOrgHubOpen,
     setIsOrgHubOpen,
+    isOrgMigrationModalOpen,
+    legacyLocalOrgs,
     isPro,
     t,
     isRTL,
@@ -252,8 +289,16 @@ const MainLayout: React.FC = () => {
                   </div>
 
                   {homeTab === 'transactions' && <TransactionsTab />}
-                  {homeTab === 'statistics' && <StatisticsTab />}
-                  {homeTab === 'templates' && <TemplatesTab />}
+                  {homeTab === 'statistics' && (
+                    <React.Suspense fallback={<InlineSectionSkeleton />}>
+                      <StatisticsTab />
+                    </React.Suspense>
+                  )}
+                  {homeTab === 'templates' && (
+                    <React.Suspense fallback={<InlineSectionSkeleton />}>
+                      <TemplatesTab />
+                    </React.Suspense>
+                  )}
                 </>
               )}
             </div>
@@ -285,16 +330,24 @@ const MainLayout: React.FC = () => {
           }}
         />
 
-        {/* Add/Edit Transaction Modal */}
-        <TransactionModal
-          isOpen={isAddModalOpen}
-          onClose={() => setIsAddModalOpen(false)}
-          editTransaction={editingTransaction}
-          presetDraft={transactionDraft}
-        />
+        {/* Add/Edit Transaction Modal (lazy-loaded on demand) */}
+        {isAddModalOpen && (
+          <React.Suspense fallback={<ModalOverlaySkeleton />}>
+            <TransactionModal
+              isOpen={isAddModalOpen}
+              onClose={() => setIsAddModalOpen(false)}
+              editTransaction={editingTransaction}
+              presetDraft={transactionDraft}
+            />
+          </React.Suspense>
+        )}
 
         {/* Multidimensional Filter Modal */}
-        <FilterModal />
+        {isFilterOpen && (
+          <React.Suspense fallback={<ModalOverlaySkeleton />}>
+            <FilterModal />
+          </React.Suspense>
+        )}
 
         {/* Undo Floating Snackbar & Alert Toast */}
         <UndoSnackbar />
@@ -304,33 +357,59 @@ const MainLayout: React.FC = () => {
         <AdConsentBanner />
 
         {/* Global Upgrade to PRO Modal */}
-        <UpgradeModal />
+        {isUpgradeModalOpen && (
+          <React.Suspense fallback={<ModalOverlaySkeleton />}>
+            <UpgradeModal />
+          </React.Suspense>
+        )}
 
         {/* Global Settings & Backup Modals (accessible from Header overflow menu & More tab) */}
-        <SettingsModal
-          isOpen={isSettingsOpen}
-          onClose={() => setIsSettingsOpen(false)}
-        />
-        <BackupModal isOpen={isBackupOpen} onClose={() => setIsBackupOpen(false)} />
+        {isSettingsOpen && (
+          <React.Suspense fallback={<ModalOverlaySkeleton />}>
+            <SettingsModal
+              isOpen={isSettingsOpen}
+              onClose={() => setIsSettingsOpen(false)}
+            />
+          </React.Suspense>
+        )}
+        {isBackupOpen && (
+          <React.Suspense fallback={<ModalOverlaySkeleton />}>
+            <BackupModal isOpen={isBackupOpen} onClose={() => setIsBackupOpen(false)} />
+          </React.Suspense>
+        )}
 
-        {/* Strict Logout Confirmation & Passcode-Protected Admin Code Generator */}
+        {/* Strict Logout Confirmation & Passcode-Protected Admin Panel */}
         <LogoutConfirmationModal />
-        <AdminCodePanelModal />
+        {isAdminCodeModalOpen && (
+          <React.Suspense fallback={<ModalOverlaySkeleton />}>
+            <AdminCodePanelModal />
+          </React.Suspense>
+        )}
 
         {/* Unified Enterprise Workspace Hub Modal */}
-        <OrganizationHubModal />
+        {isOrgHubOpen && (
+          <React.Suspense fallback={<ModalOverlaySkeleton />}>
+            <OrganizationHubModal />
+          </React.Suspense>
+        )}
 
         {/* Legacy Local-to-Cloud Org Migration Wizard */}
-        <OrgMigrationWizardModal />
+        {isOrgMigrationModalOpen && legacyLocalOrgs.length > 0 && (
+          <React.Suspense fallback={<ModalOverlaySkeleton />}>
+            <OrgMigrationWizardModal />
+          </React.Suspense>
+        )}
 
         {/* Global Currency Picker Modal */}
-        {onCurrencySelectCallback && (
-          <CurrencyPickerModal
-            isOpen={currencyPickerOpen}
-            onClose={closeCurrencyPicker}
-            selectedCode={currencyPickerSelectedCode}
-            onSelect={onCurrencySelectCallback}
-          />
+        {currencyPickerOpen && onCurrencySelectCallback && (
+          <React.Suspense fallback={<ModalOverlaySkeleton />}>
+            <CurrencyPickerModal
+              isOpen={currencyPickerOpen}
+              onClose={closeCurrencyPicker}
+              selectedCode={currencyPickerSelectedCode}
+              onSelect={onCurrencySelectCallback}
+            />
+          </React.Suspense>
         )}
       </div>
     </div>

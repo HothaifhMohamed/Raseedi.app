@@ -27,12 +27,13 @@ import {
   ShieldCheck,
   Briefcase,
   Receipt,
-  Link2,
-  Share2,
   Loader2,
   AlertTriangle,
   UserMinus,
   UserCheck,
+  UserPlus,
+  Search,
+  AtSign,
   ArrowRightLeft,
   Crown,
   BadgeCheck,
@@ -54,16 +55,21 @@ import { normalizeApprovalStatus } from '../../services/entitlements';
 import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../../services/numbers';
 import { resolveOrgAttachmentUrl } from '../../services/firebase';
 import { escapeCsvCell } from '../../services/csvImport';
+import { indexById, paginateList } from '../../services/lookupCache';
 import {
   formatWorkspaceDeleteConfirmMessage,
   resolveWorkspaceOrgPermissions,
 } from '../../services/workspaceCleanup';
+import {
+  checkOrgSeatAvailability,
+  formatUsernameHandle,
+  parseMemberLookupQuery,
+} from '../../services/usernameService';
 import { MoneyText } from '../common/MoneyText';
 import {
   AuditLogAction,
   BusinessParty,
   CostCenter,
-  OrganizationInvite,
   OrganizationRole,
   Transaction,
 } from '../../types';
@@ -116,9 +122,8 @@ export const OrganizationHubModal: React.FC = () => {
     addBusinessParty,
     updateBusinessParty,
     deleteBusinessParty,
-    createOrgInvite,
-    listOrgInvites,
-    revokeOrgInvite,
+    searchUserForOrg,
+    addOrgMemberDirectly,
     manageOrgMember,
     transferOrgOwnership,
     deleteOrganization,
@@ -164,16 +169,20 @@ export const OrganizationHubModal: React.FC = () => {
   const [settleAmount, setSettleAmount] = useState('');
   const [settleWalletId, setSettleWalletId] = useState('');
 
-  // Tab 4: Cloud Team, Secure Invites & Petty Cash Custody state
-  const [inviteRole, setInviteRole] = useState<Exclude<OrganizationRole, 'owner'>>('employee');
-  const [inviteExpiryDays, setInviteExpiryDays] = useState<number>(7);
-  const [inviteMaxUses, setInviteMaxUses] = useState<number>(5);
-  const [isGeneratingInvite, setIsGeneratingInvite] = useState(false);
-  const [generatedInvite, setGeneratedInvite] = useState<{ code: string; role: string } | null>(null);
-  const [copiedInviteMode, setCopiedInviteMode] = useState<'code' | 'link' | null>(null);
-  const [invitesList, setInvitesList] = useState<OrganizationInvite[]>([]);
-  const [isLoadingInvites, setIsLoadingInvites] = useState(false);
-  const [revokingInviteId, setRevokingInviteId] = useState<string | null>(null);
+  // Tab 4: Cloud Team, Direct Member Add (@username / Email) & Petty Cash Custody state
+  const [directMemberQuery, setDirectMemberQuery] = useState('');
+  const [directMemberRole, setDirectMemberRole] =
+    useState<Exclude<OrganizationRole, 'owner'>>('employee');
+  const [directMemberDept, setDirectMemberDept] = useState('');
+  const [directMemberLimit, setDirectMemberLimit] = useState('');
+  const [isSearchingMember, setIsSearchingMember] = useState(false);
+  const [isAddingMember, setIsAddingMember] = useState(false);
+  const [lookedUpUser, setLookedUpUser] = useState<{
+    uid: string;
+    email: string;
+    displayName: string;
+    username?: string;
+  } | null>(null);
   const [memberActionBusyUid, setMemberActionBusyUid] = useState<string | null>(null);
   const [editingMemberLimit, setEditingMemberLimit] = useState<{
     uid: string;
@@ -219,6 +228,9 @@ export const OrganizationHubModal: React.FC = () => {
   const [confirmRecalc, setConfirmRecalc] = useState(false);
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [recalcMessage, setRecalcMessage] = useState<string | null>(null);
+  const [visibleApprovalsCount, setVisibleApprovalsCount] = useState(30);
+  const [visibleAuditCount, setVisibleAuditCount] = useState(30);
+  const [visibleVoucherCount, setVisibleVoucherCount] = useState(100);
 
   // Keep org inputs and transient modal/form states clean when switching org
   React.useEffect(() => {
@@ -227,7 +239,10 @@ export const OrganizationHubModal: React.FC = () => {
     setOrgTaxNumInput(activeOrganization.taxNumber || '');
     setOrgThresholdInput(String(activeOrganization.approvalThreshold ?? 1000));
     setOrgLockDateInput(activeOrganization.lockedUntilDate || '');
-    setGeneratedInvite(null);
+    setDirectMemberQuery('');
+    setDirectMemberDept('');
+    setDirectMemberLimit('');
+    setLookedUpUser(null);
     setTeamFeedback(null);
     setConfirmQuickDeleteOpen(false);
     setQuickDeleteError(null);
@@ -245,27 +260,18 @@ export const OrganizationHubModal: React.FC = () => {
     setConfirmRecalc(false);
     setRecalcMessage(null);
     setSettingsSavedBanner(false);
+    setVisibleApprovalsCount(30);
+    setVisibleAuditCount(30);
+    setVisibleVoucherCount(100);
   }, [activeOrganization?.id]);
 
-  // Load invites when Team tab is active for owner/admin
   React.useEffect(() => {
-    if (!isOrgHubOpen || orgHubTab !== 'team' || !canOrgManage || !activeOrganization) return;
-    let cancelled = false;
-    setIsLoadingInvites(true);
-    listOrgInvites()
-      .then((list) => {
-        if (!cancelled) setInvitesList(list);
-      })
-      .catch(() => {
-        if (!cancelled) setInvitesList([]);
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoadingInvites(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [isOrgHubOpen, orgHubTab, canOrgManage, activeOrganization?.id, listOrgInvites]);
+    setVisibleApprovalsCount(30);
+  }, [approvalFilter]);
+
+  React.useEffect(() => {
+    setVisibleAuditCount(30);
+  }, [auditFilter, auditActorFilter, auditActionFilter, auditStartDate, auditEndDate]);
 
   const currency = activeOrganization?.currency || settings.mainCurrency;
 
@@ -289,6 +295,11 @@ export const OrganizationHubModal: React.FC = () => {
     });
   }, [activeOrganization, orgRefs, localOrgWorkspaces, user?.id, activeWorkspace, activeOrgRole]);
 
+  const categoriesById = useMemo(() => indexById(categories), [categories]);
+  const walletsById = useMemo(() => indexById(wallets), [wallets]);
+  const costCentersById = useMemo(() => indexById(orgCostCenters), [orgCostCenters]);
+  const partiesById = useMemo(() => indexById(orgParties), [orgParties]);
+
   const approvalItems = useMemo(() => {
     if (approvalFilter === 'trash') return orgTrashTransactions;
     return transactions.filter((tx) => {
@@ -298,6 +309,11 @@ export const OrganizationHubModal: React.FC = () => {
       return s === 'approved' || s === 'paid';
     });
   }, [transactions, orgTrashTransactions, approvalFilter]);
+
+  const paginatedApprovals = useMemo(
+    () => paginateList(approvalItems, visibleApprovalsCount),
+    [approvalItems, visibleApprovalsCount]
+  );
 
   const costCenterSummaries = useMemo(() => {
     return calculateCostCenterReport(
@@ -338,28 +354,45 @@ export const OrganizationHubModal: React.FC = () => {
     return transactions[0];
   }, [transactions, selectedVoucherTxId]);
 
+  const paginatedVoucherTransactions = useMemo(() => {
+    const slice = paginateList(transactions, visibleVoucherCount);
+    if (
+      selectedVoucherTx &&
+      !slice.visibleItems.some((tx) => tx.id === selectedVoucherTx.id)
+    ) {
+      return {
+        ...slice,
+        visibleItems: [selectedVoucherTx, ...slice.visibleItems],
+      };
+    }
+    return slice;
+  }, [transactions, visibleVoucherCount, selectedVoucherTx]);
+
   const filteredAuditLogs = useMemo(() => {
     const q = auditFilter.trim().toLowerCase();
     const startMs = auditStartDate ? new Date(`${auditStartDate}T00:00:00`).getTime() : null;
     const endMs = auditEndDate ? new Date(`${auditEndDate}T23:59:59.999`).getTime() : null;
-    return orgAuditLogs
-      .filter((e) => {
-        if (auditActorFilter && e.actorUid !== auditActorFilter) return false;
-        if (auditActionFilter && e.action !== auditActionFilter) return false;
-        if (startMs && e.timestamp < startMs) return false;
-        if (endMs && e.timestamp > endMs) return false;
-        if (
-          q &&
-          !e.summary.toLowerCase().includes(q) &&
-          !e.actorName.toLowerCase().includes(q) &&
-          !e.action.toLowerCase().includes(q)
-        ) {
-          return false;
-        }
-        return true;
-      })
-      .slice(0, 80);
+    return orgAuditLogs.filter((e) => {
+      if (auditActorFilter && e.actorUid !== auditActorFilter) return false;
+      if (auditActionFilter && e.action !== auditActionFilter) return false;
+      if (startMs && e.timestamp < startMs) return false;
+      if (endMs && e.timestamp > endMs) return false;
+      if (
+        q &&
+        !e.summary.toLowerCase().includes(q) &&
+        !e.actorName.toLowerCase().includes(q) &&
+        !e.action.toLowerCase().includes(q)
+      ) {
+        return false;
+      }
+      return true;
+    });
   }, [orgAuditLogs, auditFilter, auditActorFilter, auditActionFilter, auditStartDate, auditEndDate]);
+
+  const paginatedAuditLogs = useMemo(
+    () => paginateList(filteredAuditLogs, visibleAuditCount),
+    [filteredAuditLogs, visibleAuditCount]
+  );
 
   const handleOpenTxAttachment = async (tx: Transaction) => {
     const firstPath = tx.attachmentPaths?.[0];
@@ -586,46 +619,153 @@ export const OrganizationHubModal: React.FC = () => {
     setSettleWalletId('');
   };
 
-  // Cloud Team & Invite Handlers
-  const handleGenerateInvite = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (isOrgReadOnly || !canOrgManage) return;
-    setIsGeneratingInvite(true);
-    setTeamFeedback(null);
-    try {
-      const res = await createOrgInvite(inviteRole, inviteExpiryDays, inviteMaxUses);
-      setGeneratedInvite({ code: res.code, role: inviteRole });
-      setInvitesList((prev) => [res.invite, ...prev]);
+  // Cloud Team: Direct Member Lookup & Addition via Firestore (No Invite Server Required)
+  const seatStatus = checkOrgSeatAvailability(
+    orgMembers,
+    activeOrgSubscriptionState?.seatLimit ?? activeOrganization.seatLimit ?? 5,
+    activeOrganization.extraSeats ?? 0
+  );
+
+  const formatDirectAddError = (err: unknown): string => {
+    const raw = err instanceof Error ? err.message : String(err || '');
+    if (raw.includes('USER_NOT_FOUND')) {
+      return isRTL
+        ? 'لم يتم العثور على حساب مسجل بهذا البريد الإلكتروني أو اسم المستخدم. تأكد أن المستخدم قد سجّل الدخول في رَصِيدِي أولاً.'
+        : 'No registered Raseedi account was found with that email or @username. Ask the user to sign in first.';
+    }
+    if (raw.includes('ALREADY_MEMBER')) {
+      return isRTL
+        ? 'هذا الحساب عضو بالفعل في هذه المؤسسة.'
+        : 'This account is already a member of this organization.';
+    }
+    if (raw.includes('SEAT_LIMIT_REACHED')) {
+      return isRTL
+        ? 'تم استنفاد جميع مقاعد المؤسسة المتاحة. قم بترقية الباقة لإضافة أعضاء جدد.'
+        : 'All organization seats are used. Upgrade your plan to add more members.';
+    }
+    if (raw.includes('LOCAL_ORG_UNSUPPORTED')) {
+      return isRTL
+        ? 'إضافة الأعضاء متاحة للمؤسسات السحابية فقط. قم بتسجيل الدخول وإنشاء مؤسسة سحابية.'
+        : 'Direct team membership requires a Cloud Organization.';
+    }
+    if (raw.includes('ORG_READ_ONLY')) {
+      return isRTL
+        ? 'المؤسسة في وضع القراءة فقط حالياً. قم بتجديد الاشتراك لتفعيل إضافة الأعضاء.'
+        : 'Organization is currently read-only. Renew subscription to add members.';
+    }
+    if (raw.includes('INVALID_QUERY')) {
+      return isRTL
+        ? 'أدخل بريداً إلكترونياً صحيحاً أو اسم مستخدم يبدأ بـ @ (مثل @ahmed_acc).'
+        : 'Enter a valid email address or @username (e.g. @ahmed_acc).';
+    }
+    if (raw.includes('permission-denied') || raw.includes('PERMISSION_DENIED')) {
+      return isRTL
+        ? 'ليست لديك صلاحية تنفيذ هذا الإجراء أو الحساب غير مفعّل.'
+        : 'Permission denied. Ensure you are an active Owner/Admin with a verified account.';
+    }
+    return raw || (isRTL ? 'تعذر إضافة العضو حالياً.' : 'Failed to add member.');
+  };
+
+  const handleLookupDirectMember = async () => {
+    const parsed = parseMemberLookupQuery(directMemberQuery);
+    if (parsed.kind === 'invalid') {
+      setLookedUpUser(null);
       setTeamFeedback({
-        text: isRTL
-          ? 'تم إنشاء كود الدعوة الآمن بنجاح — انسخه الآن لأنه لا يظهر مرة أخرى.'
-          : 'Secure invite created — copy it now as plaintext codes are shown once.',
+        text: isRTL ? parsed.errorAr || '' : parsed.errorEn || '',
+        error: true,
       });
-    } catch (err: any) {
+      return;
+    }
+    setIsSearchingMember(true);
+    setTeamFeedback(null);
+    setLookedUpUser(null);
+    try {
+      const found = await searchUserForOrg(directMemberQuery);
+      if (!found) {
+        setTeamFeedback({
+          text: formatDirectAddError(new Error('USER_NOT_FOUND')),
+          error: true,
+        });
+        return;
+      }
+      const existing = orgMembers.find((m) => m.uid === found.uid);
+      if (existing) {
+        setTeamFeedback({
+          text: formatDirectAddError(new Error('ALREADY_MEMBER')),
+          error: true,
+        });
+        return;
+      }
+      setLookedUpUser(found);
+    } catch (err) {
       setTeamFeedback({
-        text: err?.message || (isRTL ? 'تعذر إنشاء الدعوة.' : 'Failed to create invite.'),
+        text: formatDirectAddError(err),
         error: true,
       });
     } finally {
-      setIsGeneratingInvite(false);
+      setIsSearchingMember(false);
     }
   };
 
-  const handleRevokeInvite = async (inviteId: string) => {
-    setRevokingInviteId(inviteId);
+  const handleDirectAddMember = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isOrgReadOnly || !canOrgManage || isAddingMember) return;
+    if (activeOrgPermissions.isLocalOnly) {
+      setTeamFeedback({
+        text: formatDirectAddError(new Error('LOCAL_ORG_UNSUPPORTED')),
+        error: true,
+      });
+      return;
+    }
+    if (!seatStatus.canAdd) {
+      setTeamFeedback({
+        text: formatDirectAddError(new Error('SEAT_LIMIT_REACHED')),
+        error: true,
+      });
+      return;
+    }
+
+    const parsed = parseMemberLookupQuery(directMemberQuery);
+    if (parsed.kind === 'invalid') {
+      setTeamFeedback({
+        text: isRTL ? parsed.errorAr || '' : parsed.errorEn || '',
+        error: true,
+      });
+      return;
+    }
+
+    setIsAddingMember(true);
     setTeamFeedback(null);
     try {
-      await revokeOrgInvite(inviteId);
-      setInvitesList((prev) =>
-        prev.map((inv) => (inv.id === inviteId ? { ...inv, status: 'revoked' } : inv))
-      );
-    } catch (err: any) {
+      const parsedLimit = directMemberLimit.trim()
+        ? parseLocalizedNumber(directMemberLimit)
+        : undefined;
+      const added = await addOrgMemberDirectly({
+        identifier: directMemberQuery,
+        targetUser: lookedUpUser,
+        role: directMemberRole,
+        department: directMemberDept.trim() || undefined,
+        spendingLimit:
+          typeof parsedLimit === 'number' && !Number.isNaN(parsedLimit) && parsedLimit >= 0
+            ? parsedLimit
+            : undefined,
+      });
+      setDirectMemberQuery('');
+      setDirectMemberDept('');
+      setDirectMemberLimit('');
+      setLookedUpUser(null);
       setTeamFeedback({
-        text: err?.message || (isRTL ? 'تعذر إلغاء الدعوة.' : 'Failed to revoke invite.'),
+        text: isRTL
+          ? `تمت إضافة ${added.displayName}${added.username ? ` (${formatUsernameHandle(added.username)})` : ''} إلى فريق المؤسسة بنجاح!`
+          : `${added.displayName}${added.username ? ` (${formatUsernameHandle(added.username)})` : ''} was added to the organization team!`,
+      });
+    } catch (err) {
+      setTeamFeedback({
+        text: formatDirectAddError(err),
         error: true,
       });
     } finally {
-      setRevokingInviteId(null);
+      setIsAddingMember(false);
     }
   };
 
@@ -997,12 +1137,10 @@ export const OrganizationHubModal: React.FC = () => {
                   </p>
                 </div>
               ) : (
-                approvalItems.map((tx) => {
-                  const cat = categories.find((c) => c.id === tx.categoryId);
-                  const cc = tx.costCenterId
-                    ? orgCostCenters.find((c) => c.id === tx.costCenterId)
-                    : null;
-                  const wallet = wallets.find((w) => w.id === tx.walletId);
+                paginatedApprovals.visibleItems.map((tx) => {
+                  const cat = categoriesById.get(tx.categoryId);
+                  const cc = tx.costCenterId ? costCentersById.get(tx.costCenterId) : undefined;
+                  const wallet = walletsById.get(tx.walletId);
                   return (
                     <div
                       key={tx.id}
@@ -1179,6 +1317,17 @@ export const OrganizationHubModal: React.FC = () => {
                     </div>
                   );
                 })
+              )}
+              {paginatedApprovals.hasMore && (
+                <button
+                  type="button"
+                  onClick={() => setVisibleApprovalsCount((prev) => prev + 40)}
+                  className="w-full py-2.5 px-4 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-xs font-semibold text-[var(--color-accent)] transition-colors min-h-[42px]"
+                >
+                  {isRTL
+                    ? `عرض المزيد من المعاملات (${paginatedApprovals.remainingCount} متبقي)`
+                    : `Show more approvals (${paginatedApprovals.remainingCount} remaining)`}
+                </button>
               )}
             </div>
           )}
@@ -1793,190 +1942,184 @@ export const OrganizationHubModal: React.FC = () => {
                 )}
               </div>
 
-              {/* Secure Cloud Invites Generator & Active Invites (Owner / Admin) */}
+              {/* Direct Member Addition via Email or @username (Owner / Admin) */}
               {canOrgManage && (
-                <div className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-3">
-                  <div className="flex items-center justify-between gap-2">
+                <div
+                  data-testid="direct-add-member-panel"
+                  className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] space-y-3"
+                >
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
                     <h3 className="text-xs font-bold text-[var(--color-ink)] flex items-center gap-1.5">
-                      <Link2 className="w-4 h-4 text-[var(--color-accent)]" />
-                      <span>{t('generateInviteBtn')}</span>
+                      <UserPlus className="w-4 h-4 text-[var(--color-accent)]" />
+                      <span>
+                        {isRTL
+                          ? 'إضافة عضو مباشر بالبريد الإلكتروني أو اسم المستخدم (@username)'
+                          : 'Add Team Member Directly by Email or @username'}
+                      </span>
                     </h3>
+                    <span
+                      className={`px-2 py-0.5 rounded-md text-[10px] font-bold num-tabular ${
+                        seatStatus.canAdd
+                          ? 'bg-[var(--color-income)]/12 text-[var(--color-income)]'
+                          : 'bg-[var(--color-expense)]/12 text-[var(--color-expense)]'
+                      }`}
+                    >
+                      {isRTL
+                        ? `${seatStatus.activeCount} / ${seatStatus.effectiveSeatLimit} مقعد`
+                        : `${seatStatus.activeCount} / ${seatStatus.effectiveSeatLimit} seats`}
+                    </span>
                   </div>
 
-                  <form onSubmit={handleGenerateInvite} className="grid grid-cols-1 sm:grid-cols-4 gap-2">
-                    <select
-                      disabled={isOrgReadOnly || isGeneratingInvite}
-                      value={inviteRole}
-                      onChange={(e) => setInviteRole(e.target.value as Exclude<OrganizationRole, 'owner'>)}
-                      aria-label={isRTL ? 'دور المدعو' : 'Invite role'}
-                      className="px-2.5 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[42px]"
-                    >
-                      {ROLES.filter((r) => r.id !== 'owner').map((r) => (
-                        <option key={r.id} value={r.id}>
-                          {isRTL ? r.labelAr : r.labelEn}
-                        </option>
-                      ))}
-                    </select>
-
-                    <select
-                      disabled={isOrgReadOnly || isGeneratingInvite}
-                      value={inviteExpiryDays}
-                      onChange={(e) => setInviteExpiryDays(Number(e.target.value))}
-                      aria-label={isRTL ? 'صلاحية الدعوة' : 'Expiry days'}
-                      className="px-2.5 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[42px]"
-                    >
-                      <option value={1}>{isRTL ? 'تنتهي خلال يوم' : '1 day'}</option>
-                      <option value={3}>{isRTL ? 'تنتهي خلال 3 أيام' : '3 days'}</option>
-                      <option value={7}>{isRTL ? 'تنتهي خلال 7 أيام' : '7 days'}</option>
-                      <option value={14}>{isRTL ? 'تنتهي خلال 14 يوماً' : '14 days'}</option>
-                      <option value={30}>{isRTL ? 'تنتهي خلال 30 يوماً' : '30 days'}</option>
-                    </select>
-
-                    <select
-                      disabled={isOrgReadOnly || isGeneratingInvite}
-                      value={inviteMaxUses}
-                      onChange={(e) => setInviteMaxUses(Number(e.target.value))}
-                      aria-label={isRTL ? 'الحد الأقصى للاستخدام' : 'Max uses'}
-                      className="px-2.5 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[42px]"
-                    >
-                      <option value={1}>{isRTL ? 'استخدام واحد' : '1 use'}</option>
-                      <option value={3}>{isRTL ? '3 استخدامات' : '3 uses'}</option>
-                      <option value={5}>{isRTL ? '5 استخدامات' : '5 uses'}</option>
-                      <option value={10}>{isRTL ? '10 استخدامات' : '10 uses'}</option>
-                      <option value={25}>{isRTL ? '25 استخداماً' : '25 uses'}</option>
-                    </select>
-
-                    <button
-                      type="submit"
-                      disabled={isOrgReadOnly || isGeneratingInvite}
-                      className="px-3 py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center justify-center gap-1.5 min-h-[42px] disabled:opacity-50"
-                    >
-                      {isGeneratingInvite ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <Plus className="w-4 h-4" />
-                      )}
-                      <span>{isRTL ? 'إصدار دعوة' : 'Create Invite'}</span>
-                    </button>
-                  </form>
-
-                  {/* Newly Generated One-Time Plaintext Invite Code */}
-                  {generatedInvite && (
-                    <div className="p-3 rounded-xl bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/40 space-y-2.5">
-                      <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <div>
-                          <div className="text-[10px] font-semibold text-[var(--color-accent)]">
-                            {isRTL ? 'كود الدعوة (يظهر مرة واحدة فقط):' : 'One-Time Invite Code:'}
-                          </div>
-                          <div className="text-base font-mono font-bold text-[var(--color-ink)]" dir="ltr">
-                            {generatedInvite.code}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              navigator.clipboard?.writeText(generatedInvite.code);
-                              setCopiedInviteMode('code');
-                              setTimeout(() => setCopiedInviteMode(null), 2000);
+                  {activeOrgPermissions.isLocalOnly ? (
+                    <div className="p-2.5 rounded-lg bg-[var(--color-warning)]/12 border border-[var(--color-warning)]/30 text-[11px] text-[var(--color-warning-text)]">
+                      {isRTL
+                        ? 'هذه المؤسسة محلية على الجهاز فقط. لتفعيل إضافة أعضاء الفريق عبر البريد أو @username، سجّل الدخول بحساب Google وأنشئ مؤسسة سحابية.'
+                        : 'This is a local-only organization. Sign in with Google and use a Cloud Organization to add team members directly.'}
+                    </div>
+                  ) : (
+                    <form onSubmit={handleDirectAddMember} className="space-y-2.5">
+                      <div className="flex items-center gap-2">
+                        <div className="relative flex-1 min-w-0">
+                          <AtSign className="w-3.5 h-3.5 text-[var(--color-muted)] absolute top-1/2 -translate-y-1/2 start-3 pointer-events-none" />
+                          <input
+                            type="text"
+                            dir="ltr"
+                            data-testid="direct-member-identifier-input"
+                            disabled={isOrgReadOnly || isAddingMember || !seatStatus.canAdd}
+                            value={directMemberQuery}
+                            onChange={(e) => {
+                              setDirectMemberQuery(e.target.value);
+                              setLookedUpUser(null);
+                              setTeamFeedback(null);
                             }}
-                            className="px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-[11px] font-semibold flex items-center gap-1 min-h-[36px]"
-                          >
-                            {copiedInviteMode === 'code' ? (
-                              <Check className="w-3.5 h-3.5 text-[var(--color-income)]" />
-                            ) : (
-                              <Copy className="w-3.5 h-3.5" />
-                            )}
-                            <span>{copiedInviteMode === 'code' ? (isRTL ? 'تم' : 'Copied') : isRTL ? 'نسخ الكود' : 'Code'}</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const link = `${window.location.origin}/?join=${encodeURIComponent(generatedInvite.code)}`;
-                              navigator.clipboard?.writeText(link);
-                              setCopiedInviteMode('link');
-                              setTimeout(() => setCopiedInviteMode(null), 2000);
-                            }}
-                            className="px-2.5 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-[11px] font-semibold flex items-center gap-1 min-h-[36px]"
-                          >
-                            {copiedInviteMode === 'link' ? (
-                              <Check className="w-3.5 h-3.5 text-[var(--color-income)]" />
-                            ) : (
-                              <Link2 className="w-3.5 h-3.5" />
-                            )}
-                            <span>{copiedInviteMode === 'link' ? (isRTL ? 'تم النسخ' : 'Link Copied') : t('copyInviteLink')}</span>
-                          </button>
-
-                          <a
-                            href={`https://wa.me/?text=${encodeURIComponent(
+                            placeholder={
                               isRTL
-                                ? `انضم إلى فريق "${activeOrganization.name}" في تطبيق رَصِيدِي عبر الرابط التالي:\n${window.location.origin}/?join=${generatedInvite.code}\nأو استخدم الكود: ${generatedInvite.code}`
-                                : `Join "${activeOrganization.name}" on Raseedi:\n${window.location.origin}/?join=${generatedInvite.code}\nOr use code: ${generatedInvite.code}`
-                            )}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="px-2.5 py-1.5 rounded-lg bg-[#25D366]/15 border border-[#25D366]/40 text-[#128C7E] dark:text-[#25D366] text-[11px] font-semibold flex items-center gap-1 min-h-[36px]"
-                          >
-                            <Share2 className="w-3.5 h-3.5" />
-                            <span>WhatsApp</span>
-                          </a>
+                                ? 'example@gmail.com أو @username'
+                                : 'example@gmail.com or @username'
+                            }
+                            className="w-full ps-8 pe-3 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[42px] disabled:opacity-50"
+                          />
                         </div>
+                        <button
+                          type="button"
+                          data-testid="direct-member-search-btn"
+                          disabled={
+                            isOrgReadOnly ||
+                            isSearchingMember ||
+                            isAddingMember ||
+                            !directMemberQuery.trim()
+                          }
+                          onClick={() => void handleLookupDirectMember()}
+                          className="px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-[var(--color-ink)] text-xs font-semibold flex items-center gap-1.5 min-h-[42px] shrink-0 disabled:opacity-45"
+                        >
+                          {isSearchingMember ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <Search className="w-4 h-4 text-[var(--color-accent)]" />
+                          )}
+                          <span>{isRTL ? 'بحث' : 'Lookup'}</span>
+                        </button>
                       </div>
-                    </div>
-                  )}
 
-                  {/* Active Invites List */}
-                  <div className="space-y-1.5">
-                    <div className="text-[11px] font-semibold text-[var(--color-muted)] flex items-center justify-between">
-                      <span>{isRTL ? 'الدعوات الصادرة' : 'Issued Invites'}</span>
-                      {isLoadingInvites && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                    </div>
-                    {invitesList.length === 0 ? (
-                      <div className="text-[11px] text-[var(--color-muted)] py-2">
-                        {isRTL ? 'لا توجد دعوات مصدرة بعد.' : 'No invites generated yet.'}
-                      </div>
-                    ) : (
-                      <div className="space-y-1.5 max-h-44 overflow-y-auto">
-                        {invitesList.map((inv) => (
-                          <div
-                            key={inv.id}
-                            className="px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] flex items-center justify-between gap-2 text-[11px]"
-                          >
-                            <div className="min-w-0">
-                              <div className="font-semibold text-[var(--color-ink)] flex items-center gap-1.5 flex-wrap">
-                                <span>{roleLabel(inv.role)}</span>
+                      {lookedUpUser && (
+                        <div
+                          data-testid="direct-member-preview-card"
+                          className="p-2.5 rounded-xl bg-[var(--color-income)]/10 border border-[var(--color-income)]/30 flex items-center justify-between gap-2"
+                        >
+                          <div className="min-w-0">
+                            <div className="text-xs font-bold text-[var(--color-ink)] flex items-center gap-1.5 flex-wrap">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-[var(--color-income)] shrink-0" />
+                              <span className="truncate">{lookedUpUser.displayName}</span>
+                              {lookedUpUser.username && (
                                 <span
-                                  className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
-                                    inv.status === 'active'
-                                      ? 'bg-[var(--color-income)]/15 text-[var(--color-income)]'
-                                      : 'bg-[var(--color-line)] text-[var(--color-muted)]'
-                                  }`}
+                                  className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-accent)]"
+                                  dir="ltr"
                                 >
-                                  {inv.status}
+                                  {formatUsernameHandle(lookedUpUser.username)}
                                 </span>
-                              </div>
-                              <div className="text-[10px] text-[var(--color-muted)]">
-                                {isRTL
-                                  ? `الاستخدام: ${inv.usedCount}/${inv.maxUses} • ينتهي: ${new Date(inv.expiresAt).toLocaleDateString('ar-EG')}`
-                                  : `Uses: ${inv.usedCount}/${inv.maxUses} • Exp: ${new Date(inv.expiresAt).toLocaleDateString('en-US')}`}
-                              </div>
+                              )}
                             </div>
-                            {inv.status === 'active' && !isOrgReadOnly && (
-                              <button
-                                type="button"
-                                disabled={revokingInviteId === inv.id}
-                                onClick={() => void handleRevokeInvite(inv.id)}
-                                className="px-2.5 py-1 rounded border border-[var(--color-expense)]/40 text-[var(--color-expense)] text-[10px] font-bold shrink-0 disabled:opacity-50"
-                              >
-                                {revokingInviteId === inv.id ? '...' : t('revokeInvite')}
-                              </button>
-                            )}
+                            <div className="text-[11px] text-[var(--color-muted)] truncate" dir="ltr">
+                              {lookedUpUser.email}
+                            </div>
                           </div>
-                        ))}
+                          <span className="text-[10px] font-bold text-[var(--color-income)] shrink-0">
+                            {isRTL ? 'حساب موثّق' : 'Found'}
+                          </span>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                        <select
+                          data-testid="direct-member-role-select"
+                          disabled={isOrgReadOnly || isAddingMember || !seatStatus.canAdd}
+                          value={directMemberRole}
+                          onChange={(e) =>
+                            setDirectMemberRole(
+                              e.target.value as Exclude<OrganizationRole, 'owner'>
+                            )
+                          }
+                          aria-label={isRTL ? 'صلاحية العضو' : 'Member role'}
+                          className="px-2.5 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[42px]"
+                        >
+                          {ROLES.filter((r) => r.id !== 'owner').map((r) => (
+                            <option key={r.id} value={r.id}>
+                              {isRTL ? r.labelAr : r.labelEn}
+                            </option>
+                          ))}
+                        </select>
+
+                        <input
+                          type="text"
+                          disabled={isOrgReadOnly || isAddingMember || !seatStatus.canAdd}
+                          value={directMemberDept}
+                          onChange={(e) => setDirectMemberDept(e.target.value)}
+                          placeholder={isRTL ? 'القسم (اختياري)' : 'Department (opt.)'}
+                          className="px-2.5 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[42px]"
+                        />
+
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          dir="ltr"
+                          disabled={isOrgReadOnly || isAddingMember || !seatStatus.canAdd}
+                          value={directMemberLimit}
+                          onChange={(e) =>
+                            setDirectMemberLimit(normalizeArabicPersianNumerals(e.target.value))
+                          }
+                          placeholder={
+                            isRTL ? `سقف الصرف (${currency})` : `Spend limit (${currency})`
+                          }
+                          className="px-2.5 py-2 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg text-xs min-h-[42px] num-tabular"
+                        />
+
+                        <button
+                          type="submit"
+                          data-testid="direct-member-submit-btn"
+                          disabled={
+                            isOrgReadOnly ||
+                            isAddingMember ||
+                            !seatStatus.canAdd ||
+                            !directMemberQuery.trim()
+                          }
+                          className="px-3 py-2 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center justify-center gap-1.5 min-h-[42px] disabled:opacity-45"
+                        >
+                          {isAddingMember ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <UserPlus className="w-4 h-4" />
+                          )}
+                          <span>{isRTL ? 'إضافة للمؤسسة' : 'Add Member'}</span>
+                        </button>
                       </div>
-                    )}
-                  </div>
+
+                      <p className="text-[10px] text-[var(--color-muted)] leading-relaxed">
+                        {isRTL
+                          ? 'تتم الإضافة مباشرة عبر السحابة وتظهر المؤسسة تلقائياً في حساب العضو فور دخوله التطبيق دون الحاجة لأكواد دعوة.'
+                          : 'Members are linked instantly via Cloud Firestore and see this organization automatically in their workspace switcher.'}
+                      </p>
+                    </form>
+                  )}
                 </div>
               )}
 
@@ -2005,6 +2148,14 @@ export const OrganizationHubModal: React.FC = () => {
                               <span className="text-xs font-bold text-[var(--color-ink)] truncate">
                                 {member.displayName}
                               </span>
+                              {member.username && (
+                                <span
+                                  className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-accent)]"
+                                  dir="ltr"
+                                >
+                                  {formatUsernameHandle(member.username)}
+                                </span>
+                              )}
                               {isSelf && (
                                 <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--color-accent)]/12 text-[var(--color-accent)] font-bold">
                                   {isRTL ? 'أنت' : 'You'}
@@ -2588,13 +2739,24 @@ export const OrganizationHubModal: React.FC = () => {
                       {transactions.length === 0 && (
                         <option value="">{isRTL ? 'لا توجد معاملات' : 'No transactions'}</option>
                       )}
-                      {transactions.map((tx) => (
+                      {paginatedVoucherTransactions.visibleItems.map((tx) => (
                         <option key={tx.id} value={tx.id}>
                           {tx.voucherNumber || tx.id.slice(0, 8)} — {tx.date} — {tx.amount} {tx.currency}{' '}
                           {tx.notes ? `(${tx.notes.slice(0, 24)})` : ''}
                         </option>
                       ))}
                     </select>
+                    {paginatedVoucherTransactions.hasMore && (
+                      <button
+                        type="button"
+                        onClick={() => setVisibleVoucherCount((prev) => prev + 100)}
+                        className="px-3 py-2 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-[11px] font-semibold text-[var(--color-accent)] min-h-[44px]"
+                      >
+                        {isRTL
+                          ? `+100 (${paginatedVoucherTransactions.remainingCount})`
+                          : `+100 (${paginatedVoucherTransactions.remainingCount})`}
+                      </button>
+                    )}
                     <button
                       type="button"
                       data-testid="print-official-voucher-btn"
@@ -2614,7 +2776,11 @@ export const OrganizationHubModal: React.FC = () => {
                     >
                       <div className="flex items-start justify-between border-b-2 border-[#1E6F73]/30 pb-3 gap-3">
                         <div className="flex items-center gap-3 min-w-0">
-                          <BrandLogo className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0" title={t('appName')} />
+                          <BrandLogo
+                            className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0"
+                            title={t('appName')}
+                            lazy={true}
+                          />
                           <div className="min-w-0">
                             <div className="font-title leading-snug text-lg font-bold text-[#1E6F73]">
                               {activeOrganization.name}
@@ -2679,14 +2845,14 @@ export const OrganizationHubModal: React.FC = () => {
                         <div className="flex items-center justify-between py-1.5 border-b border-dashed border-[#D4CBB8]">
                           <span className="text-[#6B655A]">{isRTL ? 'الحساب / الخزينة:' : 'Account / Wallet:'}</span>
                           <span className="font-semibold">
-                            {wallets.find((w) => w.id === selectedVoucherTx.walletId)?.name || '—'}
+                            {walletsById.get(selectedVoucherTx.walletId)?.name || '—'}
                           </span>
                         </div>
                         <div className="flex items-center justify-between py-1.5 border-b border-dashed border-[#D4CBB8]">
                           <span className="text-[#6B655A]">{isRTL ? 'البند / التصنيف:' : 'Category:'}</span>
                           <span className="font-semibold">
                             {(() => {
-                              const c = categories.find((x) => x.id === selectedVoucherTx.categoryId);
+                              const c = categoriesById.get(selectedVoucherTx.categoryId);
                               return c ? (isRTL ? c.nameAr : c.nameEn) : '—';
                             })()}
                           </span>
@@ -2696,7 +2862,7 @@ export const OrganizationHubModal: React.FC = () => {
                             <span className="text-[#6B655A]">{t('costCenters')}:</span>
                             <span className="font-semibold">
                               {(() => {
-                                const cc = orgCostCenters.find((x) => x.id === selectedVoucherTx.costCenterId);
+                                const cc = costCentersById.get(selectedVoucherTx.costCenterId);
                                 return cc ? `[${cc.code}] ${isRTL ? cc.nameAr : cc.nameEn}` : '—';
                               })()}
                             </span>
@@ -2706,7 +2872,7 @@ export const OrganizationHubModal: React.FC = () => {
                           <div className="flex items-center justify-between py-1.5 border-b border-dashed border-[#D4CBB8]">
                             <span className="text-[#6B655A]">{isRTL ? 'الجهة (مورد/عميل):' : 'Partner:'}</span>
                             <span className="font-semibold">
-                              {orgParties.find((p) => p.id === selectedVoucherTx.partyId)?.name || '—'}
+                              {partiesById.get(selectedVoucherTx.partyId)?.name || '—'}
                             </span>
                           </div>
                         )}
@@ -2969,23 +3135,36 @@ export const OrganizationHubModal: React.FC = () => {
                       {isRTL ? 'لا توجد قيود تدقيق مطابقة.' : 'No matching audit log entries.'}
                     </div>
                   ) : (
-                    filteredAuditLogs.map((entry) => (
-                      <div
-                        key={entry.id}
-                        className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] text-xs space-y-1"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-bold text-[var(--color-ink)]">{entry.summary}</span>
-                          <span className="px-2 py-0.5 rounded bg-[var(--color-surface)] border border-[var(--color-line)] font-mono text-[10px] text-[var(--color-accent)] shrink-0">
-                            {entry.action}
-                          </span>
+                    <>
+                      {paginatedAuditLogs.visibleItems.map((entry) => (
+                        <div
+                          key={entry.id}
+                          className="p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] text-xs space-y-1"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-bold text-[var(--color-ink)]">{entry.summary}</span>
+                            <span className="px-2 py-0.5 rounded bg-[var(--color-surface)] border border-[var(--color-line)] font-mono text-[10px] text-[var(--color-accent)] shrink-0">
+                              {entry.action}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-[var(--color-muted)] flex items-center justify-between">
+                            <span>{entry.actorName}</span>
+                            <span dir="ltr">{new Date(entry.timestamp).toLocaleString()}</span>
+                          </div>
                         </div>
-                        <div className="text-[10px] text-[var(--color-muted)] flex items-center justify-between">
-                          <span>{entry.actorName}</span>
-                          <span dir="ltr">{new Date(entry.timestamp).toLocaleString()}</span>
-                        </div>
-                      </div>
-                    ))
+                      ))}
+                      {paginatedAuditLogs.hasMore && (
+                        <button
+                          type="button"
+                          onClick={() => setVisibleAuditCount((prev) => prev + 40)}
+                          className="w-full py-2.5 px-4 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-xs font-semibold text-[var(--color-accent)] transition-colors min-h-[42px]"
+                        >
+                          {isRTL
+                            ? `عرض المزيد من سجل التدقيق (${paginatedAuditLogs.remainingCount} متبقي)`
+                            : `Load more audit logs (${paginatedAuditLogs.remainingCount} remaining)`}
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
               )}
@@ -3057,6 +3236,8 @@ export const OrganizationHubModal: React.FC = () => {
           <img
             src={attachmentPreviewUrl}
             alt="receipt preview"
+            loading="lazy"
+            decoding="async"
             className="max-w-full max-h-[85vh] rounded-xl object-contain shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           />

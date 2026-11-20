@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { Building2, ChevronDown, User } from 'lucide-react';
+import { AlertCircle, AtSign, Building2, ChevronDown, User } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { getCurrency } from '../services/currency';
 import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../services/numbers';
+import { normalizeUsername, validateUsernameFormat } from '../services/usernameService';
 import { CurrencyPickerModal } from './common/CurrencyPickerModal';
 import { BrandLogo } from './common/BrandLogo';
 
@@ -12,17 +13,27 @@ export const OnboardingModal: React.FC = () => {
     completeOnboarding,
     createOrganization,
     loadDemoData,
+    updateUsername,
+    user,
     categories,
-    updateSettings,
     settings,
     t,
     isRTL,
   } = useApp();
 
   const [step, setStep] = useState(1);
+  const [isFinishing, setIsFinishing] = useState(false);
   const [accountMode, setAccountMode] = useState<'personal' | 'organization'>('personal');
   const [selectedCurrency, setSelectedCurrency] = useState(settings.mainCurrency || 'EGP');
   const [currencyModalOpen, setCurrencyModalOpen] = useState(false);
+  const [usernameInput, setUsernameInput] = useState(user?.username || '');
+  const [usernameError, setUsernameError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (user?.username && !usernameInput) {
+      setUsernameInput(user.username);
+    }
+  }, [user?.username]);
 
   // Step 2: First Wallet (Personal) or Org Details (Organization)
   const [walletName, setWalletName] = useState(isRTL ? 'الخزينة الرئيسية' : 'Cash');
@@ -55,23 +66,48 @@ export const OnboardingModal: React.FC = () => {
   const curr = getCurrency(selectedCurrency);
 
   const handleFinish = async () => {
-    updateSettings({ mainCurrency: selectedCurrency });
-    if (accountMode === 'organization') {
-      completeOnboarding(
-        selectedCurrency,
-        isRTL ? 'الخزينة الرئيسية' : 'Cash',
-        0
-      );
-      await createOrganization({
-        name: orgName.trim() || (isRTL ? 'مؤسستي' : 'My Organization'),
-        currency: selectedCurrency,
-        vatRate: (parseLocalizedNumber(orgVatRate) >= 0 ? parseLocalizedNumber(orgVatRate) : 14),
-        loadSampleData: orgLoadSample,
-      });
-      return;
+    if (isFinishing) return;
+    setIsFinishing(true);
+    setUsernameError(null);
+    try {
+      const normalizedHandle = normalizeUsername(usernameInput);
+      if (user?.isLoggedIn && normalizedHandle && normalizedHandle !== user.username) {
+        const formatCheck = validateUsernameFormat(normalizedHandle);
+        if (!formatCheck.valid) {
+          setUsernameError(isRTL ? formatCheck.errorAr || '' : formatCheck.errorEn || '');
+          setStep(1);
+          return;
+        }
+        const claimRes = await updateUsername(normalizedHandle);
+        if (!claimRes.ok) {
+          setUsernameError(
+            claimRes.error ||
+              (isRTL ? 'تعذر حفظ اسم المستخدم. جرّب اسماً آخر.' : 'Could not save username.')
+          );
+          setStep(1);
+          return;
+        }
+      }
+
+      if (accountMode === 'organization') {
+        completeOnboarding(
+          selectedCurrency,
+          isRTL ? 'الخزينة الرئيسية' : 'Cash',
+          0
+        );
+        await createOrganization({
+          name: orgName.trim() || (isRTL ? 'مؤسستي' : 'My Organization'),
+          currency: selectedCurrency,
+          vatRate: parseLocalizedNumber(orgVatRate) >= 0 ? parseLocalizedNumber(orgVatRate) : 14,
+          loadSampleData: orgLoadSample,
+        });
+        return;
+      }
+      const parsedBal = parseLocalizedNumber(initialBalance);
+      completeOnboarding(selectedCurrency, walletName, Number.isFinite(parsedBal) ? parsedBal : 0);
+    } finally {
+      setIsFinishing(false);
     }
-    const parsedBal = parseLocalizedNumber(initialBalance);
-    completeOnboarding(selectedCurrency, walletName, Number.isFinite(parsedBal) ? parsedBal : 0);
   };
 
   if (hasCompletedOnboarding) return null;
@@ -222,6 +258,40 @@ export const OnboardingModal: React.FC = () => {
                   })}
                 </div>
               </div>
+
+              {user?.isLoggedIn && (
+                <div className="pt-2 border-t border-[var(--color-line)] space-y-1.5">
+                  <label className="block text-[11px] font-semibold text-[var(--color-ink)]">
+                    {isRTL ? 'اسم المستخدم الفريد (اختياري)' : 'Unique Username (Optional)'}
+                  </label>
+                  <div className="relative">
+                    <AtSign className="w-3.5 h-3.5 text-[var(--color-muted)] absolute top-1/2 -translate-y-1/2 start-3 pointer-events-none" />
+                    <input
+                      type="text"
+                      dir="ltr"
+                      data-testid="onboarding-username-input"
+                      value={usernameInput}
+                      onChange={(e) => {
+                        setUsernameInput(e.target.value.replace(/^@+/, ''));
+                        setUsernameError(null);
+                      }}
+                      placeholder="ahmed_acc"
+                      className="w-full ps-8 pe-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-lg text-xs font-mono text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)] min-h-[40px]"
+                    />
+                  </div>
+                  <p className="text-[10px] text-[var(--color-muted)] leading-relaxed">
+                    {isRTL
+                      ? 'يتيح لمالكي المؤسسات إضافتك مباشرة للفريق عبر @username دون روابط دعوة.'
+                      : 'Allows organization owners to add you directly by @username without invite codes.'}
+                  </p>
+                  {usernameError && (
+                    <div className="text-[11px] text-[var(--color-expense)] flex items-center gap-1 font-medium">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span>{usernameError}</span>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -392,7 +462,19 @@ export const OnboardingModal: React.FC = () => {
             {step < 3 ? (
               <button
                 type="button"
-                onClick={() => setStep(step + 1)}
+                onClick={() => {
+                  if (step === 1 && user?.isLoggedIn && usernameInput.trim()) {
+                    const formatCheck = validateUsernameFormat(usernameInput);
+                    if (!formatCheck.valid) {
+                      setUsernameError(
+                        isRTL ? formatCheck.errorAr || '' : formatCheck.errorEn || ''
+                      );
+                      return;
+                    }
+                  }
+                  setUsernameError(null);
+                  setStep(step + 1);
+                }}
                 className="flex-1 py-2.5 bg-[var(--color-accent)] hover:opacity-90 text-[var(--color-on-accent)] font-semibold rounded-lg text-xs transition-opacity min-h-[44px]"
               >
                 {isRTL ? 'التالي' : 'Next'}
@@ -400,8 +482,9 @@ export const OnboardingModal: React.FC = () => {
             ) : (
               <button
                 type="button"
+                disabled={isFinishing}
                 onClick={handleFinish}
-                className="flex-1 py-2.5 bg-[var(--color-accent)] hover:opacity-90 text-[var(--color-on-accent)] font-bold rounded-lg text-xs transition-opacity min-h-[44px]"
+                className="flex-1 py-2.5 bg-[var(--color-accent)] hover:opacity-90 text-[var(--color-on-accent)] font-bold rounded-lg text-xs transition-opacity min-h-[44px] disabled:opacity-60"
               >
                 {t('startUsingApp')}
               </button>

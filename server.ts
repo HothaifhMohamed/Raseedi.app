@@ -3328,33 +3328,45 @@ Return JSON matching the schema with:
 
       try {
         const orgRefsSnap = await adminDb.collection('users').doc(uid).collection('orgRefs').get();
-        for (const refDoc of orgRefsSnap.docs) {
-          const orgId = refDoc.id;
-          const orgRef = adminDb.collection('organizations').doc(orgId);
-          const [orgSnap, membersSnap] = await Promise.all([
-            orgRef.get(),
-            orgRef.collection('members').where('status', '==', 'active').get(),
-          ]);
-          if (orgSnap.exists && orgSnap.data()?.ownerUid === uid && membersSnap.size > 1) {
-            res.status(409).json({
-              error: 'ORG_OWNERSHIP_TRANSFER_REQUIRED',
-              message: `أنت مالك مؤسسة "${orgSnap.data()?.name || orgId}" وبها أعضاء نشطون. انقل الملكية أو احذف المؤسسة أولاً.`,
-            });
-            return;
-          }
+        const orgChecks = await Promise.all(
+          orgRefsSnap.docs.map(async (refDoc) => {
+            const orgId = refDoc.id;
+            const orgRef = adminDb.collection('organizations').doc(orgId);
+            const [orgSnap, membersSnap] = await Promise.all([
+              orgRef.get(),
+              orgRef.collection('members').where('status', '==', 'active').get(),
+            ]);
+            const orgData = orgSnap.exists ? orgSnap.data() : undefined;
+            const isSoloOrMultiOwner = Boolean(orgSnap.exists && orgData?.ownerUid === uid);
+            return {
+              orgId,
+              orgRef,
+              orgName: String(orgData?.name || orgId),
+              isOwner: isSoloOrMultiOwner,
+              activeMembersCount: membersSnap.size,
+            };
+          })
+        );
+
+        const blockingOrg = orgChecks.find((item) => item.isOwner && item.activeMembersCount > 1);
+        if (blockingOrg) {
+          res.status(409).json({
+            error: 'ORG_OWNERSHIP_TRANSFER_REQUIRED',
+            message: `أنت مالك مؤسسة "${blockingOrg.orgName}" وبها أعضاء نشطون. انقل الملكية أو احذف المؤسسة أولاً.`,
+          });
+          return;
         }
 
-        // Remove memberships or solo-owned orgs before deleting user document
-        for (const refDoc of orgRefsSnap.docs) {
-          const orgId = refDoc.id;
-          const orgRef = adminDb.collection('organizations').doc(orgId);
-          const orgSnap = await orgRef.get();
-          if (orgSnap.exists && orgSnap.data()?.ownerUid === uid) {
-            await adminDb.recursiveDelete(orgRef);
-          } else {
-            await orgRef.collection('members').doc(uid).delete().catch(() => {});
-          }
-        }
+        // Reuse already-fetched ownership checks without repeating orgRef.get() (zero N+1 reads)
+        await Promise.all(
+          orgChecks.map(async ({ orgRef, isOwner }) => {
+            if (isOwner) {
+              await adminDb.recursiveDelete(orgRef);
+            } else {
+              await orgRef.collection('members').doc(uid).delete().catch(() => {});
+            }
+          })
+        );
 
         await adminDb.recursiveDelete(adminDb.collection('users').doc(uid));
         try {

@@ -23,13 +23,21 @@ export const ConfirmationModal: React.FC<ConfirmationModalProps> = ({
   cancelLabel,
   isDestructive = true,
 }) => {
-  const { t } = useApp();
+  const { t, isRTL } = useApp();
 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-sm rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] p-5 text-[var(--color-ink)] shadow-xl">
+    <div
+      data-testid="confirmation-modal"
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4"
+    >
+      <div
+        dir={isRTL ? 'rtl' : 'ltr'}
+        role="alertdialog"
+        aria-modal="true"
+        className="w-full max-w-sm rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] p-5 text-[var(--color-ink)] shadow-xl"
+      >
         <div className="flex items-center gap-3 mb-3">
           <div
             className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
@@ -43,15 +51,19 @@ export const ConfirmationModal: React.FC<ConfirmationModalProps> = ({
           <h3 className="text-sm font-bold text-[var(--color-ink)] leading-tight">{title}</h3>
         </div>
 
-        <p className="text-xs text-[var(--color-muted)] leading-relaxed mb-5">{message}</p>
+        <p className="text-xs text-[var(--color-muted)] leading-relaxed whitespace-pre-line mb-5">
+          {message}
+        </p>
 
         <div className="flex items-center gap-2">
           <button
+            type="button"
+            data-testid="confirmation-modal-confirm"
             onClick={() => {
               onConfirm();
               onClose();
             }}
-            className={`flex-1 py-2 rounded-lg text-xs font-semibold transition min-h-[44px] ${
+            className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold transition min-h-[44px] ${
               isDestructive
                 ? 'bg-[var(--color-expense)] text-white hover:opacity-90'
                 : 'bg-[var(--color-accent)] text-[var(--color-on-accent)] hover:opacity-90'
@@ -60,8 +72,10 @@ export const ConfirmationModal: React.FC<ConfirmationModalProps> = ({
             {confirmLabel || t('confirmDelete')}
           </button>
           <button
+            type="button"
+            data-testid="confirmation-modal-cancel"
             onClick={onClose}
-            className="flex-1 py-2 rounded-lg text-xs font-semibold bg-[var(--color-bg)] hover:bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-ink)] transition-colors min-h-[44px]"
+            className="flex-1 py-2 px-3 rounded-lg text-xs font-semibold bg-[var(--color-bg)] hover:bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-ink)] transition-colors min-h-[44px]"
           >
             {cancelLabel || t('cancel')}
           </button>

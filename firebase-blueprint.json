@@ -22,10 +22,21 @@
           "description": "User display name",
           "maxLength": 120
         },
+        "username": {
+          "type": "string",
+          "description": "Globally unique lowercase handle for direct organization member addition",
+          "minLength": 3,
+          "maxLength": 30,
+          "pattern": "^[a-z0-9_]{3,30}$"
+        },
         "photoURL": {
           "type": "string",
           "description": "User avatar URL",
-          "maxLength": 512
+          "maxLength": 1024
+        },
+        "hasCompletedOnboarding": {
+          "type": "boolean",
+          "description": "Whether the user has completed initial workspace/currency onboarding"
         },
         "isPro": {
           "type": "boolean",
@@ -433,6 +444,7 @@
         "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "email": { "type": "string", "format": "email", "maxLength": 254 },
         "displayName": { "type": "string", "maxLength": 120 },
+        "username": { "type": "string", "minLength": 3, "maxLength": 30, "pattern": "^[a-z0-9_]{3,30}$" },
         "role": { "type": "string", "enum": ["owner", "admin", "accountant", "employee", "viewer"] },
         "department": { "type": "string", "maxLength": 80 },
         "spendingLimit": { "type": "number" },
@@ -566,9 +578,44 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "uid", "workspaceId", "date", "type", "amount", "currency", "walletId", "categoryId", "payload", "updatedAt"]
+    },
+    "UsernameRecord": {
+      "title": "UsernameRecord",
+      "description": "Exact-key unique handle reservation enabling direct organization member lookup without listing or exposing users/{uid}",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string", "minLength": 3, "maxLength": 30, "pattern": "^[a-z0-9_]{3,30}$" },
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 254 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["username", "uid", "displayName", "updatedAt"]
+    },
+    "UserEmailIndexRecord": {
+      "title": "UserEmailIndexRecord",
+      "description": "Exact SHA-256 email hash lookup document (no list allowed) for direct organization member addition",
+      "type": "object",
+      "properties": {
+        "emailHash": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[a-f0-9]{64}$" },
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 254 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "username": { "type": "string", "minLength": 3, "maxLength": 30, "pattern": "^[a-z0-9_]{3,30}$" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["emailHash", "uid", "email", "displayName", "updatedAt"]
     }
   },
   "firestore": {
+    "/usernames/{username}": {
+      "schema": { "$ref": "#/entities/UsernameRecord" },
+      "description": "Exact-key unique @username reservations (allow list: false)"
+    },
+    "/userEmailIndex/{emailHash}": {
+      "schema": { "$ref": "#/entities/UserEmailIndexRecord" },
+      "description": "Exact SHA-256 email hash index for direct org member addition (allow list: false)"
+    },
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
       "description": "Private user profile and server-managed PRO / Business subscription status"

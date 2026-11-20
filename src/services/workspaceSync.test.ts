@@ -5,6 +5,7 @@ import {
   buildWorkspaceTransactionRecord,
   canPerformAutomaticCloudWrite,
   extractTransactionFromWorkspaceDoc,
+  getForceCloudSyncAvailability,
   getWorkspaceTransactionDocPath,
   getWorkspaceTransactionsPath,
   isActiveWorkspaceTransaction,
@@ -291,6 +292,54 @@ describe('workspaceSync unified path and workspace isolation', () => {
     assert.deepEqual(
       preserved.map((t) => t.id),
       ['tx-excel-2']
+    );
+  });
+
+  it('guards Force Cloud Sync availability for guest, offline, syncing, and ready states', () => {
+    assert.deepEqual(
+      getForceCloudSyncAvailability({
+        isLoggedIn: false,
+        isOnline: true,
+        isCloudSyncing: false,
+      }),
+      { canExecute: false, reason: 'guest' }
+    );
+
+    // Guest takes precedence even if offline
+    assert.deepEqual(
+      getForceCloudSyncAvailability({
+        isLoggedIn: false,
+        isOnline: false,
+        isCloudSyncing: false,
+      }),
+      { canExecute: false, reason: 'guest' }
+    );
+
+    assert.deepEqual(
+      getForceCloudSyncAvailability({
+        isLoggedIn: true,
+        isOnline: false,
+        isCloudSyncing: false,
+      }),
+      { canExecute: false, reason: 'offline' }
+    );
+
+    assert.deepEqual(
+      getForceCloudSyncAvailability({
+        isLoggedIn: true,
+        isOnline: true,
+        isCloudSyncing: true,
+      }),
+      { canExecute: false, reason: 'syncing' }
+    );
+
+    assert.deepEqual(
+      getForceCloudSyncAvailability({
+        isLoggedIn: true,
+        isOnline: true,
+        isCloudSyncing: false,
+      }),
+      { canExecute: true, reason: null }
     );
   });
 });

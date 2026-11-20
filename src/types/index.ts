@@ -260,6 +260,7 @@ export interface OrganizationMember {
   uid: string;
   email: string;
   displayName: string;
+  username?: string;
   role: OrganizationRole;
   department?: string;
   spendingLimit?: number;
@@ -449,6 +450,7 @@ export interface UserAccount {
   id: string;
   name: string;
   email: string;
+  username?: string;
   avatarUrl?: string;
   isLoggedIn: boolean;
 }

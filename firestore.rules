@@ -10,6 +10,14 @@ service cloud.firestore {
       return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidUsername(handle) {
+      return handle is string && handle.size() >= 3 && handle.size() <= 30 && handle.matches('^[a-z0-9_]{3,30}$');
+    }
+
+    function isValidEmailHash(hash) {
+      return hash is string && hash.size() == 64 && hash.matches('^[a-f0-9]{64}$');
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -137,13 +145,104 @@ service cloud.firestore {
         );
     }
 
+    function isValidUsernameRecord(data, username) {
+      return data.keys().hasAll(['username', 'uid', 'email', 'displayName', 'updatedAt'])
+        && data.keys().hasOnly(['username', 'uid', 'email', 'displayName', 'updatedAt'])
+        && data.username is string
+        && data.username == username
+        && isValidUsername(data.username)
+        && data.uid is string
+        && data.uid == request.auth.uid
+        && isValidId(data.uid)
+        && data.email is string
+        && data.email.size() <= 254
+        && data.displayName is string
+        && data.displayName.size() > 0
+        && data.displayName.size() <= 120
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserEmailIndexRecord(data, emailHash) {
+      return data.keys().hasAll(['emailHash', 'uid', 'email', 'displayName', 'updatedAt'])
+        && data.keys().hasOnly(['emailHash', 'uid', 'email', 'displayName', 'username', 'updatedAt'])
+        && data.emailHash is string
+        && data.emailHash == emailHash
+        && isValidEmailHash(data.emailHash)
+        && data.uid is string
+        && data.uid == request.auth.uid
+        && isValidId(data.uid)
+        && data.email is string
+        && data.email.size() > 0
+        && data.email.size() <= 254
+        && data.displayName is string
+        && data.displayName.size() > 0
+        && data.displayName.size() <= 120
+        && (!('username' in data) || data.username == null || isValidUsername(data.username))
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidOrgMemberCreate(data, memberUid) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'status', 'joinedAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid',
+          'email',
+          'displayName',
+          'username',
+          'role',
+          'department',
+          'spendingLimit',
+          'spendingLimitMinor',
+          'status',
+          'joinedAt',
+          'updatedAt'
+        ])
+        && data.uid is string
+        && data.uid == memberUid
+        && isValidId(data.uid)
+        && data.email is string
+        && data.email.size() > 0
+        && data.email.size() <= 254
+        && data.displayName is string
+        && data.displayName.size() > 0
+        && data.displayName.size() <= 120
+        && (!('username' in data) || data.username == null || isValidUsername(data.username))
+        && data.role in ['admin', 'accountant', 'employee', 'viewer']
+        && (!('department' in data) || data.department == null || (data.department is string && data.department.size() <= 80))
+        && (!('spendingLimit' in data) || data.spendingLimit == null || (data.spendingLimit is number && data.spendingLimit > 0 && data.spendingLimit <= 1000000000))
+        && (!('spendingLimitMinor' in data) || data.spendingLimitMinor == null || (data.spendingLimitMinor is int && data.spendingLimitMinor > 0))
+        && data.status == 'active'
+        && data.joinedAt is number
+        && data.joinedAt > 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidOrgRefCreate(data, orgId) {
+      return data.keys().hasAll(['orgId', 'orgName', 'role', 'status', 'currency', 'joinedAt'])
+        && data.keys().hasOnly(['orgId', 'orgName', 'role', 'status', 'currency', 'joinedAt'])
+        && data.orgId is string
+        && data.orgId == orgId
+        && isValidId(data.orgId)
+        && data.orgName is string
+        && data.orgName.size() > 0
+        && data.orgName.size() <= 120
+        && data.role in ['admin', 'accountant', 'employee', 'viewer']
+        && data.status == 'active'
+        && data.currency is string
+        && data.currency.size() > 0
+        && data.currency.size() <= 8
+        && data.joinedAt is number
+        && data.joinedAt > 0;
+    }
+
     function isValidUserProfileCreate(data, userId) {
       return data.keys().hasAll(['uid', 'email', 'isPro', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly([
           'uid',
           'email',
           'displayName',
+          'username',
           'photoURL',
+          'hasCompletedOnboarding',
           'isPro',
           'proActive',
           'proPlan',
@@ -154,6 +253,8 @@ service cloud.firestore {
           'proExpiresAt',
           'hasUsedBusinessTrial',
           'redeemedCouponCode',
+          'currencyRates',
+          'settings',
           'lastSyncedAt',
           'createdAt',
           'updatedAt'
@@ -165,8 +266,10 @@ service cloud.firestore {
         && data.email is string
         && data.email.size() > 0
         && data.email.size() <= 254
-        && (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 120))
-        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 512))
+        && (!('displayName' in data) || data.displayName == null || (data.displayName is string && data.displayName.size() <= 120))
+        && (!('username' in data) || data.username == null || isValidUsername(data.username))
+        && (!('photoURL' in data) || data.photoURL == null || (data.photoURL is string && data.photoURL.size() <= 1024))
+        && (!('hasCompletedOnboarding' in data) || data.hasCompletedOnboarding == null || data.hasCompletedOnboarding is bool)
         && data.isPro == false
         && (!('proActive' in data) || data.proActive == false)
         && (!('proPlan' in data) || data.proPlan == 'free')
@@ -177,7 +280,9 @@ service cloud.firestore {
         && (!('proExpiresAt' in data) || data.proExpiresAt == null)
         && (!('hasUsedBusinessTrial' in data) || data.hasUsedBusinessTrial == false)
         && (!('redeemedCouponCode' in data) || data.redeemedCouponCode == null)
-        && (!('lastSyncedAt' in data) || data.lastSyncedAt is number)
+        && (!('currencyRates' in data) || data.currencyRates == null || (data.currencyRates is map && data.currencyRates.size() <= 250))
+        && (!('settings' in data) || data.settings == null || (data.settings is map && data.settings.size() <= 60))
+        && (!('lastSyncedAt' in data) || data.lastSyncedAt == null || data.lastSyncedAt is number)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -187,7 +292,9 @@ service cloud.firestore {
         && (!('uid' in data) || (data.uid is string && data.uid.size() <= 128 && data.uid == userId && (data.uid == request.auth.uid || isAdmin())))
         && (!('email' in data) || data.email == null || (data.email is string && data.email.size() <= 254))
         && (!('displayName' in data) || data.displayName == null || (data.displayName is string && data.displayName.size() <= 120))
-        && (!('photoURL' in data) || data.photoURL == null || (data.photoURL is string && data.photoURL.size() <= 512))
+        && (!('username' in data) || data.username == null || isValidUsername(data.username))
+        && (!('photoURL' in data) || data.photoURL == null || (data.photoURL is string && data.photoURL.size() <= 1024))
+        && (!('hasCompletedOnboarding' in data) || data.hasCompletedOnboarding == null || data.hasCompletedOnboarding is bool)
         && (!('isPro' in data) || data.isPro == null || data.isPro is bool)
         && (!('proActive' in data) || data.proActive == null || data.proActive is bool)
         && (!('proPlan' in data) || data.proPlan == null || data.proPlan in ['free', 'monthly', 'yearly', 'lifetime', 'business_monthly', 'business_yearly', 'trial', 'code'])
@@ -552,6 +659,54 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Global unique @username reservation & exact-lookup directory (no collection listing/scraping)
+    match /usernames/{username} {
+      allow get: if isSignedIn() && isValidUsername(username);
+      allow list: if false;
+      allow create: if isSignedIn()
+        && isValidUsername(username)
+        && isValidUsernameRecord(incoming(), username)
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidUsername(username)
+        && isValidUsernameRecord(incoming(), username)
+        && existing().uid == request.auth.uid
+        && incoming().uid == existing().uid
+        && incoming().username == existing().username
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'updatedAt']);
+      allow delete: if isSignedIn()
+        && isValidUsername(username)
+        && existing().uid == request.auth.uid;
+    }
+
+    // Exact-email SHA-256 lookup index for direct organization member addition (never listable)
+    match /userEmailIndex/{emailHash} {
+      allow get: if isSignedIn() && isValidEmailHash(emailHash);
+      allow list: if false;
+      allow create: if isSignedIn()
+        && isValidEmailHash(emailHash)
+        && isValidUserEmailIndexRecord(incoming(), emailHash)
+        && ('email' in request.auth.token)
+        && request.auth.token.email is string
+        && incoming().email.trim().lower() == request.auth.token.email.trim().lower()
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidEmailHash(emailHash)
+        && isValidUserEmailIndexRecord(incoming(), emailHash)
+        && existing().uid == request.auth.uid
+        && incoming().uid == existing().uid
+        && incoming().emailHash == existing().emailHash
+        && ('email' in request.auth.token)
+        && request.auth.token.email is string
+        && incoming().email.trim().lower() == request.auth.token.email.trim().lower()
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'username', 'updatedAt']);
+      allow delete: if isSignedIn()
+        && isValidEmailHash(emailHash)
+        && existing().uid == request.auth.uid;
+    }
+
     match /users/{userId} {
       allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
       allow list: if isAdmin();
@@ -579,11 +734,21 @@ service cloud.firestore {
             && incoming().get('proExpiresAt', null) == existing().get('proExpiresAt', null)
             && incoming().get('hasUsedBusinessTrial', false) == existing().get('hasUsedBusinessTrial', false)
             && incoming().get('redeemedCouponCode', null) == existing().get('redeemedCouponCode', null)
+            && (
+              !('username' in incoming().diff(existing()).affectedKeys())
+              || incoming().username == null
+              || (
+                isValidUsername(incoming().username)
+                && getAfter(/databases/$(database)/documents/usernames/$(incoming().username)).data.uid == userId
+              )
+            )
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'uid',
               'email',
               'displayName',
+              'username',
               'photoURL',
+              'hasCompletedOnboarding',
               'currencyRates',
               'settings',
               'lastSyncedAt',
@@ -614,10 +779,34 @@ service cloud.firestore {
         allow read, write: if false;
       }
 
-      // Server-managed membership index (read-only for the user)
+      // Organization membership index (synced atomically with organizations/{orgId}/members/{userId})
       match /orgRefs/{orgId} {
-        allow get, list: if isValidId(userId) && isOwner(userId);
-        allow write: if false;
+        allow get: if isValidId(userId) && isValidId(orgId) && (isOwner(userId) || isOrgOwnerOrAdmin(orgId));
+        allow list: if isValidId(userId) && isOwner(userId);
+        allow create: if isValidId(userId)
+          && isValidId(orgId)
+          && isVerifiedUser()
+          && isOrgOwnerOrAdmin(orgId)
+          && isOrgWritable(orgId)
+          && isValidOrgRefCreate(incoming(), orgId)
+          && existsAfter(/databases/$(database)/documents/organizations/$(orgId)/members/$(userId));
+        allow update: if isValidId(userId)
+          && isValidId(orgId)
+          && isVerifiedUser()
+          && isOrgOwnerOrAdmin(orgId)
+          && isOrgWritable(orgId)
+          && existing().role != 'owner'
+          && incoming().role in ['admin', 'accountant', 'employee', 'viewer']
+          && incoming().status in ['active', 'suspended']
+          && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'status']);
+        allow delete: if isValidId(userId)
+          && isValidId(orgId)
+          && isVerifiedUser()
+          && isOrgOwnerOrAdmin(orgId)
+          && isOrgWritable(orgId)
+          && userId != request.auth.uid
+          && existing().role != 'owner'
+          && !existsAfter(/databases/$(database)/documents/organizations/$(orgId)/members/$(userId));
       }
 
       // Chunked personal backup metadata (users/{uid}/backup/meta)
@@ -811,8 +1000,42 @@ service cloud.firestore {
 
       match /members/{memberUid} {
         allow get, list: if isValidId(orgId) && isOrgMemberActive(orgId);
-        // All joins, role updates, suspends, and removals go through verified Admin SDK API
-        allow write: if false;
+        allow create: if isValidId(orgId)
+          && isValidId(memberUid)
+          && isVerifiedUser()
+          && isOrgOwnerOrAdmin(orgId)
+          && isOrgWritable(orgId)
+          && isValidOrgMemberCreate(incoming(), memberUid)
+          && incoming().updatedAt == request.time
+          && existsAfter(/databases/$(database)/documents/users/$(memberUid)/orgRefs/$(orgId));
+        allow update: if isValidId(orgId)
+          && isValidId(memberUid)
+          && isVerifiedUser()
+          && isOrgOwnerOrAdmin(orgId)
+          && isOrgWritable(orgId)
+          && existing().role != 'owner'
+          && incoming().role in ['admin', 'accountant', 'employee', 'viewer']
+          && incoming().status in ['active', 'suspended']
+          && (!('department' in incoming()) || incoming().department == null || (incoming().department is string && incoming().department.size() <= 80))
+          && (!('spendingLimit' in incoming()) || incoming().spendingLimit == null || (incoming().spendingLimit is number && incoming().spendingLimit > 0 && incoming().spendingLimit <= 1000000000))
+          && (!('spendingLimitMinor' in incoming()) || incoming().spendingLimitMinor == null || (incoming().spendingLimitMinor is int && incoming().spendingLimitMinor > 0))
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'role',
+            'status',
+            'department',
+            'spendingLimit',
+            'spendingLimitMinor',
+            'updatedAt'
+          ]);
+        allow delete: if isValidId(orgId)
+          && isValidId(memberUid)
+          && isVerifiedUser()
+          && isOrgOwnerOrAdmin(orgId)
+          && isOrgWritable(orgId)
+          && memberUid != request.auth.uid
+          && existing().role != 'owner'
+          && !existsAfter(/databases/$(database)/documents/users/$(memberUid)/orgRefs/$(orgId));
       }
 
       match /invites/{inviteId} {

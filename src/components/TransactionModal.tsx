@@ -1855,6 +1855,8 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                                 <img
                                   src={resolved}
                                   alt={`cloud-attachment-${idx + 1}`}
+                                  loading="lazy"
+                                  decoding="async"
                                   className="w-full h-full object-cover"
                                 />
                                 <span className="absolute bottom-1 start-1 p-0.5 rounded bg-black/60 text-white opacity-80">
@@ -1897,7 +1899,13 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                             className="w-full h-full block relative group cursor-zoom-in"
                             aria-label={isRTL ? 'تكبير الصورة المرفقة' : 'Zoom attachment'}
                           >
-                            <img src={imgSrc} alt={`attachment-${idx + 1}`} className="w-full h-full object-cover" />
+                            <img
+                              src={imgSrc}
+                              alt={`attachment-${idx + 1}`}
+                              loading="lazy"
+                              decoding="async"
+                              className="w-full h-full object-cover"
+                            />
                             <span className="absolute bottom-1 start-1 p-0.5 rounded bg-black/60 text-white opacity-80">
                               <ZoomIn className="w-2.5 h-2.5" />
                             </span>
@@ -2166,6 +2174,8 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
           <img
             src={lightboxImage}
             alt="attachment preview"
+            loading="lazy"
+            decoding="async"
             className="max-w-full max-h-[85vh] rounded-xl object-contain shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           />

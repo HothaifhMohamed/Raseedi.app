@@ -7,6 +7,11 @@ import { Category, Transaction, TransactionType, Wallet } from '../types';
 import { normalizeArabicText, normalizeDigits } from './dialectParser';
 import { normalizeArabicPersianNumerals } from './numbers';
 import { normalizeWorkspaceId } from './workspaceSync';
+import {
+  buildImportProgressState,
+  ImportProgressState,
+  yieldToMainThread,
+} from './importProgress';
 
 export interface CsvColumnMapping {
   dateIndex: number; // -1 if unmapped
@@ -502,6 +507,352 @@ export function parseImportFileBuffer(params: {
         headers,
         rows,
         records: rowsToRecordObjects(headers, rows),
+        fileType: check.kind,
+        sheetNames: workbook.SheetNames,
+        activeSheet: selectedSheet,
+      },
+    };
+  } catch {
+    return {
+      ok: false,
+      errorCode: 'CORRUPT_FILE',
+      errorAr:
+        'تعذرت قراءة ملف الإكسل — قد يكون الملف تالفاً أو محمياً بكلمة مرور أو ليس بصيغة Excel صالحة.',
+      errorEn:
+        'Could not read the Excel file — it may be corrupted, password-protected, or not a valid spreadsheet.',
+    };
+  }
+}
+
+/**
+ * Non-blocking chunked conversion of headers + rows into JSON records.
+ */
+export async function rowsToRecordObjectsAsync(
+  headers: string[],
+  rows: string[][],
+  chunkSize = 200,
+  onProgress?: (processed: number, total: number) => void,
+  shouldAbort?: () => boolean
+): Promise<Record<string, string>[]> {
+  const seenKeys = new Map<string, number>();
+  const uniqueHeaders = headers.map((h, idx) => {
+    const base = (h || '').trim() || `column_${idx + 1}`;
+    if (UNSAFE_OBJECT_KEYS.has(base)) return null;
+    const count = seenKeys.get(base) || 0;
+    seenKeys.set(base, count + 1);
+    const candidate = count === 0 ? base : `${base}_${count + 1}`;
+    return UNSAFE_OBJECT_KEYS.has(candidate) ? null : candidate;
+  });
+
+  const safeChunk = Math.max(50, Math.floor(chunkSize));
+  const total = rows.length;
+  const result: Record<string, string>[] = new Array(total);
+
+  for (let start = 0; start < total; start += safeChunk) {
+    if (shouldAbort?.()) return result.slice(0, start);
+    const end = Math.min(total, start + safeChunk);
+    for (let r = start; r < end; r++) {
+      const row = rows[r];
+      const obj: Record<string, string> = {};
+      for (let c = 0; c < uniqueHeaders.length; c++) {
+        const key = uniqueHeaders[c];
+        if (!key) continue;
+        obj[key] = row[c] !== undefined ? String(row[c]).trim() : '';
+      }
+      result[r] = obj;
+    }
+    onProgress?.(end, total);
+    if (end < total) {
+      await yieldToMainThread();
+    }
+  }
+  return result;
+}
+
+/**
+ * Non-blocking RFC-4180 CSV parser that yields to the main thread every ~200 rows
+ * so large spreadsheets never freeze the browser UI.
+ */
+export async function parseCsvTextAsync(
+  rawText: string,
+  options?: {
+    chunkSize?: number;
+    onProgress?: (processed: number, total: number) => void;
+    shouldAbort?: () => boolean;
+  }
+): Promise<CsvParsedTable & { records: Record<string, string>[] }> {
+  const cleanText = rawText.replace(/^\uFEFF/, '').trim();
+  if (!cleanText) return { headers: [], rows: [], records: [] };
+
+  const delimiter = detectCsvDelimiter(cleanText);
+  const rawRecords: string[][] = [];
+  let currentRow: string[] = [];
+  let currentField = '';
+  let inQuotes = false;
+  const totalChars = cleanText.length;
+  const yieldRowInterval = Math.max(100, options?.chunkSize ?? 200);
+  let rowsSinceYield = 0;
+
+  for (let i = 0; i < totalChars; i++) {
+    const ch = cleanText[i];
+    const next = cleanText[i + 1];
+
+    if (inQuotes) {
+      if (ch === '"' && next === '"') {
+        currentField += '"';
+        i++;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        currentField += ch;
+      }
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === delimiter) {
+        currentRow.push(currentField.trim());
+        currentField = '';
+      } else if (ch === '\r' && next === '\n') {
+        currentRow.push(currentField.trim());
+        if (currentRow.some((cell) => cell !== '')) {
+          rawRecords.push(currentRow);
+          rowsSinceYield++;
+        }
+        currentRow = [];
+        currentField = '';
+        i++;
+      } else if (ch === '\n' || ch === '\r') {
+        currentRow.push(currentField.trim());
+        if (currentRow.some((cell) => cell !== '')) {
+          rawRecords.push(currentRow);
+          rowsSinceYield++;
+        }
+        currentRow = [];
+        currentField = '';
+      } else {
+        currentField += ch;
+      }
+    }
+
+    if (rowsSinceYield >= yieldRowInterval) {
+      rowsSinceYield = 0;
+      if (options?.shouldAbort?.()) {
+        return { headers: [], rows: [], records: [] };
+      }
+      options?.onProgress?.(Math.min(i + 1, totalChars), totalChars);
+      await yieldToMainThread();
+    }
+  }
+
+  if (currentField.length > 0 || currentRow.length > 0) {
+    currentRow.push(currentField.trim());
+    if (currentRow.some((cell) => cell !== '')) rawRecords.push(currentRow);
+  }
+
+  options?.onProgress?.(totalChars, totalChars);
+
+  if (rawRecords.length === 0) return { headers: [], rows: [], records: [] };
+  const headers = rawRecords[0];
+  const rows = rawRecords.slice(1);
+  const records = await rowsToRecordObjectsAsync(
+    headers,
+    rows,
+    yieldRowInterval,
+    undefined,
+    options?.shouldAbort
+  );
+  return { headers, rows, records };
+}
+
+/**
+ * Non-blocking chunked parser for Excel (.xlsx / .xls) and CSV files.
+ * Yields to the browser between chunks and reports real parsing progress.
+ */
+export async function parseImportFileBufferAsync(params: {
+  bytes: Uint8Array;
+  fileName: string;
+  mimeType?: string;
+  sheetName?: string;
+  chunkSize?: number;
+  onProgress?: (processed: number, total: number) => void;
+  shouldAbort?: () => boolean;
+}): Promise<ParseImportFileResult> {
+  const { bytes, fileName, mimeType, sheetName, chunkSize = 200, onProgress, shouldAbort } = params;
+  const check = validateImportFile({ fileName, mimeType, bytes });
+  if (!check.ok) {
+    return check;
+  }
+
+  if (check.kind === 'csv') {
+    onProgress?.(0, Math.max(1, bytes.length));
+    await yieldToMainThread();
+    if (shouldAbort?.()) {
+      return {
+        ok: false,
+        errorCode: 'EMPTY_FILE',
+        errorAr: 'تم إلغاء القراءة.',
+        errorEn: 'Parsing cancelled.',
+      };
+    }
+    const decoded = decodeCsvBytes(bytes);
+    const parsed = await parseCsvTextAsync(decoded, {
+      chunkSize,
+      onProgress,
+      shouldAbort,
+    });
+    if (parsed.headers.length === 0 || parsed.rows.length === 0) {
+      return {
+        ok: false,
+        errorCode: 'EMPTY_FILE',
+        errorAr: 'ملف CSV فارغ أو لا يحتوي على صفوف صالحة.',
+        errorEn: 'CSV file is empty or has no data rows.',
+      };
+    }
+    return {
+      ok: true,
+      data: {
+        headers: parsed.headers,
+        rows: parsed.rows,
+        records: parsed.records,
+        fileType: 'csv',
+      },
+    };
+  }
+
+  // Excel (.xlsx / .xls)
+  try {
+    onProgress?.(10, 100);
+    await yieldToMainThread();
+    if (shouldAbort?.()) {
+      return {
+        ok: false,
+        errorCode: 'EMPTY_FILE',
+        errorAr: 'تم إلغاء القراءة.',
+        errorEn: 'Parsing cancelled.',
+      };
+    }
+
+    const workbook = XLSX.read(bytes, {
+      type: 'array',
+      cellDates: true,
+      cellNF: false,
+      cellText: false,
+    });
+
+    if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
+      return {
+        ok: false,
+        errorCode: 'EMPTY_FILE',
+        errorAr: 'ملف الإكسل لا يحتوي على أي أوراق عمل.',
+        errorEn: 'Excel workbook contains no worksheets.',
+      };
+    }
+
+    onProgress?.(40, 100);
+    await yieldToMainThread();
+
+    const extractSheetAoa = (name: string): unknown[][] => {
+      const ws = workbook.Sheets[name];
+      if (!ws) return [];
+      return XLSX.utils.sheet_to_json<unknown[]>(ws, {
+        header: 1,
+        defval: '',
+        blankrows: false,
+        raw: true,
+      });
+    };
+
+    const formatAoaChunked = async (aoa: unknown[][]): Promise<string[][]> => {
+      const safeChunk = Math.max(100, Math.floor(chunkSize));
+      const formatted: string[][] = [];
+      for (let start = 0; start < aoa.length; start += safeChunk) {
+        if (shouldAbort?.()) return formatted;
+        const end = Math.min(aoa.length, start + safeChunk);
+        for (let i = start; i < end; i++) {
+          const r = aoa[i];
+          if (!Array.isArray(r)) continue;
+          const mapped = r.map(formatSpreadsheetCell);
+          if (mapped.some((cell) => cell !== '')) {
+            formatted.push(mapped);
+          }
+        }
+        const pct = 40 + Math.round((end / Math.max(1, aoa.length)) * 50);
+        onProgress?.(pct, 100);
+        if (end < aoa.length) {
+          await yieldToMainThread();
+        }
+      }
+      return formatted;
+    };
+
+    let selectedSheet =
+      sheetName && workbook.SheetNames.includes(sheetName)
+        ? sheetName
+        : workbook.SheetNames[0];
+    let rawGrid = await formatAoaChunked(extractSheetAoa(selectedSheet));
+
+    if (rawGrid.length < 2 && !sheetName) {
+      for (const candidate of workbook.SheetNames) {
+        if (candidate === selectedSheet) continue;
+        const candidateGrid = await formatAoaChunked(extractSheetAoa(candidate));
+        if (candidateGrid.length >= 2) {
+          selectedSheet = candidate;
+          rawGrid = candidateGrid;
+          break;
+        }
+      }
+    }
+
+    if (rawGrid.length < 2) {
+      return {
+        ok: false,
+        errorCode: 'EMPTY_FILE',
+        errorAr: 'ورقة الإكسل فارغة أو لا تحتوي على صفوف بيانات بعد العناوين.',
+        errorEn: 'Excel sheet is empty or has no data rows beneath the header row.',
+      };
+    }
+
+    const maxCols = rawGrid.reduce((max, r) => {
+      let lastNonEmpty = r.length - 1;
+      while (lastNonEmpty >= 0 && r[lastNonEmpty] === '') lastNonEmpty--;
+      return Math.max(max, lastNonEmpty + 1);
+    }, 0);
+
+    if (maxCols === 0) {
+      return {
+        ok: false,
+        errorCode: 'EMPTY_FILE',
+        errorAr: 'ورقة الإكسل فارغة.',
+        errorEn: 'Excel sheet is empty.',
+      };
+    }
+
+    const normalizedGrid: string[][] = new Array(rawGrid.length);
+    const safeChunk = Math.max(100, Math.floor(chunkSize));
+    for (let start = 0; start < rawGrid.length; start += safeChunk) {
+      if (shouldAbort?.()) break;
+      const end = Math.min(rawGrid.length, start + safeChunk);
+      for (let i = start; i < end; i++) {
+        const sliced = rawGrid[i].slice(0, maxCols);
+        while (sliced.length < maxCols) sliced.push('');
+        normalizedGrid[i] = sliced;
+      }
+      if (end < rawGrid.length) {
+        await yieldToMainThread();
+      }
+    }
+
+    const headers = normalizedGrid[0];
+    const rows = normalizedGrid.slice(1);
+    const records = await rowsToRecordObjectsAsync(headers, rows, safeChunk, undefined, shouldAbort);
+    onProgress?.(100, 100);
+
+    return {
+      ok: true,
+      data: {
+        headers,
+        rows,
+        records,
         fileType: check.kind,
         sheetNames: workbook.SheetNames,
         activeSheet: selectedSheet,
@@ -1210,6 +1561,392 @@ export function mapCsvRowsToTransactions(params: {
   };
 }
 
+/**
+ * Non-blocking chunked version of `mapCsvRowsToTransactions` that processes rows
+ * in chunks of ~200 rows, yields between chunks, pre-indexes existing wallets/categories
+ * in O(1) Maps, and invokes `onProgress(processed, total)` continuously.
+ */
+export async function mapCsvRowsToTransactionsChunked(params: {
+  rows: string[][];
+  mapping: CsvColumnMapping;
+  categories: Category[];
+  existingTransactions: Transaction[];
+  wallets?: Wallet[];
+  defaultCurrency?: string;
+  workspaceId?: string;
+  chunkSize?: number;
+  onProgress?: (processed: number, total: number) => void;
+  shouldAbort?: () => boolean;
+}): Promise<CsvImportMappingResult> {
+  const {
+    rows,
+    mapping,
+    categories,
+    existingTransactions,
+    wallets = [],
+    defaultCurrency = wallets[0]?.currency || 'EGP',
+    workspaceId,
+    chunkSize = 200,
+    onProgress,
+    shouldAbort,
+  } = params;
+  const safeWorkspaceId = normalizeWorkspaceId(workspaceId);
+  const safeChunk = Math.max(50, Math.floor(chunkSize));
+
+  const existingKeys = new Set<string>();
+  for (let i = 0; i < existingTransactions.length; i++) {
+    const tx = existingTransactions[i];
+    if (tx.deletedAt) continue;
+    existingKeys.add(buildDuplicateKey(tx.date, tx.amount, tx.type));
+  }
+
+  const fallbackCategory =
+    categories.find((c) => c.id === 'cat-other') || categories[0];
+
+  const walletColIdx = mapping.walletIndex ?? -1;
+  const toWalletColIdx = mapping.toWalletIndex ?? -1;
+  const typeColIdx = mapping.typeIndex ?? -1;
+
+  // Pre-normalize existing wallets & categories once (O(W + C)) instead of per row (O(N * (W + C)))
+  const exactWalletByNorm = new Map<string, Wallet>();
+  const normalizedWallets: Array<{ norm: string; wallet: Wallet }> = [];
+  const usedWalletIds = new Set<string>();
+  for (const w of wallets) {
+    usedWalletIds.add(w.id);
+    const norm = normalizeArabicText(w.name);
+    if (norm) {
+      if (!exactWalletByNorm.has(norm)) exactWalletByNorm.set(norm, w);
+      normalizedWallets.push({ norm, wallet: w });
+    }
+  }
+  const autoCreatedWallets: Wallet[] = [];
+  const autoWalletByNormName = new Map<string, Wallet>();
+  const resolvedWalletCache = new Map<string, { wallet?: Wallet; isNew: boolean }>();
+
+  const resolveOrCreateWallet = (rawName: string): { wallet?: Wallet; isNew: boolean } => {
+    const trimmed = rawName.trim();
+    if (!trimmed) return { wallet: undefined, isNew: false };
+    const normW = normalizeArabicText(trimmed);
+    if (!normW) return { wallet: undefined, isNew: false };
+
+    const cached = resolvedWalletCache.get(normW);
+    if (cached) return cached;
+
+    const exactExisting = exactWalletByNorm.get(normW);
+    if (exactExisting) {
+      const res = { wallet: exactExisting, isNew: false };
+      resolvedWalletCache.set(normW, res);
+      return res;
+    }
+
+    if (normW.length >= 3) {
+      const partialExisting = normalizedWallets.find(
+        ({ norm }) => norm.length >= 3 && (norm.includes(normW) || normW.includes(norm))
+      );
+      if (partialExisting) {
+        const res = { wallet: partialExisting.wallet, isNew: false };
+        resolvedWalletCache.set(normW, res);
+        return res;
+      }
+    }
+
+    const alreadyCreated = autoWalletByNormName.get(normW);
+    if (alreadyCreated) {
+      const res = { wallet: alreadyCreated, isNew: true };
+      resolvedWalletCache.set(normW, res);
+      return res;
+    }
+
+    const baseHash = computeDeterministicIdHash(normW);
+    let id = `w-imp-${baseHash}`;
+    let suffix = 1;
+    while (usedWalletIds.has(id)) {
+      id = `w-imp-${baseHash}-${suffix++}`;
+    }
+    usedWalletIds.add(id);
+
+    const newWallet: Wallet = {
+      id,
+      name: trimmed,
+      currency: defaultCurrency,
+      initialBalance: 0,
+      initialBalanceMinor: 0,
+      balance: 0,
+      balanceMinor: 0,
+      color:
+        AUTO_WALLET_COLORS[
+          (wallets.length + autoCreatedWallets.length) % AUTO_WALLET_COLORS.length
+        ],
+      icon: 'Wallet',
+      isArchived: false,
+      workspaceId: safeWorkspaceId,
+      order: wallets.length + autoCreatedWallets.length + 1,
+    };
+    autoCreatedWallets.push(newWallet);
+    autoWalletByNormName.set(normW, newWallet);
+    const res = { wallet: newWallet, isNew: true };
+    resolvedWalletCache.set(normW, res);
+    return res;
+  };
+
+  const exactCategoryByNorm = new Map<string, Category>();
+  const normalizedCategories: Array<{ ar: string; en: string; category: Category }> = [];
+  const usedCatIds = new Set<string>();
+  for (const c of categories) {
+    usedCatIds.add(c.id);
+    const ar = normalizeArabicText(c.nameAr);
+    const en = normalizeArabicText(c.nameEn);
+    if (ar && !exactCategoryByNorm.has(ar)) exactCategoryByNorm.set(ar, c);
+    if (en && !exactCategoryByNorm.has(en)) exactCategoryByNorm.set(en, c);
+    if (c.id !== 'cat-other') {
+      normalizedCategories.push({ ar, en, category: c });
+    }
+  }
+  const autoCreatedCategories: Category[] = [];
+  const autoCatByNormName = new Map<string, Category>();
+
+  const resolveOrCreateCategory = (
+    rawCatName: string,
+    txType: TransactionType
+  ): { category: Category; isNew: boolean } => {
+    const trimmed = rawCatName.trim();
+    if (!trimmed) {
+      return {
+        category: fallbackCategory || {
+          id: 'cat-other',
+          nameAr: 'أخرى',
+          nameEn: 'Other',
+          icon: 'Layers',
+          color: '#7A7468',
+          type: 'both',
+          order: 99,
+        },
+        isNew: false,
+      };
+    }
+
+    const normCat = normalizeArabicText(trimmed);
+    const desiredCatType: 'expense' | 'income' = txType === 'income' ? 'income' : 'expense';
+
+    const exact = exactCategoryByNorm.get(normCat);
+    if (exact) return { category: exact, isNew: false };
+
+    if (normCat.length >= 3) {
+      const partialMatches: Category[] = [];
+      for (const item of normalizedCategories) {
+        if (
+          (item.ar.length >= 3 && (item.ar.includes(normCat) || normCat.includes(item.ar))) ||
+          (item.en.length >= 3 && (item.en.includes(normCat) || normCat.includes(item.en)))
+        ) {
+          partialMatches.push(item.category);
+        }
+      }
+      if (partialMatches.length > 0) {
+        const typePreferred =
+          partialMatches.find((c) => c.type === desiredCatType || c.type === 'both') ||
+          partialMatches[0];
+        return { category: typePreferred, isNew: false };
+      }
+    }
+
+    const alreadyCreated = autoCatByNormName.get(normCat);
+    if (alreadyCreated) {
+      if (alreadyCreated.type !== 'both' && alreadyCreated.type !== desiredCatType) {
+        alreadyCreated.type = 'both';
+      }
+      return { category: alreadyCreated, isNew: true };
+    }
+
+    const baseHash = computeDeterministicIdHash(normCat);
+    let id = `cat-imp-${baseHash}`;
+    let suffix = 1;
+    while (usedCatIds.has(id)) {
+      id = `cat-imp-${baseHash}-${suffix++}`;
+    }
+    usedCatIds.add(id);
+
+    const newCat: Category = {
+      id,
+      nameAr: trimmed,
+      nameEn: trimmed,
+      icon: 'Tag',
+      color:
+        AUTO_CATEGORY_COLORS[
+          (categories.length + autoCreatedCategories.length) % AUTO_CATEGORY_COLORS.length
+        ],
+      type: desiredCatType,
+      order: categories.length + autoCreatedCategories.length + 1,
+    };
+    autoCreatedCategories.push(newCat);
+    autoCatByNormName.set(normCat, newCat);
+    return { category: newCat, isNew: true };
+  };
+
+  let validCount = 0;
+  let invalidCount = 0;
+  let duplicateCount = 0;
+  const total = rows.length;
+  const previewRows: CsvPreviewRow[] = new Array(total);
+
+  for (let start = 0; start < total; start += safeChunk) {
+    if (shouldAbort?.()) {
+      return {
+        previewRows: previewRows.slice(0, start),
+        validCount,
+        invalidCount,
+        duplicateCount,
+        autoCreatedWallets,
+        autoCreatedCategories,
+      };
+    }
+
+    const end = Math.min(total, start + safeChunk);
+    for (let idx = start; idx < end; idx++) {
+      const row = rows[idx];
+      const rawDate = mapping.dateIndex >= 0 ? row[mapping.dateIndex] || '' : '';
+      const rawAmount = mapping.amountIndex >= 0 ? row[mapping.amountIndex] || '' : '';
+      const rawType = typeColIdx >= 0 ? row[typeColIdx] || '' : '';
+      const rawCat = mapping.categoryIndex >= 0 ? row[mapping.categoryIndex] || '' : '';
+      const rawNotes = mapping.notesIndex >= 0 ? row[mapping.notesIndex] || '' : '';
+      const rawWallet = walletColIdx >= 0 ? row[walletColIdx] || '' : '';
+      const rawToWallet = toWalletColIdx >= 0 ? row[toWalletColIdx] || '' : '';
+
+      const normalizedDate = normalizeCsvDate(rawDate);
+      const parsedAmount = parseImportAmount(rawAmount);
+      const amount = parsedAmount ? parsedAmount.amount : NaN;
+      const isValidAmount = Boolean(parsedAmount && amount > 0);
+      const isValid = Boolean(normalizedDate && isValidAmount);
+
+      const normType = normalizeArabicText(rawType);
+      let type: TransactionType = 'income';
+      if (rawToWallet.trim()) {
+        type = 'transfer';
+      } else if (parsedAmount?.isNegative) {
+        type = 'expense';
+      } else if (typeColIdx >= 0 && normType) {
+        if (normType.includes('تحويل') || normType.includes('transfer')) {
+          type = 'transfer';
+        } else if (
+          normType.includes('مصروف') ||
+          normType.includes('صرف') ||
+          normType.includes('خصم') ||
+          normType.includes('expense') ||
+          normType.includes('debit') ||
+          normType.includes('outflow')
+        ) {
+          type = 'expense';
+        } else if (
+          normType.includes('دخل') ||
+          normType.includes('ايراد') ||
+          normType.includes('ايداع') ||
+          normType.includes('income') ||
+          normType.includes('credit') ||
+          normType.includes('deposit')
+        ) {
+          type = 'income';
+        } else {
+          type = 'income';
+        }
+      } else {
+        type = 'income';
+      }
+
+      let matchedWallet: Wallet | undefined;
+      let isNewWallet = false;
+      let matchedToWallet: Wallet | undefined;
+      let isNewToWallet = false;
+      let matchedCat: Category = fallbackCategory;
+      let isNewCategory = false;
+
+      if (isValid) {
+        const srcRes = resolveOrCreateWallet(rawWallet);
+        matchedWallet = srcRes.wallet;
+        isNewWallet = srcRes.isNew;
+
+        if (type === 'transfer' && rawToWallet.trim()) {
+          const dstRes = resolveOrCreateWallet(rawToWallet);
+          matchedToWallet = dstRes.wallet;
+          isNewToWallet = dstRes.isNew;
+        }
+
+        const catRes = resolveOrCreateCategory(rawCat, type);
+        matchedCat = catRes.category;
+        isNewCategory = catRes.isNew;
+      } else if (rawCat.trim()) {
+        matchedCat = {
+          ...(fallbackCategory || {
+            id: 'cat-other',
+            nameAr: 'أخرى',
+            nameEn: 'Other',
+            icon: 'Layers',
+            color: '#7A7468',
+            type: 'both',
+            order: 99,
+          }),
+          nameAr: rawCat.trim(),
+          nameEn: rawCat.trim(),
+        };
+      }
+
+      const key = normalizedDate && isValid ? buildDuplicateKey(normalizedDate, amount, type) : '';
+      const isDuplicate = Boolean(isValid && key && existingKeys.has(key));
+
+      if (isValid) validCount++;
+      else invalidCount++;
+      if (isDuplicate) duplicateCount++;
+
+      let errorReason: string | undefined;
+      let errorReasonAr: string | undefined;
+      if (!normalizedDate && !parsedAmount) {
+        errorReason = 'Invalid date & amount';
+        errorReasonAr = 'التاريخ والمبلغ غير صالحين';
+      } else if (!normalizedDate) {
+        errorReason = 'Invalid date';
+        errorReasonAr = 'تاريخ غير صالح';
+      } else if (!parsedAmount) {
+        errorReason = 'Invalid amount';
+        errorReasonAr = 'مبلغ غير صالح';
+      }
+
+      previewRows[idx] = {
+        rowIndex: idx + 1,
+        date: normalizedDate || rawDate,
+        amount: isValid ? amount : 0,
+        type,
+        categoryId: matchedCat?.id || 'cat-other',
+        categoryLabel: matchedCat?.nameAr || rawCat || 'أخرى',
+        isNewCategory,
+        walletId: matchedWallet?.id,
+        walletName: matchedWallet?.name || (rawWallet.trim() || undefined),
+        isNewWallet,
+        toWalletId: matchedToWallet?.id,
+        toWalletName: matchedToWallet?.name || (rawToWallet.trim() || undefined),
+        isNewToWallet,
+        workspaceId: safeWorkspaceId,
+        notes: rawNotes.trim(),
+        isDuplicate,
+        isValid,
+        errorReason,
+        errorReasonAr,
+      };
+    }
+
+    onProgress?.(end, total);
+    if (end < total) {
+      await yieldToMainThread();
+    }
+  }
+
+  return {
+    previewRows,
+    validCount,
+    invalidCount,
+    duplicateCount,
+    autoCreatedWallets,
+    autoCreatedCategories,
+  };
+}
+
 export function buildImportedTransactionsPayload(params: {
   rows: CsvPreviewRow[];
   existingWallets: Wallet[];
@@ -1229,12 +1966,15 @@ export function buildImportedTransactionsPayload(params: {
   const fallbackWallet =
     params.existingWallets.find((w) => w.id === params.fallbackWalletId) ||
     params.existingWallets[0];
-  const allKnownWallets = [...params.existingWallets, ...taggedNewWallets];
+
+  const walletById = new Map<string, Wallet>();
+  for (const w of params.existingWallets) walletById.set(w.id, w);
+  for (const w of taggedNewWallets) walletById.set(w.id, w);
 
   const transactions: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>[] = params.rows.map(
     (r) => {
       const rowWallet =
-        (r.walletId && allKnownWallets.find((w) => w.id === r.walletId)) ||
+        (r.walletId && walletById.get(r.walletId)) ||
         fallbackWallet ||
         taggedNewWallets[0];
       return {
@@ -1261,6 +2001,72 @@ export function buildImportedTransactionsPayload(params: {
   };
 }
 
+export async function buildImportedTransactionsPayloadChunked(params: {
+  rows: CsvPreviewRow[];
+  existingWallets: Wallet[];
+  newWallets: Wallet[];
+  fallbackWalletId?: string;
+  defaultCurrency: string;
+  workspaceId?: string;
+  chunkSize?: number;
+  onProgress?: (processed: number, total: number) => void;
+}): Promise<{
+  transactions: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>[];
+  taggedNewWallets: Wallet[];
+}> {
+  const safeWorkspaceId = normalizeWorkspaceId(params.workspaceId);
+  const taggedNewWallets: Wallet[] = params.newWallets.map((w) => ({
+    ...w,
+    workspaceId: safeWorkspaceId,
+  }));
+  const fallbackWallet =
+    params.existingWallets.find((w) => w.id === params.fallbackWalletId) ||
+    params.existingWallets[0];
+
+  const walletById = new Map<string, Wallet>();
+  for (const w of params.existingWallets) walletById.set(w.id, w);
+  for (const w of taggedNewWallets) walletById.set(w.id, w);
+
+  const total = params.rows.length;
+  const safeChunk = Math.max(50, Math.floor(params.chunkSize ?? 200));
+  const transactions: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>[] = new Array(total);
+
+  for (let start = 0; start < total; start += safeChunk) {
+    const end = Math.min(total, start + safeChunk);
+    for (let i = start; i < end; i++) {
+      const r = params.rows[i];
+      const rowWallet =
+        (r.walletId && walletById.get(r.walletId)) ||
+        fallbackWallet ||
+        taggedNewWallets[0];
+      transactions[i] = {
+        type: r.type,
+        amount: r.amount,
+        currency: rowWallet?.currency || params.defaultCurrency,
+        date: r.date,
+        time: '12:00',
+        categoryId: r.categoryId,
+        walletId: rowWallet?.id || '',
+        ...(r.type === 'transfer' && r.toWalletId ? { toWalletId: r.toWalletId } : {}),
+        notes: r.notes,
+        priority: 'normal' as const,
+        doesNotAffectBalance: false,
+        workspaceId: safeWorkspaceId,
+        deletedAt: null,
+      };
+    }
+    params.onProgress?.(end, total);
+    if (end < total) {
+      await yieldToMainThread();
+    }
+  }
+
+  return {
+    transactions,
+    taggedNewWallets,
+  };
+}
+
 export interface CommitSpreadsheetImportResult {
   importedCount: number;
   workspaceId: string;
@@ -1273,6 +2079,7 @@ export interface CommitSpreadsheetImportResult {
  * Persists imported spreadsheet transactions locally tagged with the active workspaceId
  * and immediately triggers Cloud Sync (Firestore unified path + backup) in the same flow.
  * Never reports `cloudSynced: true` unless Firestore confirmation succeeds.
+ * Emits smooth 4-stage progress updates without blocking the main thread.
  */
 export async function commitImportedTransactionsWithCloudSync(params: {
   rows: CsvPreviewRow[];
@@ -1282,25 +2089,51 @@ export async function commitImportedTransactionsWithCloudSync(params: {
   fallbackWalletId?: string;
   defaultCurrency: string;
   workspaceId?: string;
+  hasCloudSync?: boolean;
+  onProgress?: (state: ImportProgressState) => void;
   persistImportLocally: (payload: {
     transactions: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>[];
     newWallets: Wallet[];
     newCategories: Category[];
     workspaceId: string;
+    onProgress?: (processed: number, total: number) => void;
   }) => Promise<{ importedCount: number; createdTransactions: Transaction[] }>;
   syncToCloud?: (payload: {
     workspaceId: string;
     createdTransactions: Transaction[];
+    onProgress?: (processed: number, total: number) => void;
   }) => Promise<{ ok: boolean; error?: string }>;
 }): Promise<CommitSpreadsheetImportResult> {
   const safeWorkspaceId = normalizeWorkspaceId(params.workspaceId);
-  const { transactions, taggedNewWallets } = buildImportedTransactionsPayload({
+  const totalRows = params.rows.length;
+  const hasCloudSync = params.hasCloudSync ?? Boolean(params.syncToCloud);
+
+  params.onProgress?.(
+    buildImportProgressState({
+      stage: 'validating',
+      processed: 0,
+      total: totalRows,
+      hasCloudSync,
+    })
+  );
+
+  const { transactions, taggedNewWallets } = await buildImportedTransactionsPayloadChunked({
     rows: params.rows,
     existingWallets: params.existingWallets,
     newWallets: params.newWallets,
     fallbackWalletId: params.fallbackWalletId,
     defaultCurrency: params.defaultCurrency,
     workspaceId: safeWorkspaceId,
+    onProgress: (processed, total) => {
+      params.onProgress?.(
+        buildImportProgressState({
+          stage: 'validating',
+          processed,
+          total,
+          hasCloudSync,
+        })
+      );
+    },
   });
 
   if (transactions.length === 0) {
@@ -1312,11 +2145,30 @@ export async function commitImportedTransactionsWithCloudSync(params: {
     };
   }
 
+  params.onProgress?.(
+    buildImportProgressState({
+      stage: 'saving_local',
+      processed: 0,
+      total: transactions.length,
+      hasCloudSync,
+    })
+  );
+
   const localRes = await params.persistImportLocally({
     transactions,
     newWallets: taggedNewWallets,
     newCategories: params.newCategories,
     workspaceId: safeWorkspaceId,
+    onProgress: (processed, total) => {
+      params.onProgress?.(
+        buildImportProgressState({
+          stage: 'saving_local',
+          processed,
+          total,
+          hasCloudSync,
+        })
+      );
+    },
   });
 
   if (localRes.importedCount <= 0) {
@@ -1328,7 +2180,25 @@ export async function commitImportedTransactionsWithCloudSync(params: {
     };
   }
 
+  params.onProgress?.(
+    buildImportProgressState({
+      stage: 'saving_local',
+      processed: localRes.importedCount,
+      total: localRes.importedCount,
+      hasCloudSync,
+    })
+  );
+
   if (!params.syncToCloud) {
+    params.onProgress?.(
+      buildImportProgressState({
+        stage: 'saving_local',
+        processed: localRes.importedCount,
+        total: localRes.importedCount,
+        hasCloudSync: false,
+        overridePercent: 100,
+      })
+    );
     return {
       importedCount: localRes.importedCount,
       workspaceId: safeWorkspaceId,
@@ -1337,10 +2207,29 @@ export async function commitImportedTransactionsWithCloudSync(params: {
     };
   }
 
+  params.onProgress?.(
+    buildImportProgressState({
+      stage: 'syncing_cloud',
+      processed: 0,
+      total: localRes.importedCount,
+      hasCloudSync: true,
+    })
+  );
+
   try {
     const cloudRes = await params.syncToCloud({
       workspaceId: safeWorkspaceId,
       createdTransactions: localRes.createdTransactions,
+      onProgress: (processed, total) => {
+        params.onProgress?.(
+          buildImportProgressState({
+            stage: 'syncing_cloud',
+            processed,
+            total: total || localRes.importedCount,
+            hasCloudSync: true,
+          })
+        );
+      },
     });
     if (!cloudRes.ok) {
       return {
@@ -1351,6 +2240,15 @@ export async function commitImportedTransactionsWithCloudSync(params: {
         error: cloudRes.error,
       };
     }
+    params.onProgress?.(
+      buildImportProgressState({
+        stage: 'syncing_cloud',
+        processed: localRes.importedCount,
+        total: localRes.importedCount,
+        hasCloudSync: true,
+        overridePercent: 100,
+      })
+    );
     return {
       importedCount: localRes.importedCount,
       workspaceId: safeWorkspaceId,

@@ -3,6 +3,7 @@
  * Run via: npm run test:rules (requires Java runtime + firebase emulators:exec)
  */
 import test, { after, before, beforeEach, describe } from 'node:test';
+import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -88,6 +89,143 @@ const SKIP_EMULATOR_REASON = HAS_FIRESTORE_EMULATOR
   ? false
   : 'FIRESTORE_EMULATOR_HOST is not set (run via npm run test:rules with Java + Firebase Emulator)';
 
+describe('Firestore Security Rules Static Contract (users/{userId} & Admin Isolation)', () => {
+  const rulesSource = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf8');
+
+  test('users/{userId} create/update rules allow safe onboarding & profile writes while protecting sensitive fields', () => {
+    const createFnMatch = rulesSource.match(/function isValidUserProfileCreate[\s\S]*?\n    \}/);
+    const updateFnMatch = rulesSource.match(/function isValidUserProfileUpdate[\s\S]*?\n    \}/);
+    const usersMatch = rulesSource.match(/match \/users\/\{userId\} \{[\s\S]*?allow delete:/);
+
+    assert.ok(createFnMatch, 'isValidUserProfileCreate must exist');
+    assert.ok(updateFnMatch, 'isValidUserProfileUpdate must exist');
+    assert.ok(usersMatch, 'match /users/{userId} must exist');
+
+    const createFn = createFnMatch[0];
+    const updateFn = updateFnMatch[0];
+    const usersBlock = usersMatch[0];
+
+    // New authenticated owner can create free profile with optional onboarding/profile fields
+    assert.ok(createFn.includes("'hasCompletedOnboarding'"), 'create allowlist includes hasCompletedOnboarding');
+    assert.ok(createFn.includes("data.isPro == false"), 'create enforces isPro == false');
+    assert.ok(createFn.includes("data.uid == request.auth.uid"), 'create enforces uid == request.auth.uid');
+    assert.ok(!createFn.includes("'isAdmin'"), 'create never allows isAdmin');
+    assert.ok(!createFn.includes("'activationCodeHash'"), 'create never allows activationCodeHash');
+
+    // Authenticated owner can update profile + onboarding + currencyRates + settings + lastSyncedAt
+    assert.ok(updateFn.includes("'hasCompletedOnboarding'"), 'update validator supports hasCompletedOnboarding');
+    assert.ok(usersBlock.includes("'hasCompletedOnboarding'"), 'owner update affectedKeys allows hasCompletedOnboarding');
+    assert.ok(usersBlock.includes("'currencyRates'"), 'owner update affectedKeys allows currencyRates');
+    assert.ok(usersBlock.includes("'settings'"), 'owner update affectedKeys allows settings');
+    assert.ok(usersBlock.includes("'lastSyncedAt'"), 'owner update affectedKeys allows lastSyncedAt');
+
+    // Sensitive subscription fields and createdAt remain strictly protected on owner update
+    assert.ok(
+      usersBlock.includes("incoming().get('isPro', false) == existing().get('isPro', false)"),
+      'owner cannot promote isPro'
+    );
+    assert.ok(
+      usersBlock.includes("incoming().get('planTier', 'free') == existing().get('planTier', 'free')"),
+      'owner cannot change planTier'
+    );
+    assert.ok(
+      usersBlock.includes("incoming().get('createdAt', null) == existing().get('createdAt', null)"),
+      'createdAt remains immutable on update'
+    );
+    assert.ok(usersBlock.includes('isAdmin()'), 'admin branch preserved for subscription management');
+  });
+
+  test('isAdmin remains locked exclusively to verified hapaypal2003@gmail.com and legacy code collections remain closed', () => {
+    const adminFnMatch = rulesSource.match(/function isAdmin\(\) \{[\s\S]*?\n    \}/);
+    assert.ok(adminFnMatch, 'isAdmin helper must exist');
+    assert.ok(adminFnMatch[0].includes('isVerifiedUser()'), 'isAdmin requires verified email');
+    assert.ok(
+      adminFnMatch[0].includes("== 'hapaypal2003@gmail.com'"),
+      'isAdmin locked to primary admin email'
+    );
+    assert.ok(
+      /match \/licenseCodes\/\{codeHash\}\s*\{\s*allow read, write: if false;\s*\}/.test(rulesSource),
+      'licenseCodes collection stays strictly server-only'
+    );
+  });
+
+  test('usernames and userEmailIndex enforce exact get-only lookup (allow list: false) and owner writes', () => {
+    const usernamesMatch = rulesSource.match(/match \/usernames\/\{username\} \{[\s\S]*?\n    \}/);
+    const emailIndexMatch = rulesSource.match(/match \/userEmailIndex\/\{emailHash\} \{[\s\S]*?\n    \}/);
+
+    assert.ok(usernamesMatch, 'match /usernames/{username} must exist');
+    assert.ok(emailIndexMatch, 'match /userEmailIndex/{emailHash} must exist');
+
+    const usernamesBlock = usernamesMatch[0];
+    const emailIndexBlock = emailIndexMatch[0];
+
+    // Never allow collection enumeration/scraping
+    assert.ok(usernamesBlock.includes('allow list: if false;'), 'usernames blocks list queries');
+    assert.ok(emailIndexBlock.includes('allow list: if false;'), 'userEmailIndex blocks list queries');
+
+    // Exact get requires signed in user + format check
+    assert.ok(usernamesBlock.includes('allow get: if isSignedIn() && isValidUsername(username);'));
+    assert.ok(emailIndexBlock.includes('allow get: if isSignedIn() && isValidEmailHash(emailHash);'));
+
+    // Writes enforce ownership and token email binding on userEmailIndex
+    assert.ok(usernamesBlock.includes('isValidUsernameRecord(incoming(), username)'));
+    assert.ok(usernamesBlock.includes('existing().uid == request.auth.uid'));
+    assert.ok(emailIndexBlock.includes('isValidUserEmailIndexRecord(incoming(), emailHash)'));
+    assert.ok(
+      emailIndexBlock.includes('incoming().email.trim().lower() == request.auth.token.email.trim().lower()'),
+      'userEmailIndex binds email strictly to authenticated token email'
+    );
+  });
+
+  test('users/{userId}.username requires atomic ownership verification via usernames/{handle}', () => {
+    const usersMatch = rulesSource.match(/match \/users\/\{userId\} \{[\s\S]*?allow delete:/);
+    assert.ok(usersMatch, 'match /users/{userId} must exist');
+    const usersBlock = usersMatch[0];
+    assert.ok(usersBlock.includes("'username'"), 'owner update allowlist includes username');
+    assert.ok(
+      usersBlock.includes('getAfter(/databases/$(database)/documents/usernames/$(incoming().username)).data.uid == userId'),
+      'setting users/{uid}.username enforces atomic usernames/{handle} ownership'
+    );
+  });
+
+  test('direct organization member add/manage enforces RBAC, non-owner protection, and atomic orgRefs sync', () => {
+    const orgRefsMatch = rulesSource.match(/match \/orgRefs\/\{orgId\} \{[\s\S]*?\n      \}/);
+    const membersMatch = rulesSource.match(/match \/members\/\{memberUid\} \{[\s\S]*?\n      \}/);
+
+    assert.ok(orgRefsMatch, 'match /orgRefs/{orgId} must exist');
+    assert.ok(membersMatch, 'match /members/{memberUid} must exist');
+
+    const orgRefsBlock = orgRefsMatch[0];
+    const membersBlock = membersMatch[0];
+
+    // orgRefs list stays strictly owner-only while get allows owner or org admin/owner for tx.get
+    assert.ok(orgRefsBlock.includes('allow list: if isValidId(userId) && isOwner(userId);'));
+    assert.ok(orgRefsBlock.includes('(isOwner(userId) || isOrgOwnerOrAdmin(orgId))'));
+
+    // Atomic cross-collection invariants
+    assert.ok(
+      orgRefsBlock.includes('existsAfter(/databases/$(database)/documents/organizations/$(orgId)/members/$(userId))'),
+      'orgRefs create requires atomic member creation'
+    );
+    assert.ok(
+      membersBlock.includes('existsAfter(/databases/$(database)/documents/users/$(memberUid)/orgRefs/$(orgId))'),
+      'members create requires atomic orgRef creation'
+    );
+    assert.ok(
+      membersBlock.includes("existing().role != 'owner'"),
+      'owner role cannot be modified or deleted by direct member rules'
+    );
+    assert.ok(
+      membersBlock.includes('memberUid != request.auth.uid'),
+      'org admins cannot delete themselves via direct member delete rule'
+    );
+    assert.ok(
+      membersBlock.includes('isVerifiedUser()') && membersBlock.includes('isOrgOwnerOrAdmin(orgId)') && membersBlock.includes('isOrgWritable(orgId)'),
+      'direct member mutations require verified org owner/admin on writable org'
+    );
+  });
+});
+
 describe('Firestore Security Rules', { skip: SKIP_EMULATOR_REASON }, () => {
   before(async () => {
     const rules = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf8');
@@ -115,10 +253,15 @@ describe('Firestore Security Rules', { skip: SKIP_EMULATOR_REASON }, () => {
     setDoc(doc(ownerDb, 'users', OWNER_UID), {
       uid: OWNER_UID,
       email: 'owner@raseedi.test',
+      displayName: 'Owner Name',
+      photoURL: 'https://lh3.googleusercontent.com/photo.jpg',
+      hasCompletedOnboarding: false,
       isPro: false,
+      proActive: false,
       proPlan: 'free',
       planTier: 'free',
       billingCycle: 'free',
+      startedAt: null,
       expiresAt: null,
       proExpiresAt: null,
       hasUsedBusinessTrial: false,
@@ -127,8 +270,35 @@ describe('Firestore Security Rules', { skip: SKIP_EMULATOR_REASON }, () => {
     })
   );
 
+  // Owner can complete onboarding and update normal profile/settings fields via merge without touching protected fields
+  await assertSucceeds(
+    setDoc(
+      doc(ownerDb, 'users', OWNER_UID),
+      {
+        hasCompletedOnboarding: true,
+        displayName: 'Owner Updated',
+        lastSyncedAt: Date.now(),
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    )
+  );
+
   // Outsider cannot read another user's profile
   await assertFails(getDoc(doc(outsiderDb, 'users', OWNER_UID)));
+
+  // Owner cannot overwrite createdAt on an existing profile
+  await assertFails(
+    setDoc(
+      doc(ownerDb, 'users', OWNER_UID),
+      {
+        email: 'owner@raseedi.test',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    )
+  );
 
   // User cannot self-promote isPro
   await assertFails(
@@ -375,22 +545,10 @@ test('Server-only collections and isAdmin lock exclusively to verified hapaypal2
   );
   await assertSucceeds(getDoc(doc(superAdminDb, 'adminConfig', 'security')));
   await assertSucceeds(getDoc(doc(superAdminDb, 'adminSecurity', 'panelConfig')));
-  await assertSucceeds(
+  // Legacy licenseCodes collection is permanently closed to all clients (including admin)
+  await assertFails(
     setDoc(doc(superAdminDb, 'licenseCodes', validCodeHash), {
       codeHash: validCodeHash,
-      codePreview: 'RSD-BIZ-****-EFGH',
-      plan: 'code',
-      tier: 'business',
-      planTier: 'business_pro',
-      cycle: 'lifetime',
-      status: 'unused',
-      used: false,
-      usedBy: null,
-      usedOrgId: null,
-      usedAt: null,
-      createdByUid: 'admin_uid_1',
-      createdByEmail: 'hapaypal2003@gmail.com',
-      createdAtMs: Date.now(),
       createdAt: serverTimestamp(),
     })
   );

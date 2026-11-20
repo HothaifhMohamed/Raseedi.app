@@ -24,6 +24,7 @@ import {
   doesTransactionAffectAccounting,
   getEffectiveTransactionAmount,
 } from '../../services/calculations';
+import { createIdSet, indexById } from '../../services/lookupCache';
 
 interface WalletDetailPageProps {
   walletId: string;
@@ -100,13 +101,16 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
     return () => window.clearTimeout(timer);
   }, [walletId]);
 
+  const categoriesById = useMemo(() => indexById(categories), [categories]);
+  const selectedIdSet = useMemo(() => createIdSet(selectedTransactionIds), [selectedTransactionIds]);
+
   // Filtered list based on search and type
   const filteredTransactions = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
     return walletTransactions.filter((tx) => {
       if (filterType !== 'all' && tx.type !== filterType) return false;
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        const cat = categories.find((c) => c.id === tx.categoryId);
+      if (q) {
+        const cat = categoriesById.get(tx.categoryId);
         const matchNote = tx.notes?.toLowerCase().includes(q);
         const matchCat = cat?.nameAr.toLowerCase().includes(q) || cat?.nameEn.toLowerCase().includes(q);
         const matchContact = tx.contact?.toLowerCase().includes(q);
@@ -115,7 +119,7 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
       }
       return true;
     });
-  }, [walletTransactions, filterType, searchQuery, categories]);
+  }, [walletTransactions, filterType, searchQuery, categoriesById]);
 
   // Statistics for this wallet
   const stats = useMemo(() => {
@@ -136,7 +140,7 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
 
     const topCategories = Object.entries(catTotals)
       .map(([catId, amount]) => {
-        const cat = categories.find((c) => c.id === catId);
+        const cat = categoriesById.get(catId);
         return {
           catId,
           name: isRTL ? cat?.nameAr || catId : cat?.nameEn || catId,
@@ -148,7 +152,7 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
       .slice(0, 5);
 
     return { income, expense, topCategories };
-  }, [walletTransactions, categories, isRTL]);
+  }, [walletTransactions, categoriesById, isRTL]);
 
   if (!wallet) {
     return (
@@ -168,7 +172,7 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
 
   const allFilteredIds = filteredTransactions.map((t) => t.id);
   const isAllSelected =
-    allFilteredIds.length > 0 && allFilteredIds.every((id) => selectedTransactionIds.includes(id));
+    allFilteredIds.length > 0 && allFilteredIds.every((id) => selectedIdSet.has(id));
 
   const BackIcon = isRTL ? ArrowRight : ArrowLeft;
 
@@ -476,8 +480,8 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
           <>
           <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl overflow-visible divide-y divide-[var(--color-line)]">
             {filteredTransactions.slice(0, visibleLimit).map((tx) => {
-              const isSelected = selectedTransactionIds.includes(tx.id);
-              const cat = categories.find((c) => c.id === tx.categoryId);
+              const isSelected = selectedIdSet.has(tx.id);
+              const cat = categoriesById.get(tx.categoryId);
               const catName = isRTL ? cat?.nameAr || 'عام' : cat?.nameEn || 'General';
               const dotColor = cat?.color || 'var(--color-accent)';
               const isMenuOpen = activeMenuTxId === tx.id;

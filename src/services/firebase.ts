@@ -29,6 +29,7 @@ import {
   updateDoc,
   deleteDoc,
   writeBatch,
+  runTransaction,
   serverTimestamp,
   Firestore,
   DocumentReference,
@@ -55,6 +56,7 @@ import {
   removePendingAttachmentUpload,
 } from './db';
 import { chunkTransactionsForBackup } from './calculations';
+import { invalidateUserLookupCache } from './lookupCache';
 import {
   BillingCycle,
   Organization,
@@ -70,6 +72,7 @@ import {
 import {
   buildWorkspaceTransactionRecord,
   extractTransactionFromWorkspaceDoc,
+  FIRESTORE_IMPORT_BATCH_SIZE,
   getWorkspaceTransactionDocPath,
   getWorkspaceTransactionsPath,
   isActiveWorkspaceTransaction,
@@ -80,6 +83,11 @@ import {
   shouldBlockEmptyCloudOverwrite,
   WorkspaceSyncPriority,
 } from './workspaceSync';
+import {
+  computeEmailLookupHash,
+  normalizeUsername,
+  validateUsernameFormat,
+} from './usernameService';
 import { shouldFallbackAccountDeleteError } from './accountDeletion';
 import { resolveSafeCloudBackupWrite } from './backupMerge';
 import { sortTransactionsDescending } from './orgTransactionQuery';
@@ -118,6 +126,11 @@ import {
   buildSafeUserCurrencyRatesPatch,
   UserCurrencyRatesSyncInput,
 } from './currencySync';
+import {
+  buildInitialUserProfilePayload,
+  buildSafeUserProfileUpdatePatch,
+  isPermissionDeniedFirestoreError,
+} from './userProfileSync';
 
 const isPlaceholderConfig =
   !firebaseConfig?.projectId ||
@@ -314,7 +327,9 @@ export interface CloudUserProfile {
   uid: string;
   email: string;
   displayName?: string;
+  username?: string;
   photoURL?: string;
+  hasCompletedOnboarding?: boolean;
   isAdmin?: boolean;
   isPro: boolean;
   proActive?: boolean;
@@ -464,43 +479,119 @@ function buildSafeSizeChunks<T>(items: T[], maxBytes = 780_000): T[][] {
   return safeChunks;
 }
 
-/**
- * Ensures user profile exists in Firestore. Never modifies isPro/proPlan/expiresAt (server-only fields).
- */
-export async function ensureUserProfile(firebaseUser: User): Promise<CloudUserProfile> {
+const inFlightEnsureUserProfiles = new Map<string, Promise<CloudUserProfile>>();
+
+function mapExistingUserDocToProfile(
+  firebaseUser: User,
+  existingData: CloudUserProfile,
+  resolvedEmail: string
+): CloudUserProfile {
+  const active = isEntitlementActive(existingData);
+  const resolvedExpiry = existingData.proExpiresAt ?? existingData.expiresAt ?? null;
+  return {
+    ...existingData,
+    uid: existingData.uid || firebaseUser.uid,
+    isPro: active,
+    proActive: active,
+    proPlan: existingData.proPlan || (active ? 'code' : 'free'),
+    planTier: resolvePlanTierFromProfile({ ...existingData, isPro: active }),
+    billingCycle: existingData.billingCycle || (active ? 'lifetime' : 'free'),
+    startedAt: existingData.startedAt ?? null,
+    expiresAt: resolvedExpiry,
+    proExpiresAt: resolvedExpiry,
+    hasCompletedOnboarding: Boolean(existingData.hasCompletedOnboarding),
+    email: resolvedEmail || existingData.email || '',
+    displayName: firebaseUser.displayName || existingData.displayName,
+    username: existingData.username,
+    photoURL: firebaseUser.photoURL || existingData.photoURL,
+  };
+}
+
+async function runEnsureUserProfile(firebaseUser: User): Promise<CloudUserProfile> {
   const path = `users/${firebaseUser.uid}`;
   const ref = doc(db, 'users', firebaseUser.uid);
+  const resolvedEmail = resolveFirebaseUserEmail(firebaseUser) || firebaseUser.email || '';
+
+  const applySafeProfileUpdate = async (
+    existingData: CloudUserProfile
+  ): Promise<CloudUserProfile> => {
+    const { patch, hasChanges } = buildSafeUserProfileUpdatePatch({
+      uid: firebaseUser.uid,
+      email: resolvedEmail,
+      displayName: firebaseUser.displayName,
+      photoURL: firebaseUser.photoURL,
+      existing: existingData,
+    });
+    if (hasChanges) {
+      try {
+        await setDoc(
+          ref,
+          {
+            ...patch,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+      } catch (updateErr) {
+        if (isPermissionDeniedFirestoreError(updateErr)) {
+          // Retry once after ensuring auth ID token is settled in Firestore client
+          await firebaseUser.getIdToken(false).catch(() => {});
+          await new Promise((r) => setTimeout(r, 200));
+          await setDoc(
+            ref,
+            {
+              ...patch,
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
+        } else {
+          throw updateErr;
+        }
+      }
+    }
+    return mapExistingUserDocToProfile(firebaseUser, existingData, resolvedEmail);
+  };
 
   try {
-    const snap = await getDoc(ref);
+    const snap = await getDocServerFirst(ref, false);
     if (!snap.exists()) {
-      const profilePayload: Record<string, unknown> = {
+      const profilePayload = buildInitialUserProfilePayload({
         uid: firebaseUser.uid,
-        email: (firebaseUser.email || `${firebaseUser.uid}@firebase.local`).slice(0, 254),
-        isPro: false,
-        proActive: false,
-        proPlan: 'free',
-        planTier: 'free',
-        billingCycle: 'free',
-        startedAt: null,
-        expiresAt: null,
-        proExpiresAt: null,
-        hasUsedBusinessTrial: false,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      };
-      if (firebaseUser.displayName) {
-        profilePayload.displayName = firebaseUser.displayName.slice(0, 120);
+        email: resolvedEmail,
+        displayName: firebaseUser.displayName,
+        photoURL: firebaseUser.photoURL,
+      });
+      try {
+        await setDoc(ref, {
+          ...profilePayload,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } catch (createErr) {
+        if (!isPermissionDeniedFirestoreError(createErr)) {
+          throw createErr;
+        }
+        // Handle concurrent create race or slightly delayed Auth token propagation cleanly:
+        await firebaseUser.getIdToken(false).catch(() => {});
+        await new Promise((r) => setTimeout(r, 250));
+        const refreshedSnap = await getDocServerFirst(ref, true).catch(() => getDoc(ref));
+        if (refreshedSnap.exists()) {
+          return await applySafeProfileUpdate(refreshedSnap.data() as CloudUserProfile);
+        }
+        // Document still does not exist -> retry initial create once
+        await setDoc(ref, {
+          ...profilePayload,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
       }
-      if (firebaseUser.photoURL) {
-        profilePayload.photoURL = firebaseUser.photoURL.slice(0, 512);
-      }
-      await setDoc(ref, profilePayload, { merge: true });
       return {
         uid: firebaseUser.uid,
-        email: firebaseUser.email || '',
+        email: resolvedEmail,
         displayName: firebaseUser.displayName || undefined,
         photoURL: firebaseUser.photoURL || undefined,
+        hasCompletedOnboarding: false,
         isPro: false,
         proActive: false,
         proPlan: 'free',
@@ -513,37 +604,235 @@ export async function ensureUserProfile(firebaseUser: User): Promise<CloudUserPr
       };
     }
 
-    const existingData = snap.data() as CloudUserProfile;
-    const updates: Record<string, unknown> = {
-      email: (firebaseUser.email || existingData.email || `${firebaseUser.uid}@firebase.local`).slice(0, 254),
-      updatedAt: serverTimestamp(),
-    };
-    if (firebaseUser.displayName) {
-      updates.displayName = firebaseUser.displayName.slice(0, 120);
-    }
-    if (firebaseUser.photoURL) {
-      updates.photoURL = firebaseUser.photoURL.slice(0, 512);
-    }
-
-    await setDoc(ref, updates, { merge: true });
-    const active = isEntitlementActive(existingData);
-    const resolvedExpiry = existingData.proExpiresAt ?? existingData.expiresAt ?? null;
-    return {
-      ...existingData,
-      isPro: active,
-      proActive: active,
-      proPlan: existingData.proPlan || (active ? 'code' : 'free'),
-      planTier: resolvePlanTierFromProfile({ ...existingData, isPro: active }),
-      billingCycle: existingData.billingCycle || (active ? 'lifetime' : 'free'),
-      startedAt: existingData.startedAt ?? null,
-      expiresAt: resolvedExpiry,
-      proExpiresAt: resolvedExpiry,
-      email: firebaseUser.email || existingData.email || '',
-      displayName: firebaseUser.displayName || existingData.displayName,
-      photoURL: firebaseUser.photoURL || existingData.photoURL,
-    };
+    return await applySafeProfileUpdate(snap.data() as CloudUserProfile);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+/**
+ * Ensures user profile exists in Firestore. Deduplicates concurrent calls per UID and
+ * never modifies protected subscription fields (isPro/proPlan/expiresAt) or createdAt on update.
+ */
+export async function ensureUserProfile(firebaseUser: User): Promise<CloudUserProfile> {
+  const existingPromise = inFlightEnsureUserProfiles.get(firebaseUser.uid);
+  if (existingPromise) {
+    return existingPromise;
+  }
+  const task = runEnsureUserProfile(firebaseUser)
+    .then((profile) => {
+      // Non-blocking, non-fatal sync of the PII-safe exact-email lookup index so
+      // organization owners can add this user directly by email or @username.
+      void syncUserDirectoryIndexes(firebaseUser.uid, {
+        email: profile.email,
+        displayName: profile.displayName || firebaseUser.displayName || '',
+        username: profile.username,
+      }).catch(() => {});
+      return profile;
+    })
+    .finally(() => {
+      if (inFlightEnsureUserProfiles.get(firebaseUser.uid) === task) {
+        inFlightEnsureUserProfiles.delete(firebaseUser.uid);
+      }
+    });
+  inFlightEnsureUserProfiles.set(firebaseUser.uid, task);
+  return task;
+}
+
+/**
+ * Keeps the exact-email SHA-256 lookup index (`userEmailIndex/{emailHash}`) in sync
+ * for the currently signed-in user. Fails silently if offline or unverified.
+ */
+export async function syncUserDirectoryIndexes(
+  uid: string,
+  info: { email?: string; displayName?: string; username?: string }
+): Promise<void> {
+  if (!uid || !auth.currentUser || auth.currentUser.uid !== uid) return;
+  const email = String(info.email || resolveFirebaseUserEmail(auth.currentUser) || '')
+    .trim()
+    .toLowerCase();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return;
+
+  try {
+    const emailHash = await computeEmailLookupHash(email);
+    const cleanName = String(info.displayName || auth.currentUser.displayName || email.split('@')[0])
+      .trim()
+      .slice(0, 120);
+    const cleanUsername = info.username ? normalizeUsername(info.username) : undefined;
+    const payload: Record<string, unknown> = {
+      emailHash,
+      uid,
+      email: email.slice(0, 254),
+      displayName: cleanName || 'مستخدم',
+      updatedAt: serverTimestamp(),
+    };
+    if (cleanUsername && /^[a-z0-9_]{3,30}$/.test(cleanUsername)) {
+      payload.username = cleanUsername;
+    }
+    await setDoc(doc(db, 'userEmailIndex', emailHash), payload, { merge: true });
+  } catch (err) {
+    console.warn('[syncUserDirectoryIndexes] Non-fatal index sync warning:', err);
+  }
+}
+
+export async function checkUsernameAvailabilityCloud(
+  rawUsername: string,
+  currentUid?: string
+): Promise<{
+  available: boolean;
+  normalized: string;
+  errorAr?: string;
+  errorEn?: string;
+}> {
+  const check = validateUsernameFormat(rawUsername);
+  if (!check.valid) {
+    return {
+      available: false,
+      normalized: check.normalized,
+      errorAr: check.errorAr,
+      errorEn: check.errorEn,
+    };
+  }
+  const snap = await getDocServerFirst(doc(db, 'usernames', check.normalized), true).catch(() =>
+    getDoc(doc(db, 'usernames', check.normalized))
+  );
+  if (!snap.exists()) {
+    return { available: true, normalized: check.normalized };
+  }
+  const ownerUid = String((snap.data() as { uid?: string })?.uid || '');
+  if (currentUid && ownerUid === currentUid) {
+    return { available: true, normalized: check.normalized };
+  }
+  return {
+    available: false,
+    normalized: check.normalized,
+    errorAr: `اسم المستخدم @${check.normalized} مستخدم بالفعل من حساب آخر.`,
+    errorEn: `Username @${check.normalized} is already taken.`,
+  };
+}
+
+/**
+ * Atomically claims/updates a unique `@username` for the signed-in user across:
+ * 1) `usernames/{newUsername}` (enforces global uniqueness via Firestore Transaction)
+ * 2) Deletes `usernames/{oldUsername}` if user had a previous handle
+ * 3) Updates `users/{uid}.username`
+ * 4) Updates `userEmailIndex/{emailHash}.username`
+ */
+export async function claimUserUsernameCloud(
+  uid: string,
+  rawUsername: string,
+  profileInfo?: { email?: string; displayName?: string }
+): Promise<{ username: string }> {
+  if (!uid || !auth.currentUser || auth.currentUser.uid !== uid) {
+    throw new Error('AUTH_REQUIRED');
+  }
+  const check = validateUsernameFormat(rawUsername);
+  if (!check.valid) {
+    throw new Error(check.errorAr || 'INVALID_USERNAME');
+  }
+  const newUsername = check.normalized;
+  const resolvedEmail = String(
+    profileInfo?.email || resolveFirebaseUserEmail(auth.currentUser) || auth.currentUser.email || ''
+  )
+    .trim()
+    .toLowerCase();
+  const displayName = String(
+    profileInfo?.displayName || auth.currentUser.displayName || resolvedEmail.split('@')[0] || 'مستخدم'
+  )
+    .trim()
+    .slice(0, 120);
+
+  let emailHash: string | null = null;
+  if (resolvedEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(resolvedEmail)) {
+    emailHash = await computeEmailLookupHash(resolvedEmail).catch(() => null);
+  }
+
+  await ensureUserProfile(auth.currentUser);
+
+  const userRef = doc(db, 'users', uid);
+  const newHandleRef = doc(db, 'usernames', newUsername);
+
+  await runTransaction(db, async (tx) => {
+    const [userSnap, newHandleSnap] = await Promise.all([
+      tx.get(userRef),
+      tx.get(newHandleRef),
+    ]);
+
+    if (newHandleSnap.exists()) {
+      const existingOwnerUid = String((newHandleSnap.data() as { uid?: string })?.uid || '');
+      if (existingOwnerUid && existingOwnerUid !== uid) {
+        throw new Error('USERNAME_TAKEN');
+      }
+    }
+
+    const oldUsernameRaw = userSnap.exists()
+      ? String((userSnap.data() as { username?: string })?.username || '')
+      : '';
+    const oldUsername = normalizeUsername(oldUsernameRaw);
+
+    if (oldUsername && oldUsername !== newUsername && /^[a-z0-9_]{3,30}$/.test(oldUsername)) {
+      const oldHandleRef = doc(db, 'usernames', oldUsername);
+      const oldHandleSnap = await tx.get(oldHandleRef);
+      if (oldHandleSnap.exists() && String((oldHandleSnap.data() as { uid?: string })?.uid || '') === uid) {
+        tx.delete(oldHandleRef);
+      }
+    }
+
+    tx.set(newHandleRef, {
+      username: newUsername,
+      uid,
+      email: resolvedEmail.slice(0, 254),
+      displayName: displayName || 'مستخدم',
+      updatedAt: serverTimestamp(),
+    });
+
+    tx.set(
+      userRef,
+      {
+        username: newUsername,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    if (emailHash) {
+      tx.set(
+        doc(db, 'userEmailIndex', emailHash),
+        {
+          emailHash,
+          uid,
+          email: resolvedEmail.slice(0, 254),
+          displayName: displayName || 'مستخدم',
+          username: newUsername,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
+  });
+
+  invalidateUserLookupCache();
+  return { username: newUsername };
+}
+
+/**
+ * Safely marks onboarding as completed on users/{uid} without touching protected fields.
+ */
+export async function markUserOnboardingCompletedCloud(uid: string): Promise<void> {
+  if (!uid || !auth.currentUser || auth.currentUser.uid !== uid) return;
+  const userRef = doc(db, 'users', uid);
+  try {
+    await ensureUserProfile(auth.currentUser);
+    await setDoc(
+      userRef,
+      {
+        hasCompletedOnboarding: true,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn('[markUserOnboardingCompletedCloud] Non-fatal onboarding flag sync warning:', err);
   }
 }
 
@@ -1907,6 +2196,7 @@ export async function saveCloudBackup(
     source?: 'auto' | 'manual';
     recordHistory?: boolean;
     allowEmptyOverwrite?: boolean;
+    onProgress?: (processed: number, total: number) => void;
   }
 ): Promise<{
   syncedAt: number;
@@ -2147,9 +2437,15 @@ export async function saveCloudBackup(
     let batch = writeBatch(db);
     let ops = 0;
     let batchBytes = 0;
-    const flushBatch = async () => {
+    let committedTxCount = 0;
+    const totalChunkTxs = sanitizedTransactions.length;
+    const flushBatch = async (txsInBatch = 0) => {
       if (ops > 0) {
         await batch.commit();
+        committedTxCount = Math.min(totalChunkTxs, committedTxCount + txsInBatch);
+        if (options?.onProgress && totalChunkTxs > 0) {
+          options.onProgress(committedTxCount, totalChunkTxs);
+        }
         batch = writeBatch(db);
         ops = 0;
         batchBytes = 0;
@@ -2165,11 +2461,13 @@ export async function saveCloudBackup(
     ops += 1;
     batchBytes += getUtf8JsonByteLength(metaFields);
 
+    let pendingBatchTxs = 0;
     for (let idx = 0; idx < chunks.length; idx++) {
       const cleanedChunkTxs = stripUndefinedDeep(chunks[idx]);
       const approxChunkBytes = getUtf8JsonByteLength(cleanedChunkTxs);
       if (ops > 0 && (ops >= 10 || batchBytes + approxChunkBytes > 3_500_000)) {
-        await flushBatch();
+        await flushBatch(pendingBatchTxs);
+        pendingBatchTxs = 0;
       }
       const chunkRef = doc(db, 'users', uid, 'backupChunks', `chunk_${idx}`);
       batch.set(
@@ -2184,31 +2482,36 @@ export async function saveCloudBackup(
       );
       ops += 1;
       batchBytes += approxChunkBytes;
+      pendingBatchTxs += cleanedChunkTxs.length;
     }
 
     for (let idx = chunks.length; idx < previousChunkCount; idx++) {
-      if (ops >= 250) {
-        await flushBatch();
+      if (ops >= 400) {
+        await flushBatch(pendingBatchTxs);
+        pendingBatchTxs = 0;
       }
       const staleRef = doc(db, 'users', uid, 'backupChunks', `chunk_${idx}`);
       batch.delete(staleRef);
       ops += 1;
     }
 
-    await flushBatch();
+    await flushBatch(pendingBatchTxs);
+    if (options?.onProgress && totalChunkTxs > 0) {
+      options.onProgress(totalChunkTxs, totalChunkTxs);
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, metaPath);
   }
 
   try {
-    const userSnap = await getDoc(userRef);
-    if (!userSnap.exists() && auth.currentUser?.uid === uid) {
+    if (auth.currentUser?.uid === uid) {
       await ensureUserProfile(auth.currentUser);
     }
     await setDoc(
       userRef,
       {
         ...buildSafeCloudLastSyncedPatch(updatedAtMs),
+        ...(effectiveData.hasCompletedOnboarding ? { hasCompletedOnboarding: true } : {}),
         updatedAt: serverTimestamp(),
       },
       { merge: true }
@@ -2281,10 +2584,7 @@ export async function syncUserCurrencyRatesToCloud(
   const userRef = doc(db, 'users', uid);
 
   try {
-    const userSnap = await getDoc(userRef);
-    if (!userSnap.exists()) {
-      await ensureUserProfile(auth.currentUser);
-    }
+    await ensureUserProfile(auth.currentUser);
     const patch = buildSafeUserCurrencyRatesPatch(input);
     await setDoc(
       userRef,
@@ -2503,7 +2803,11 @@ export async function upsertWorkspaceTransactionCloud(
 export async function batchUpsertWorkspaceTransactionsCloud(
   uid: string,
   workspaceId: string,
-  txs: Transaction[]
+  txs: Transaction[],
+  options?: {
+    batchSize?: number;
+    onProgress?: (processed: number, total: number) => void;
+  }
 ): Promise<number> {
   if (txs.length === 0) return 0;
   if (!uid || !auth.currentUser || auth.currentUser.uid !== uid) {
@@ -2511,14 +2815,20 @@ export async function batchUpsertWorkspaceTransactionsCloud(
   }
   const safeWs = normalizeWorkspaceId(workspaceId);
   const colPath = getWorkspaceTransactionsPath(uid, safeWs);
+  const batchLimit = Math.max(
+    1,
+    Math.min(450, Math.floor(options?.batchSize ?? FIRESTORE_IMPORT_BATCH_SIZE))
+  );
+  const validTxs = txs.filter((tx): tx is Transaction => Boolean(tx && tx.id));
+  const total = validTxs.length;
+  if (total === 0) return 0;
 
   try {
     let batch = writeBatch(db);
     let ops = 0;
     let written = 0;
 
-    for (const tx of txs) {
-      if (!tx || !tx.id) continue;
+    for (const tx of validTxs) {
       const { record } = buildWorkspaceTransactionRecord(uid, safeWs, tx);
       const ref = doc(db, 'users', uid, 'workspaces', safeWs, 'transactions', record.id);
       batch.set(
@@ -2531,8 +2841,9 @@ export async function batchUpsertWorkspaceTransactionsCloud(
       );
       ops += 1;
       written += 1;
-      if (ops >= 250) {
+      if (ops >= batchLimit) {
         await batch.commit();
+        options?.onProgress?.(written, total);
         batch = writeBatch(db);
         ops = 0;
       }
@@ -2540,6 +2851,7 @@ export async function batchUpsertWorkspaceTransactionsCloud(
 
     if (ops > 0) {
       await batch.commit();
+      options?.onProgress?.(written, total);
     }
     return written;
   } catch (error) {

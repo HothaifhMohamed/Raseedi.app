@@ -441,6 +441,8 @@ export const UpgradeModal: React.FC = () => {
                     <img
                       src={user.avatarUrl}
                       alt={user.name}
+                      loading="lazy"
+                      decoding="async"
                       className="w-9 h-9 rounded-full border border-[var(--color-line)] shrink-0"
                       referrerPolicy="no-referrer"
                     />

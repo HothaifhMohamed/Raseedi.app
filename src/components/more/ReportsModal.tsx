@@ -11,6 +11,7 @@ import { escapeCsvCell } from '../../services/csvImport';
 import { MoneyText } from '../common/MoneyText';
 import { HairlineFigure } from '../common/HairlineVisuals';
 import { BrandLogo } from '../common/BrandLogo';
+import { indexById, paginateList } from '../../services/lookupCache';
 
 interface ReportsModalProps {
   isOpen: boolean;
@@ -21,6 +22,10 @@ export const ReportsModal: React.FC<ReportsModalProps> = ({ isOpen, onClose }) =
   const { transactions, categories, wallets, settings, isPro, setIsUpgradeModalOpen, t, isRTL } = useApp();
 
   const [period, setPeriod] = useState<'weekly' | 'monthly'>('monthly');
+  const [visibleRows, setVisibleRows] = useState<number>(30);
+
+  const categoriesById = useMemo(() => indexById(categories), [categories]);
+  const walletsById = useMemo(() => indexById(wallets), [wallets]);
 
   // Compute date range
   const { startDate, endDate, periodLabel } = useMemo(() => {
@@ -44,6 +49,11 @@ export const ReportsModal: React.FC<ReportsModalProps> = ({ isOpen, onClose }) =
     return getTransactionsInDateRange(transactions, startDate, endDate);
   }, [transactions, startDate, endDate]);
 
+  const paginatedReportRows = useMemo(
+    () => paginateList(reportTransactions, visibleRows),
+    [reportTransactions, visibleRows]
+  );
+
   const { incomeTotal, expenseTotal, netTotal } = useMemo(() => {
     let inc = 0;
     let exp = 0;
@@ -64,8 +74,8 @@ export const ReportsModal: React.FC<ReportsModalProps> = ({ isOpen, onClose }) =
   const executeExportCSV = () => {
     const headers = ['التاريخ', 'الوقت', 'النوع', 'المبلغ', 'العملة', 'المحفظة', 'التصنيف', 'الأولوية', 'الملاحظات'];
     const rows = reportTransactions.map((tx) => {
-      const cat = categories.find((c) => c.id === tx.categoryId);
-      const w = wallets.find((w) => w.id === tx.walletId);
+      const cat = categoriesById.get(tx.categoryId);
+      const w = walletsById.get(tx.walletId);
       return [
         tx.date,
         tx.time,
@@ -154,7 +164,10 @@ export const ReportsModal: React.FC<ReportsModalProps> = ({ isOpen, onClose }) =
           <div className="flex flex-wrap items-center justify-between gap-2 print:hidden">
             <div className="flex items-center gap-1 p-1 bg-[var(--color-bg)] rounded-xl border border-[var(--color-line)]">
               <button
-                onClick={() => setPeriod('weekly')}
+                onClick={() => {
+                  setPeriod('weekly');
+                  setVisibleRows(30);
+                }}
                 className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors min-h-[36px] ${
                   period === 'weekly'
                     ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
@@ -164,7 +177,10 @@ export const ReportsModal: React.FC<ReportsModalProps> = ({ isOpen, onClose }) =
                 {isRTL ? 'تقرير أسبوعي' : 'Weekly'}
               </button>
               <button
-                onClick={() => setPeriod('monthly')}
+                onClick={() => {
+                  setPeriod('monthly');
+                  setVisibleRows(30);
+                }}
                 className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors min-h-[36px] ${
                   period === 'monthly'
                     ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
@@ -199,7 +215,11 @@ export const ReportsModal: React.FC<ReportsModalProps> = ({ isOpen, onClose }) =
           <div className="p-4 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] print:bg-white print:border-black print:text-black space-y-4">
             <div className="border-b pb-3 border-[var(--color-line)] print:border-black flex items-center justify-between gap-3">
               <div className="flex items-center gap-3 min-w-0">
-                <BrandLogo className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0" title={t('appName')} />
+                <BrandLogo
+                  className="w-10 h-10 rounded-xl object-cover shadow-sm shrink-0"
+                  title={t('appName')}
+                  lazy={true}
+                />
                 <div className="min-w-0">
                   <h1 className="text-base font-bold text-[var(--color-ink)] print:text-black">
                     {t('appName')} — {periodLabel}
@@ -263,8 +283,8 @@ export const ReportsModal: React.FC<ReportsModalProps> = ({ isOpen, onClose }) =
                 {isRTL ? 'تفاصيل المعاملات:' : 'Transaction Details:'}
               </h4>
               <div className="max-h-60 overflow-y-auto print:max-h-none divide-y divide-[var(--color-line)] print:divide-gray-300 text-xs">
-                {reportTransactions.slice(0, 30).map((tx) => {
-                  const cat = categories.find((c) => c.id === tx.categoryId);
+                {paginatedReportRows.visibleItems.map((tx) => {
+                  const cat = categoriesById.get(tx.categoryId);
                   return (
                     <div key={tx.id} className="py-2 flex items-center justify-between">
                       <div>
@@ -287,6 +307,17 @@ export const ReportsModal: React.FC<ReportsModalProps> = ({ isOpen, onClose }) =
                   );
                 })}
               </div>
+              {paginatedReportRows.hasMore && (
+                <button
+                  type="button"
+                  onClick={() => setVisibleRows((prev) => prev + 50)}
+                  className="w-full mt-2 py-2 px-3 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-[11px] font-semibold text-[var(--color-accent)] transition-colors print:hidden min-h-[38px]"
+                >
+                  {isRTL
+                    ? `عرض المزيد (${paginatedReportRows.remainingCount} متبقي)`
+                    : `Show more (${paginatedReportRows.remainingCount} remaining)`}
+                </button>
+              )}
             </div>
           </div>
         </div>

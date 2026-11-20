@@ -13,6 +13,7 @@ import type {
   Transaction,
 } from '../types';
 import type { OrgSubscriptionState } from '../services/entitlements';
+import type { DirectOrgUserLookupResult } from '../services/orgCloud';
 
 export type OrgHubTab = 'approvals' | 'cost_centers' | 'parties' | 'team' | 'reports';
 
@@ -97,6 +98,14 @@ export interface OrgContextValue {
   ) => Promise<{ invite: OrganizationInvite; code: string }>;
   listOrgInvites: () => Promise<OrganizationInvite[]>;
   revokeOrgInvite: (inviteId: string) => Promise<void>;
+  searchUserForOrg: (identifier: string) => Promise<DirectOrgUserLookupResult | null>;
+  addOrgMemberDirectly: (params: {
+    identifier: string;
+    targetUser?: DirectOrgUserLookupResult | null;
+    role: Exclude<OrganizationRole, 'owner'>;
+    department?: string;
+    spendingLimit?: number;
+  }) => Promise<OrganizationMember>;
   manageOrgMember: (params: {
     targetUid: string;
     action: 'change_role' | 'suspend' | 'reactivate' | 'remove' | 'set_spending_limit';

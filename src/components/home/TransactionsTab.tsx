@@ -35,10 +35,17 @@ import {
   TRANSACTIONS_LIMIT_STORAGE_KEY,
   TRANSACTIONS_SCROLL_STORAGE_KEY,
 } from '../../services/scrollRestoration';
+import {
+  createIdSet,
+  formatCachedDayHeader,
+  indexById,
+} from '../../services/lookupCache';
+import { TransactionsListSkeleton } from '../common/SkeletonLoaders';
 
 export const TransactionsTab: React.FC = () => {
   const {
     isOrgWorkspace,
+    isOrgLoading,
     activeOrganization,
     activeOrgRole,
     canOrgWrite,
@@ -165,8 +172,17 @@ export const TransactionsTab: React.FC = () => {
     setVisibleTxLimit(60);
   }, [filters]);
 
+  // O(1) lookup maps to prevent O(N*M) linear scans inside search filter and row rendering
+  const categoriesById = useMemo(() => indexById(categories), [categories]);
+  const walletsById = useMemo(() => indexById(wallets), [wallets]);
+  const costCentersById = useMemo(() => indexById(orgCostCenters), [orgCostCenters]);
+  const selectedIdSet = useMemo(() => createIdSet(selectedTransactionIds), [selectedTransactionIds]);
+
   // Apply filters & search
   const filteredTransactions = useMemo(() => {
+    const trimmedQuery = filters.searchQuery.toLowerCase().trim();
+    const contactFilterLower = filters.contact ? filters.contact.toLowerCase() : '';
+
     return transactions.filter((tx) => {
       // 1. Type
       if (filters.type !== 'all') {
@@ -190,7 +206,7 @@ export const TransactionsTab: React.FC = () => {
         return false;
       }
       // 6. Contact
-      if (filters.contact && tx.contact?.toLowerCase() !== filters.contact.toLowerCase()) {
+      if (contactFilterLower && tx.contact?.toLowerCase() !== contactFilterLower) {
         return false;
       }
       // 7. Date range
@@ -198,30 +214,29 @@ export const TransactionsTab: React.FC = () => {
       if (filters.endDate && tx.date > filters.endDate) return false;
 
       // 8. Full-text search
-      if (filters.searchQuery.trim()) {
-        const q = filters.searchQuery.toLowerCase().trim();
-        const cat = categories.find((c) => c.id === tx.categoryId);
+      if (trimmedQuery) {
+        const cat = categoriesById.get(tx.categoryId);
         const catName = ((cat?.nameAr || '') + ' ' + (cat?.nameEn || '')).toLowerCase();
-        const w = wallets.find((w) => w.id === tx.walletId);
+        const w = walletsById.get(tx.walletId);
         const wName = (w?.name || '').toLowerCase();
         const notes = (tx.notes || '').toLowerCase();
         const contact = (tx.contact || '').toLowerCase();
         const group = (tx.group || '').toLowerCase();
 
         const match =
-          catName.includes(q) ||
-          wName.includes(q) ||
-          notes.includes(q) ||
-          contact.includes(q) ||
-          group.includes(q) ||
-          String(tx.amount).includes(q);
+          catName.includes(trimmedQuery) ||
+          wName.includes(trimmedQuery) ||
+          notes.includes(trimmedQuery) ||
+          contact.includes(trimmedQuery) ||
+          group.includes(trimmedQuery) ||
+          String(tx.amount).includes(trimmedQuery);
 
         if (!match) return false;
       }
 
       return true;
     });
-  }, [transactions, filters, categories, wallets]);
+  }, [transactions, filters, categoriesById, walletsById]);
 
   // Group by day (preserving full day group subtotals, windowing rendered rows)
   const dayGroups = useMemo(() => {
@@ -269,23 +284,18 @@ export const TransactionsTab: React.FC = () => {
     return () => observer.disconnect();
   }, [hasMoreTransactions, renderedCount]);
 
-  const formatDateHeader = (dateStr: string) => {
-    const dt = new Date(dateStr + 'T00:00:00');
-    const dayNum = dt.getDate();
-    const formattedDay = settings.digitFormat === 'arabic' ? toArabicNumerals(dayNum) : dayNum;
-
-    const weekday = dt.toLocaleDateString(settings.language === 'ar' ? 'ar-EG' : 'en-US', {
-      weekday: 'long',
-    });
-    const month = dt.toLocaleDateString(settings.language === 'ar' ? 'ar-EG' : 'en-US', {
-      month: 'long',
-    });
-
-    return `${weekday}، ${formattedDay} ${month}`;
-  };
+  const formatDateHeader = useCallback(
+    (dateStr: string) =>
+      formatCachedDayHeader(dateStr, settings.language, settings.digitFormat, toArabicNumerals),
+    [settings.language, settings.digitFormat]
+  );
 
   const isMultiSelectActive = selectedTransactionIds.length > 0;
-  const allFilteredIds = filteredTransactions.map((t) => t.id);
+  const allFilteredIds = useMemo(() => filteredTransactions.map((t) => t.id), [filteredTransactions]);
+
+  if (isOrgWorkspace && isOrgLoading && transactions.length === 0) {
+    return <TransactionsListSkeleton isRTL={isRTL} />;
+  }
 
   return (
     <div
@@ -524,10 +534,10 @@ export const TransactionsTab: React.FC = () => {
               {/* Transactions Ledger Rows with Thin Dividers */}
               <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl overflow-visible divide-y divide-[var(--color-line)]">
                 {group.transactions.map((tx: Transaction) => {
-                  const cat = categories.find((c) => c.id === tx.categoryId);
-                  const wallet = wallets.find((w) => w.id === tx.walletId);
-                  const toWallet = tx.toWalletId ? wallets.find((w) => w.id === tx.toWalletId) : null;
-                  const isSelected = selectedTransactionIds.includes(tx.id);
+                  const cat = categoriesById.get(tx.categoryId);
+                  const wallet = walletsById.get(tx.walletId);
+                  const toWallet = tx.toWalletId ? walletsById.get(tx.toWalletId) : null;
+                  const isSelected = selectedIdSet.has(tx.id);
                   const dotColor = cat?.color || 'var(--color-accent)';
                   const catName = isRTL ? cat?.nameAr || 'عام' : cat?.nameEn || 'General';
                   const isMenuOpen = activeMenuTxId === tx.id;
@@ -544,7 +554,7 @@ export const TransactionsTab: React.FC = () => {
                     !isOrgWorkspace ||
                     (!isOrgReadOnly && canOrgWrite && !isLockedByPeriod && !isApprovedEmployeeLocked);
                   const costCenter = tx.costCenterId
-                    ? orgCostCenters.find((cc) => cc.id === tx.costCenterId)
+                    ? costCentersById.get(tx.costCenterId)
                     : null;
 
                   return (
