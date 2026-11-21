@@ -125,6 +125,7 @@ export interface OrgContextValue {
   }) => Promise<void>;
   transferOrgOwnership: (newOwnerUid: string) => Promise<void>;
   deleteOrganization: (confirmName: string, targetOrgId?: string) => Promise<void>;
+  leaveOrganization: (targetOrgId?: string) => Promise<void>;
 
   isOrgHubOpen: boolean;
   setIsOrgHubOpen: (open: boolean) => void;

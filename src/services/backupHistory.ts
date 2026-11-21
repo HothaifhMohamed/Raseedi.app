@@ -51,6 +51,18 @@ export interface ResolvedBackupHistoryDisplay {
 }
 
 /**
+ * Returns true if a backup history entry is a manual snapshot (either `source === 'manual'`
+ * or its document ID starts with `manual_`).
+ */
+export function isManualBackupHistoryEntry(
+  entry: { id?: string | null; source?: string | null } | null | undefined
+): boolean {
+  if (!entry) return false;
+  if (entry.source === 'manual') return true;
+  return typeof entry.id === 'string' && entry.id.startsWith('manual_');
+}
+
+/**
  * Given existing backup history entries, returns the document IDs that exceed `maxKeep`
  * (keeping only the newest `maxKeep` backups ordered by createdAtMs DESC, id DESC).
  */
@@ -68,6 +80,41 @@ export function getBackupIdsToPrune(
   });
 
   return sorted.slice(safeMax).map((entry) => entry.id);
+}
+
+/**
+ * Computes stale backup IDs to prune among AUTOMATIC backups ONLY, strictly preserving
+ * all manual backups (`source === 'manual'` or `id.startsWith('manual_')`).
+ */
+export function getAutoBackupIdsToPrune(
+  entries: Array<{ id: string; createdAtMs: number; source?: string }>,
+  maxKeep: number = MAX_AUTO_CLOUD_BACKUPS
+): string[] {
+  const autoEntries = entries.filter((entry) => !isManualBackupHistoryEntry(entry));
+  return getBackupIdsToPrune(autoEntries, maxKeep);
+}
+
+/**
+ * Returns visible backup history entries sorted newest-first without ever hiding
+ * manual snapshots behind the automatic backup cap (`maxAutoKeep`).
+ */
+export function selectVisibleBackupHistoryEntries<
+  T extends { id: string; createdAtMs: number; source?: string }
+>(entries: T[], maxAutoKeep: number = MAX_AUTO_CLOUD_BACKUPS): T[] {
+  const safeMaxAuto = Math.max(0, Math.floor(maxAutoKeep));
+  const sortDesc = (a: T, b: T) => {
+    const diff = Number(b.createdAtMs || 0) - Number(a.createdAtMs || 0);
+    if (diff !== 0) return diff;
+    return b.id.localeCompare(a.id);
+  };
+
+  const manualEntries = entries.filter((entry) => isManualBackupHistoryEntry(entry));
+  const autoEntries = entries
+    .filter((entry) => !isManualBackupHistoryEntry(entry))
+    .sort(sortDesc)
+    .slice(0, safeMaxAuto);
+
+  return [...manualEntries, ...autoEntries].sort(sortDesc);
 }
 
 export interface BackupHistoryExtraCounts {

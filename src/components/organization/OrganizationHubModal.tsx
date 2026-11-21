@@ -40,8 +40,10 @@ import {
   RotateCcw,
   RefreshCw,
   Paperclip,
+  LogOut,
 } from 'lucide-react';
 import { useApp, OrgHubTab } from '../../context/AppContext';
+import { formatFirestoreErrorForDisplay } from '../../services/safeRecovery';
 import { BrandLogo } from '../common/BrandLogo';
 import {
   calculateAgingReport,
@@ -127,6 +129,7 @@ export const OrganizationHubModal: React.FC = () => {
     manageOrgMember,
     transferOrgOwnership,
     deleteOrganization,
+    leaveOrganization,
     addWallet,
     updateWallet,
     addTransaction,
@@ -198,6 +201,8 @@ export const OrganizationHubModal: React.FC = () => {
   const [confirmQuickDeleteOpen, setConfirmQuickDeleteOpen] = useState(false);
   const [quickDeleteError, setQuickDeleteError] = useState<string | null>(null);
   const [isDeletingOrg, setIsDeletingOrg] = useState(false);
+  const [confirmLeaveOrgOpen, setConfirmLeaveOrgOpen] = useState(false);
+  const [isLeavingOrg, setIsLeavingOrg] = useState(false);
   const [isUpgradingOrgToCloud, setIsUpgradingOrgToCloud] = useState(false);
   const [upgradeOrgProgress, setUpgradeOrgProgress] = useState<{ done: number; total: number } | null>(null);
   const [teamFeedback, setTeamFeedback] = useState<{ text: string; error?: boolean } | null>(null);
@@ -250,6 +255,7 @@ export const OrganizationHubModal: React.FC = () => {
     setConfirmQuickDeleteOpen(false);
     setQuickDeleteError(null);
     setDeleteOrgConfirmName('');
+    setConfirmLeaveOrgOpen(false);
     setConfirmRemoveUid(null);
     setEditingMemberLimit(null);
     setConfirmTransferOpen(false);
@@ -789,11 +795,29 @@ export const OrganizationHubModal: React.FC = () => {
       if (action === 'remove') setConfirmRemoveUid(null);
     } catch (err: any) {
       setTeamFeedback({
-        text: err?.message || (isRTL ? 'تعذر تحديث بيانات العضو.' : 'Failed to update member.'),
+        text: formatFirestoreErrorForDisplay(err, isRTL),
         error: true,
       });
     } finally {
       setMemberActionBusyUid(null);
+    }
+  };
+
+  const handleLeaveOrganization = async () => {
+    if (!activeOrganization) return;
+    setIsLeavingOrg(true);
+    setTeamFeedback(null);
+    try {
+      await leaveOrganization(activeOrganization.id);
+      setConfirmLeaveOrgOpen(false);
+      setIsOrgHubOpen(false);
+    } catch (err: any) {
+      setTeamFeedback({
+        text: formatFirestoreErrorForDisplay(err, isRTL),
+        error: true,
+      });
+    } finally {
+      setIsLeavingOrg(false);
     }
   };
 
@@ -2256,7 +2280,11 @@ export const OrganizationHubModal: React.FC = () => {
                           </div>
 
                           <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
-                            {canOrgManage && member.role !== 'owner' && !isOrgReadOnly ? (
+                            {canOrgManage &&
+                            member.role !== 'owner' &&
+                            !isSelf &&
+                            (member.role !== 'admin' || activeOrgRole === 'owner') &&
+                            !isOrgReadOnly ? (
                               <>
                                 <select
                                   disabled={isBusy}
@@ -2660,6 +2688,65 @@ export const OrganizationHubModal: React.FC = () => {
                   </form>
                 </div>
               )}
+
+              {/* Non-Owner Cloud Member: Leave Organization */}
+              {!activeOrgPermissions.isLocalOnly &&
+                activeOrgRole &&
+                activeOrgRole !== 'owner' && (
+                  <div className="pt-3 border-t border-[var(--color-line)] space-y-2.5">
+                    <div className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-expense)]/30 space-y-2.5">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div className="space-y-0.5">
+                          <div className="text-xs font-bold text-[var(--color-expense)] flex items-center gap-1.5">
+                            <LogOut className="w-4 h-4" />
+                            <span>{isRTL ? 'مغادرة المؤسسة' : 'Leave Organization'}</span>
+                          </div>
+                          <p className="text-[11px] text-[var(--color-muted)] leading-relaxed">
+                            {isRTL
+                              ? 'يمكنك إزالة عضويتك من هذه المؤسسة السحابية في أي وقت والعودة إلى حسابك الشخصي دون التأثير على بيانات باقي الفريق.'
+                              : 'Remove your membership from this cloud organization at any time and return to your personal workspace without affecting team records.'}
+                          </p>
+                        </div>
+
+                        {!confirmLeaveOrgOpen ? (
+                          <button
+                            type="button"
+                            data-testid="leave-org-btn"
+                            disabled={isLeavingOrg}
+                            onClick={() => setConfirmLeaveOrgOpen(true)}
+                            className="px-3.5 py-2 rounded-lg border border-[var(--color-expense)]/40 text-[var(--color-expense)] hover:bg-[var(--color-expense)]/10 text-xs font-bold min-h-[40px] shrink-0 disabled:opacity-40"
+                          >
+                            {isRTL ? 'مغادرة المؤسسة' : 'Leave Organization'}
+                          </button>
+                        ) : (
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              data-testid="confirm-leave-org-btn"
+                              disabled={isLeavingOrg}
+                              onClick={() => void handleLeaveOrganization()}
+                              className="px-3.5 py-2 rounded-lg bg-[var(--color-expense)] text-white text-xs font-bold min-h-[40px] disabled:opacity-40"
+                            >
+                              {isLeavingOrg
+                                ? '...'
+                                : isRTL
+                                ? 'تأكيد المغادرة'
+                                : 'Confirm Leave'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isLeavingOrg}
+                              onClick={() => setConfirmLeaveOrgOpen(false)}
+                              className="px-2.5 py-2 rounded-lg border border-[var(--color-line)] text-xs min-h-[40px]"
+                            >
+                              {t('cancel')}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
             </div>
           )}
 

@@ -119,6 +119,21 @@ export function formatFirestoreErrorForDisplay(err: unknown, isRTL: boolean): st
   const code = obj?.code ? String(obj.code) : '';
   const rawMessage = err instanceof Error ? err.message : String(obj?.message || err);
 
+  if (rawMessage.includes('BALANCE_RECALC_FAILED')) {
+    return isRTL
+      ? 'تم حفظ بعض المعاملات لكن تعذّر تحديث أو إعادة احتساب أرصدة المحافظ تلقائياً (BALANCE_RECALC_FAILED). يُرجى فتح «مركز المؤسسة ← التقارير ← إعادة احتساب الأرصدة» لضمان دقة أرصدة المحافظ.'
+      : 'Some transactions were saved, but automatic wallet balance update/recalculation failed (BALANCE_RECALC_FAILED). Please open Organization Hub → Reports → Recalculate Balances to restore accurate balances.';
+  }
+  if (rawMessage.includes('ONLY_OWNER_CAN_MANAGE_ADMIN')) {
+    return isRTL
+      ? 'لا يمكن للمدير تعديل أو إزالة مدير آخر. هذه الصلاحية محصورة بمالك المؤسسة فقط.'
+      : 'Admins cannot modify or remove another admin. Only the organization owner can manage admin members.';
+  }
+  if (rawMessage.includes('OWNER_CANNOT_LEAVE_ORG')) {
+    return isRTL
+      ? 'لا يمكن لمالك المؤسسة المغادرة مباشرة. يرجى نقل الملكية لعضو آخر أو حذف المؤسسة.'
+      : 'The organization owner cannot leave directly. Please transfer ownership first or delete the organization.';
+  }
   if (rawMessage.includes('BACKUP_TOO_LARGE')) {
     return isRTL
       ? 'حجم النسخة السحابية يتجاوز الحد الأقصى المسموح به (حتى 40,000 معاملة / 99 حزمة). لم يتم حفظ النسخة لمنع فقدان أي معاملات — يُنصح بتصدير نسخة JSON محلية أو أرشفة المعاملات القديمة.'

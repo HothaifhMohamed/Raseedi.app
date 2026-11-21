@@ -1154,13 +1154,34 @@ export async function batchUpdateOrgTransactionsCategoryCloud(
   await commitChunkedOperations(ops, 380);
 }
 
+export function resolveImportedOrgTxSubmittedBy(
+  tx: Pick<Transaction, 'submittedBy' | 'submittedByName'>,
+  actor: OrgActorInfo,
+  actorRole?: OrganizationRole | null
+): { submittedBy: string; submittedByName: string } {
+  const isAccountantOrAbove =
+    actorRole === 'owner' || actorRole === 'admin' || actorRole === 'accountant';
+  if (!isAccountantOrAbove) {
+    return {
+      submittedBy: actor.uid,
+      submittedByName: actor.name,
+    };
+  }
+  return {
+    submittedBy: (typeof tx.submittedBy === 'string' && tx.submittedBy.trim()) || actor.uid,
+    submittedByName:
+      (typeof tx.submittedByName === 'string' && tx.submittedByName.trim()) || actor.name,
+  };
+}
+
 export async function importOrgTransactionsBatchCloud(
   orgId: string,
   newTransactions: Transaction[],
   wallets: Wallet[],
   customRates: Record<string, number>,
   actor: OrgActorInfo,
-  onProgress?: (processed: number, total: number) => void
+  onProgress?: (processed: number, total: number) => void,
+  actorRole?: OrganizationRole | null
 ): Promise<void> {
   if (newTransactions.length === 0) return;
   const total = newTransactions.length;
@@ -1186,10 +1207,15 @@ export async function importOrgTransactionsBatchCloud(
         const batch = writeBatch(db);
         let firstDocId = '';
         for (const tx of slice) {
+          const { submittedBy, submittedByName } = resolveImportedOrgTxSubmittedBy(
+            tx,
+            actor,
+            actorRole
+          );
           const cloudDoc = buildOrgTxPayloadForCloud(orgId, {
             ...tx,
-            submittedBy: tx.submittedBy || actor.uid,
-            submittedByName: tx.submittedByName || actor.name,
+            submittedBy,
+            submittedByName,
           });
           const cloudDocId = String(cloudDoc.id);
           if (!firstDocId) firstDocId = cloudDocId;
@@ -1249,10 +1275,17 @@ export async function importOrgTransactionsBatchCloud(
           actor
         );
       } catch (recalcErr) {
-        console.warn(
-          '[importOrgTransactionsBatchCloud] Balance recalculation after partial batch failure failed:',
+        console.error(
+          '[importOrgTransactionsBatchCloud] Balance recalculation after partial/wallet failure failed:',
           recalcErr
         );
+        const origMsg = err instanceof Error ? err.message : String(err);
+        const recalcMsg = recalcErr instanceof Error ? recalcErr.message : String(recalcErr);
+        const balanceError = new Error(`BALANCE_RECALC_FAILED: ${origMsg} | ${recalcMsg}`);
+        (balanceError as Error & { code?: string; cause?: unknown }).code =
+          'BALANCE_RECALC_FAILED';
+        (balanceError as Error & { code?: string; cause?: unknown }).cause = recalcErr;
+        throw balanceError;
       }
     }
     throw err;
@@ -2461,6 +2494,9 @@ export async function manageOrgMemberDirectlyCloud(params: {
     if (currentRole === 'owner') {
       throw new Error('CANNOT_MODIFY_OWNER');
     }
+    if (currentRole === 'admin' && String(orgData.ownerUid || '') !== actor.uid) {
+      throw new Error('ONLY_OWNER_CAN_MANAGE_ADMIN');
+    }
 
     if (action === 'remove') {
       if (cleanTargetUid === actor.uid) {
@@ -2529,6 +2565,52 @@ export async function manageOrgMemberDirectlyCloud(params: {
       auditSummary
     );
     tx.set(doc(db, 'organizations', cleanOrgId, 'auditLogs', audit.id), audit.data);
+  });
+}
+
+/**
+ * Allows a non-owner member to leave a Cloud Organization by atomically deleting both
+ * `organizations/{orgId}/members/{uid}` and `users/{uid}/orgRefs/{orgId}` in one transaction.
+ */
+export async function leaveCloudOrganization(
+  orgId: string,
+  actor: OrgActorInfo
+): Promise<void> {
+  const cleanOrgId = String(orgId || '').trim();
+  const cleanUid = String(actor.uid || '').trim();
+  if (!cleanOrgId || !cleanUid) {
+    throw new Error('INVALID_LEAVE_ORG_ARGS');
+  }
+
+  const memberRef = doc(db, 'organizations', cleanOrgId, 'members', cleanUid);
+  const userOrgRef = doc(db, 'users', cleanUid, 'orgRefs', cleanOrgId);
+
+  await runTransaction(db, async (tx) => {
+    const [memberSnap, userOrgSnap] = await Promise.all([
+      tx.get(memberRef),
+      tx.get(userOrgRef),
+    ]);
+
+    const memberRole = memberSnap.exists()
+      ? String((memberSnap.data() as Record<string, unknown>).role || '')
+      : '';
+    const refRole = userOrgSnap.exists()
+      ? String((userOrgSnap.data() as Record<string, unknown>).role || '')
+      : '';
+
+    if (memberRole === 'owner' || refRole === 'owner') {
+      throw new Error('OWNER_CANNOT_LEAVE_ORG');
+    }
+    if (!memberSnap.exists() && !userOrgSnap.exists()) {
+      return;
+    }
+
+    if (memberSnap.exists()) {
+      tx.delete(memberRef);
+    }
+    if (userOrgSnap.exists()) {
+      tx.delete(userOrgRef);
+    }
   });
 }
 

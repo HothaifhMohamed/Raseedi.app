@@ -981,6 +981,7 @@ service cloud.firestore {
           && isOrgOwnerOrAdmin(orgId)
           && isOrgWritable(orgId)
           && existing().role != 'owner'
+          && (existing().role != 'admin' || orgDoc(orgId).data.ownerUid == request.auth.uid)
           && incoming().role in ['admin', 'accountant', 'employee', 'viewer']
           && incoming().status in ['active', 'suspended']
           && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'status']);
@@ -1001,10 +1002,17 @@ service cloud.firestore {
             )
             ||
             (
+              userId == request.auth.uid
+              && existing().role != 'owner'
+              && !existsAfter(/databases/$(database)/documents/organizations/$(orgId)/members/$(userId))
+            )
+            ||
+            (
               userId != request.auth.uid
               && existing().role != 'owner'
               && isOrgOwnerOrAdmin(orgId)
               && isOrgWritable(orgId)
+              && (existing().role != 'admin' || orgDoc(orgId).data.ownerUid == request.auth.uid)
               && !existsAfter(/databases/$(database)/documents/organizations/$(orgId)/members/$(userId))
             )
           );
@@ -1104,7 +1112,7 @@ service cloud.firestore {
           && isOwner(userId);
         allow list: if isValidId(userId)
           && isOwner(userId)
-          && (request.query.limit == null || request.query.limit <= 30);
+          && (request.query.limit == null || request.query.limit <= 100);
         allow create: if isValidId(userId)
           && isValidId(backupId)
           && isOwner(userId)
@@ -1237,6 +1245,7 @@ service cloud.firestore {
           && isOrgOwnerOrAdmin(orgId)
           && isOrgWritable(orgId)
           && existing().role != 'owner'
+          && (existing().role != 'admin' || orgDoc(orgId).data.ownerUid == request.auth.uid)
           && incoming().role in ['admin', 'accountant', 'employee', 'viewer']
           && incoming().status in ['active', 'suspended']
           && (!('department' in incoming()) || incoming().department == null || (incoming().department is string && incoming().department.size() <= 80))
@@ -1264,10 +1273,17 @@ service cloud.firestore {
             )
             ||
             (
+              memberUid == request.auth.uid
+              && existing().role != 'owner'
+              && !existsAfter(/databases/$(database)/documents/users/$(memberUid)/orgRefs/$(orgId))
+            )
+            ||
+            (
               memberUid != request.auth.uid
               && existing().role != 'owner'
               && isOrgOwnerOrAdmin(orgId)
               && isOrgWritable(orgId)
+              && (existing().role != 'admin' || orgDoc(orgId).data.ownerUid == request.auth.uid)
               && !existsAfter(/databases/$(database)/documents/users/$(memberUid)/orgRefs/$(orgId))
             )
           );

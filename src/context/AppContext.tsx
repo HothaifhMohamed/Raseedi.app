@@ -234,6 +234,7 @@ import {
   lookupUserForOrgDirectAdd,
   addOrgMemberDirectlyCloud,
   manageOrgMemberDirectlyCloud,
+  leaveCloudOrganization,
   DirectOrgUserLookupResult,
   OrgActorInfo,
 } from '../services/orgCloud';
@@ -443,6 +444,7 @@ interface AppContextType {
   }) => Promise<void>;
   transferOrgOwnership: (newOwnerUid: string) => Promise<void>;
   deleteOrganization: (confirmName: string, targetOrgId?: string) => Promise<void>;
+  leaveOrganization: (targetOrgId?: string) => Promise<void>;
 
   // Unified Enterprise Hub Modal
   isOrgHubOpen: boolean;
@@ -5939,6 +5941,76 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     ]
   );
 
+  const leaveOrganization = useCallback(
+    async (targetOrgId?: string) => {
+      const orgIdToLeave = (targetOrgId || activeOrganization?.id || '').trim();
+      if (!orgIdToLeave || orgIdToLeave === 'personal') return;
+
+      const actor = getOrgActor();
+      const cloudRef = orgRefs.find((r) => r.orgId === orgIdToLeave) || null;
+      const targetOrgName =
+        (activeCloudOrg?.id === orgIdToLeave ? activeCloudOrg.name : '') ||
+        cloudRef?.orgName ||
+        orgIdToLeave;
+
+      if (activeOrgRole === 'owner' || cloudRef?.role === 'owner') {
+        throw new Error('OWNER_CANNOT_LEAVE_ORG');
+      }
+
+      await leaveCloudOrganization(orgIdToLeave, actor);
+
+      const nextWorkspace = resolveFallbackWorkspaceAfterDelete(
+        activeWorkspaceRef.current,
+        orgIdToLeave
+      );
+      setOrgRefs((prev) => prev.filter((r) => r.orgId !== orgIdToLeave));
+
+      if (nextWorkspace !== activeWorkspaceRef.current) {
+        syncRequestIdRef.current += 1;
+        setActiveWorkspace('personal');
+        saveActiveWorkspacePref('personal');
+        setActiveWalletId(null);
+        setSelectedTransactionIds([]);
+        resetFilters();
+        setIsOrgHubOpen(false);
+        setIsOrgLoading(false);
+        setActiveCloudOrg(null);
+        setActiveCloudMembers([]);
+        setActiveCloudWallets([]);
+        setActiveCloudCategories([]);
+        setActiveCloudBudgets([]);
+        setActiveCloudCostCenters([]);
+        setActiveCloudParties([]);
+        setActiveCloudTransactions([]);
+        setActiveCloudTrashTransactions([]);
+        setExtraOrgTransactions([]);
+        setExtraOrgTrashTransactions([]);
+        setOrgTxLastCursor(null);
+        setOrgHasMoreTx(false);
+        setActiveCloudAuditLogs([]);
+        setOrgSyncPendingWrites(false);
+      }
+
+      showToast(
+        settings.language === 'en'
+          ? `You left "${targetOrgName}".`
+          : `تمت مغادرة المؤسسة "${targetOrgName}" بنجاح.`,
+        'info'
+      );
+    },
+    [
+      activeOrganization?.id,
+      activeCloudOrg?.id,
+      activeCloudOrg?.name,
+      activeOrgRole,
+      orgRefs,
+      getOrgActor,
+      settings.language,
+      resetFilters,
+      showToast,
+    ]
+  );
+
   // ===========================================================================
   // Unified CRUD: Transactions (respecting Personal vs Cloud Organization)
   // ===========================================================================
@@ -6509,7 +6581,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               mergedWallets,
               settings.customExchangeRates,
               actor,
-              onProgress
+              onProgress,
+              activeOrgRole
             );
           }
 
@@ -6726,6 +6799,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return { ok: true };
       } catch (err) {
         const formatted = formatFirestoreErrorForDisplay(err, isAr);
+        const rawErrMsg = err instanceof Error ? err.message : String(err || '');
+        if (rawErrMsg.includes('BALANCE_RECALC_FAILED')) {
+          setOrgActionError(formatted);
+          showToast(formatted, 'error');
+        }
         setCloudSyncStatus('error');
         setCloudSyncError(formatted);
         setCloudDiagnosticsError(formatted);
@@ -6740,11 +6818,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       getOrgActor,
       isOrgWorkspace,
       activeOrganization,
+      activeOrgRole,
       isUsingLocalOrgMode,
       activeCloudWallets,
       activeCloudTransactions,
       settings.customExchangeRates,
       refreshCloudBackupHistory,
+      showToast,
     ]
   );
 
@@ -9119,6 +9199,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       manageOrgMember,
       transferOrgOwnership,
       deleteOrganization,
+      leaveOrganization,
       isOrgHubOpen,
       setIsOrgHubOpen,
       orgHubTab,
@@ -9188,6 +9269,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       manageOrgMember,
       transferOrgOwnership,
       deleteOrganization,
+      leaveOrganization,
       isOrgHubOpen,
       orgHubTab,
       openOrgHub,
@@ -9277,6 +9359,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       manageOrgMember,
       transferOrgOwnership,
       deleteOrganization,
+      leaveOrganization,
 
       isOrgHubOpen,
       setIsOrgHubOpen,
@@ -9543,6 +9626,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       manageOrgMember,
       transferOrgOwnership,
       deleteOrganization,
+      leaveOrganization,
       isOrgHubOpen,
       orgHubTab,
       openOrgHub,

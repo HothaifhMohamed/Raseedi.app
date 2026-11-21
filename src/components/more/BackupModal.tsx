@@ -56,7 +56,12 @@ import {
   tagTransactionsWithWorkspace,
   tagWalletsWithWorkspace,
 } from '../../services/workspaceSync';
-import { resolveBackupHistoryDisplayForWorkspace } from '../../services/backupHistory';
+import {
+  isManualBackupHistoryEntry,
+  MAX_AUTO_CLOUD_BACKUPS,
+  resolveBackupHistoryDisplayForWorkspace,
+  selectVisibleBackupHistoryEntries,
+} from '../../services/backupHistory';
 
 interface BackupModalProps {
   isOpen: boolean;
@@ -1541,8 +1546,12 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                             : 'The last 7 automatic cloud snapshots will appear here after sync.'}
                         </p>
                       ) : (
-                        <div className="space-y-1.5 max-h-44 overflow-y-auto pe-0.5">
-                          {cloudBackupHistory.slice(0, 7).map((entry, idx) => {
+                        <div className="space-y-1.5 max-h-56 overflow-y-auto pe-0.5">
+                          {selectVisibleBackupHistoryEntries(
+                            cloudBackupHistory,
+                            MAX_AUTO_CLOUD_BACKUPS
+                          ).map((entry, idx) => {
+                            const isManualEntry = isManualBackupHistoryEntry(entry);
                             const resolved = resolveBackupHistoryDisplayForWorkspace(
                               entry,
                               activeWorkspace,
@@ -1569,6 +1578,11 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                                     {idx === 0 && (
                                       <span className="text-[9px] font-bold text-[var(--color-accent)]">
                                         {isRTL ? '(الأحدث)' : '(Latest)'}
+                                      </span>
+                                    )}
+                                    {isManualEntry && (
+                                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-[var(--color-gold)]/15 text-[var(--color-gold)] border border-[var(--color-gold)]/30">
+                                        {isRTL ? 'يدوية' : 'Manual'}
                                       </span>
                                     )}
                                     <span

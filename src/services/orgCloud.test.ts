@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildOrgTxPayloadForCloud, parseWalletDoc } from './orgCloud';
+import {
+  buildOrgTxPayloadForCloud,
+  parseWalletDoc,
+  resolveImportedOrgTxSubmittedBy,
+} from './orgCloud';
 import { Transaction } from '../types';
 
 test('parseWalletDoc derives balance strictly from balanceMinor even if payload.balance is stale', () => {
@@ -78,3 +82,37 @@ test('buildOrgTxPayloadForCloud produces a valid normalized doc id matching both
   assert.equal(payload.currency, 'EGP');
   assert.equal('attachments' in payload, false);
 });
+
+test('resolveImportedOrgTxSubmittedBy forces actor.uid for roles below accountant and preserves original for accountant+', () => {
+  const actor = { uid: 'uid-emp-1', name: 'Ahmed Employee' };
+  const foreignRow = { submittedBy: 'uid-someone-else', submittedByName: 'Other User' };
+
+  // Below accountant (employee, viewer, null, undefined) -> MUST force actor.uid
+  assert.deepEqual(resolveImportedOrgTxSubmittedBy(foreignRow, actor, 'employee'), {
+    submittedBy: 'uid-emp-1',
+    submittedByName: 'Ahmed Employee',
+  });
+  assert.deepEqual(resolveImportedOrgTxSubmittedBy(foreignRow, actor, 'viewer'), {
+    submittedBy: 'uid-emp-1',
+    submittedByName: 'Ahmed Employee',
+  });
+  assert.deepEqual(resolveImportedOrgTxSubmittedBy(foreignRow, actor, null), {
+    submittedBy: 'uid-emp-1',
+    submittedByName: 'Ahmed Employee',
+  });
+
+  // Accountant, admin, owner -> preserves foreign row submittedBy (or defaults to actor if missing)
+  assert.deepEqual(resolveImportedOrgTxSubmittedBy(foreignRow, actor, 'accountant'), {
+    submittedBy: 'uid-someone-else',
+    submittedByName: 'Other User',
+  });
+  assert.deepEqual(resolveImportedOrgTxSubmittedBy(foreignRow, actor, 'admin'), {
+    submittedBy: 'uid-someone-else',
+    submittedByName: 'Other User',
+  });
+  assert.deepEqual(resolveImportedOrgTxSubmittedBy({}, actor, 'owner'), {
+    submittedBy: 'uid-emp-1',
+    submittedByName: 'Ahmed Employee',
+  });
+});
+

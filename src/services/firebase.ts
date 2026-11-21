@@ -127,9 +127,11 @@ import {
   BackupHistorySummary,
   buildCompactBackupHistorySnapshotJson,
   computeBackupHistoryCounts,
-  getBackupIdsToPrune,
+  getAutoBackupIdsToPrune,
+  isManualBackupHistoryEntry,
   MAX_AUTO_CLOUD_BACKUPS,
   reconcileBackupHistorySummary,
+  selectVisibleBackupHistoryEntries,
 } from './backupHistory';
 import {
   buildSafeCloudLastSyncedPatch,
@@ -2609,7 +2611,7 @@ export async function saveCloudBackup(
       const histQuery = query(
         collection(db, 'users', uid, 'backupHistory'),
         orderBy('createdAtMs', 'desc'),
-        limit(30)
+        limit(100)
       );
       const histSnap = await getDocs(histQuery);
       const existingEntries = histSnap.docs.map((d) => {
@@ -2617,9 +2619,13 @@ export async function saveCloudBackup(
         return {
           id: d.id,
           createdAtMs: Number(docData.createdAtMs || 0),
+          source: isManualBackupHistoryEntry({ id: d.id, source: docData.source })
+            ? ('manual' as const)
+            : ('auto' as const),
         };
       });
-      const idsToPrune = getBackupIdsToPrune(existingEntries, MAX_AUTO_CLOUD_BACKUPS);
+      // Prune ONLY automatic backups; manual snapshots are never auto-deleted
+      const idsToPrune = getAutoBackupIdsToPrune(existingEntries, MAX_AUTO_CLOUD_BACKUPS);
       if (idsToPrune.length > 0) {
         const pruneBatch = writeBatch(db);
         for (const staleId of idsToPrune) {
@@ -2675,25 +2681,25 @@ export async function fetchCloudBackupHistory(
       collection(db, 'users', uid, 'backupHistory'),
       forceServer
     );
-    return snap.docs
-      .map((d) => {
-        const data = d.data() as Partial<BackupHistoryRecord>;
-        const rawSummary: BackupHistorySummary = {
-          id: d.id,
-          uid,
-          source: (data.source === 'manual' ? 'manual' : 'auto') as 'manual' | 'auto',
-          createdAtMs: Number(data.createdAtMs || 0),
-          totalTransactions: Number(data.totalTransactions || 0),
-          storedTransactionsCount: Number(data.storedTransactionsCount || 0),
-          walletsCount: Number(data.walletsCount || 0),
-        };
-        return reconcileBackupHistorySummary(
-          rawSummary,
-          typeof data.snapshotJson === 'string' ? data.snapshotJson : undefined
-        );
-      })
-      .sort((a, b) => b.createdAtMs - a.createdAtMs)
-      .slice(0, MAX_AUTO_CLOUD_BACKUPS);
+    const entries = snap.docs.map((d) => {
+      const data = d.data() as Partial<BackupHistoryRecord>;
+      const rawSummary: BackupHistorySummary = {
+        id: d.id,
+        uid,
+        source: isManualBackupHistoryEntry({ id: d.id, source: data.source })
+          ? 'manual'
+          : 'auto',
+        createdAtMs: Number(data.createdAtMs || 0),
+        totalTransactions: Number(data.totalTransactions || 0),
+        storedTransactionsCount: Number(data.storedTransactionsCount || 0),
+        walletsCount: Number(data.walletsCount || 0),
+      };
+      return reconcileBackupHistorySummary(
+        rawSummary,
+        typeof data.snapshotJson === 'string' ? data.snapshotJson : undefined
+      );
+    });
+    return selectVisibleBackupHistoryEntries(entries, MAX_AUTO_CLOUD_BACKUPS);
   } catch (error) {
     console.error('[fetchCloudBackupHistory] Firestore error:', error);
     handleFirestoreError(error, OperationType.LIST, historyPath);

@@ -3,8 +3,12 @@ import assert from 'node:assert/strict';
 import {
   buildCompactBackupHistorySnapshotJson,
   computeBackupHistoryCounts,
+  getAutoBackupIdsToPrune,
+  isManualBackupHistoryEntry,
+  MAX_AUTO_CLOUD_BACKUPS,
   reconcileBackupHistorySummary,
   resolveBackupHistoryDisplayForWorkspace,
+  selectVisibleBackupHistoryEntries,
   BackupHistorySummary,
 } from './backupHistory';
 import { DEFAULT_SETTINGS } from './db';
@@ -284,3 +288,42 @@ test('buildCompactBackupHistorySnapshotJson handles 3,500+ transactions swiftly 
   const parsed = JSON.parse(res.snapshotJson) as { transactions: Transaction[] };
   assert.equal(parsed.transactions.length, res.storedTransactionsCount);
 });
+
+test('getAutoBackupIdsToPrune and selectVisibleBackupHistoryEntries strictly preserve manual backups', () => {
+  assert.equal(isManualBackupHistoryEntry({ id: 'manual_100', source: 'auto' }), true);
+  assert.equal(isManualBackupHistoryEntry({ id: 'custom_100', source: 'manual' }), true);
+  assert.equal(isManualBackupHistoryEntry({ id: 'auto_100', source: 'auto' }), false);
+
+  // 10 auto backups + 4 older manual backups (including one recognized only by manual_ prefix)
+  const entries = [
+    ...Array.from({ length: 10 }, (_, i) => ({
+      id: `auto_${i + 1}`,
+      source: 'auto' as const,
+      createdAtMs: 10_000 + i * 100,
+    })),
+    { id: 'manual_old_1', source: 'manual' as const, createdAtMs: 1_000 },
+    { id: 'manual_old_2', source: 'auto' as const, createdAtMs: 2_000 }, // legacy manual_ prefix
+    { id: 'snap_manual_3', source: 'manual' as const, createdAtMs: 10_950 },
+    { id: 'manual_4', source: 'manual' as const, createdAtMs: 5_000 },
+  ];
+
+  // Pruning must ONLY target the 3 oldest auto backups (auto_1, auto_2, auto_3) and NEVER any manual backup
+  const pruned = getAutoBackupIdsToPrune(entries, MAX_AUTO_CLOUD_BACKUPS);
+  assert.deepEqual(pruned, ['auto_3', 'auto_2', 'auto_1']);
+  assert.equal(
+    pruned.some((id) => id.includes('manual')),
+    false
+  );
+
+  // Visibility selection keeps ALL 4 manual backups + the 7 newest auto backups = 11 total, sorted descending
+  const visible = selectVisibleBackupHistoryEntries(entries, MAX_AUTO_CLOUD_BACKUPS);
+  assert.equal(visible.length, 11);
+  assert.ok(visible.some((e) => e.id === 'manual_old_1'));
+  assert.ok(visible.some((e) => e.id === 'manual_old_2'));
+  assert.ok(visible.some((e) => e.id === 'snap_manual_3'));
+  assert.ok(visible.some((e) => e.id === 'manual_4'));
+  assert.equal(visible.some((e) => e.id === 'auto_1'), false);
+  assert.equal(visible[0].id, 'snap_manual_3');
+  assert.equal(visible[visible.length - 1].id, 'manual_old_1');
+});
+

@@ -185,6 +185,21 @@ test('formatFirestoreErrorForDisplay formats BACKUP_TOO_LARGE and BACKUP_META_TO
 
   const metaTooLargeEn = formatFirestoreErrorForDisplay(new Error('BACKUP_META_TOO_LARGE'), false);
   assert.match(metaTooLargeEn, /metadata exceeds|limit/i);
+
+  const recalcAr = formatFirestoreErrorForDisplay(new Error('BALANCE_RECALC_FAILED: timeout'), true);
+  assert.match(recalcAr, /BALANCE_RECALC_FAILED/);
+  assert.match(recalcAr, /إعادة احتساب الأرصدة/);
+
+  const recalcEn = formatFirestoreErrorForDisplay(new Error('BALANCE_RECALC_FAILED: timeout'), false);
+  assert.match(recalcEn, /BALANCE_RECALC_FAILED/);
+  assert.match(recalcEn, /Recalculate Balances/i);
+
+  const adminGuardAr = formatFirestoreErrorForDisplay(new Error('ONLY_OWNER_CAN_MANAGE_ADMIN'), true);
+  assert.match(adminGuardAr, /مالك المؤسسة/);
+
+  const ownerLeaveEn = formatFirestoreErrorForDisplay(new Error('OWNER_CANNOT_LEAVE_ORG'), false);
+  assert.match(ownerLeaveEn, /owner cannot leave/i);
 });
+
 
 

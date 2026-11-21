@@ -218,11 +218,43 @@ describe('Firestore Security Rules Static Contract (users/{userId} & Admin Isola
     );
     assert.ok(
       membersBlock.includes('memberUid != request.auth.uid'),
-      'org admins cannot delete themselves via direct member delete rule'
+      'org admins cannot delete themselves via admin-remove member delete branch'
     );
     assert.ok(
       membersBlock.includes('isVerifiedUser()') && membersBlock.includes('isOrgOwnerOrAdmin(orgId)') && membersBlock.includes('isOrgWritable(orgId)'),
       'direct member mutations require verified org owner/admin on writable org'
+    );
+
+    // Non-owner self-leave atomic batch invariant in both members and orgRefs
+    assert.ok(
+      membersBlock.includes("memberUid == request.auth.uid") &&
+        membersBlock.includes("existing().role != 'owner'") &&
+        membersBlock.includes("!existsAfter(/databases/$(database)/documents/users/$(memberUid)/orgRefs/$(orgId))"),
+      'non-owner member can self-leave atomically by deleting member + orgRef together'
+    );
+    assert.ok(
+      orgRefsBlock.includes("userId == request.auth.uid") &&
+        orgRefsBlock.includes("existing().role != 'owner'") &&
+        orgRefsBlock.includes("!existsAfter(/databases/$(database)/documents/organizations/$(orgId)/members/$(userId))"),
+      'non-owner orgRef self-delete requires atomic member deletion'
+    );
+
+    // Admin cannot modify or delete another admin unless caller is org owner
+    const adminProtectionExpr =
+      "(existing().role != 'admin' || orgDoc(orgId).data.ownerUid == request.auth.uid)";
+    assert.ok(
+      membersBlock.includes(adminProtectionExpr),
+      'members update/delete rules prevent admin from modifying/deleting another admin'
+    );
+    assert.ok(
+      orgRefsBlock.includes(adminProtectionExpr),
+      'orgRefs update/delete rules prevent admin from modifying/deleting another admin'
+    );
+
+    // backupHistory list limit accommodates 100 entries for separating manual and auto backups
+    assert.ok(
+      rulesSource.includes('request.query.limit <= 100'),
+      'backupHistory list rule allows limit up to 100'
     );
   });
 
@@ -957,6 +989,100 @@ test('Personal cloud backup, chunks, and history allow owner access and block ou
       }).commit()
     );
   });
+
+  test('Member self-leave atomic batch and admin-vs-admin protection are enforced strictly', async () => {
+    const ADMIN2_UID = 'user_admin_2';
+    await seedOrgBase();
+
+    // Seed second admin + orgRefs for all members
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(doc(db, 'organizations', ORG_ID, 'members', ADMIN2_UID), {
+        uid: ADMIN2_UID,
+        email: `${ADMIN2_UID}@raseedi.test`,
+        displayName: 'Second Admin',
+        role: 'admin',
+        status: 'active',
+        joinedAt: Date.now(),
+        updatedAt: serverTimestamp(),
+      });
+
+      const allRoles: Array<[string, string]> = [
+        [OWNER_UID, 'owner'],
+        [ADMIN_UID, 'admin'],
+        [ADMIN2_UID, 'admin'],
+        [ACCOUNTANT_UID, 'accountant'],
+        [EMPLOYEE_UID, 'employee'],
+        [VIEWER_UID, 'viewer'],
+      ];
+      for (const [uid, role] of allRoles) {
+        await setDoc(doc(db, 'users', uid, 'orgRefs', ORG_ID), {
+          orgId: ORG_ID,
+          orgName: 'شركة رصيدي للاختبار',
+          role,
+          status: 'active',
+          currency: 'EGP',
+          joinedAt: Date.now(),
+        });
+      }
+    });
+
+    const ownerDb = authContext(OWNER_UID, true).firestore();
+    const adminDb = authContext(ADMIN_UID, true).firestore();
+    const employeeDb = authContext(EMPLOYEE_UID, true).firestore();
+    const viewerDb = authContext(VIEWER_UID, true).firestore();
+
+    // 1. Admin CANNOT modify or delete another admin (members or orgRefs)
+    await assertFails(
+      updateDoc(doc(adminDb, 'organizations', ORG_ID, 'members', ADMIN2_UID), {
+        role: 'employee',
+        updatedAt: serverTimestamp(),
+      })
+    );
+    await assertFails(
+      updateDoc(doc(adminDb, 'users', ADMIN2_UID, 'orgRefs', ORG_ID), {
+        role: 'employee',
+      })
+    );
+    const adminDeleteAdminBatch = writeBatch(adminDb);
+    adminDeleteAdminBatch.delete(doc(adminDb, 'organizations', ORG_ID, 'members', ADMIN2_UID));
+    adminDeleteAdminBatch.delete(doc(adminDb, 'users', ADMIN2_UID, 'orgRefs', ORG_ID));
+    await assertFails(adminDeleteAdminBatch.commit());
+
+    // 2. Owner CAN modify and remove another admin
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, 'organizations', ORG_ID, 'members', ADMIN2_UID), {
+        status: 'suspended',
+        updatedAt: serverTimestamp(),
+      })
+    );
+    const ownerDeleteAdminBatch = writeBatch(ownerDb);
+    ownerDeleteAdminBatch.delete(doc(ownerDb, 'organizations', ORG_ID, 'members', ADMIN2_UID));
+    ownerDeleteAdminBatch.delete(doc(ownerDb, 'users', ADMIN2_UID, 'orgRefs', ORG_ID));
+    await assertSucceeds(ownerDeleteAdminBatch.commit());
+
+    // 3. Non-owner member CANNOT orphan-delete only members/{uid} without deleting orgRefs/{orgId}
+    await assertFails(deleteDoc(doc(employeeDb, 'organizations', ORG_ID, 'members', EMPLOYEE_UID)));
+    await assertFails(deleteDoc(doc(employeeDb, 'users', EMPLOYEE_UID, 'orgRefs', ORG_ID)));
+
+    // 4. Non-owner members (employee & viewer) CAN leave via atomic batch deleting both docs
+    const employeeLeaveBatch = writeBatch(employeeDb);
+    employeeLeaveBatch.delete(doc(employeeDb, 'organizations', ORG_ID, 'members', EMPLOYEE_UID));
+    employeeLeaveBatch.delete(doc(employeeDb, 'users', EMPLOYEE_UID, 'orgRefs', ORG_ID));
+    await assertSucceeds(employeeLeaveBatch.commit());
+
+    const viewerLeaveBatch = writeBatch(viewerDb);
+    viewerLeaveBatch.delete(doc(viewerDb, 'organizations', ORG_ID, 'members', VIEWER_UID));
+    viewerLeaveBatch.delete(doc(viewerDb, 'users', VIEWER_UID, 'orgRefs', ORG_ID));
+    await assertSucceeds(viewerLeaveBatch.commit());
+
+    // 5. Owner CANNOT self-leave while organization document still exists
+    const ownerSelfLeaveBatch = writeBatch(ownerDb);
+    ownerSelfLeaveBatch.delete(doc(ownerDb, 'organizations', ORG_ID, 'members', OWNER_UID));
+    ownerSelfLeaveBatch.delete(doc(ownerDb, 'users', OWNER_UID, 'orgRefs', ORG_ID));
+    await assertFails(ownerSelfLeaveBatch.commit());
+  });
 });
+
 
 
