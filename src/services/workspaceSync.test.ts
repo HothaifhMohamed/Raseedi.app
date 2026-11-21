@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { Transaction } from '../types';
+import { serverTimestamp, Timestamp } from 'firebase/firestore';
 import {
   buildWorkspaceTransactionRecord,
   canPerformAutomaticCloudWrite,
@@ -16,6 +17,7 @@ import {
   resolveWorkspaceSyncPriority,
   shouldBlockEmptyCloudOverwrite,
   shouldBlockEmptyLocalOverwriteFromCloud,
+  stripUndefinedDeep,
   tagTransactionsWithWorkspace,
   tagWalletsWithWorkspace,
 } from './workspaceSync';
@@ -362,5 +364,35 @@ describe('workspaceSync unified path and workspace isolation', () => {
       isFirestoreServerFetchOfflineError({ code: 'permission-denied', message: 'Missing or insufficient permissions.' }),
       false
     );
+  });
+
+  it('stripUndefinedDeep preserves Firestore serverTimestamp() FieldValue, Timestamp, and Date instances intact', () => {
+    const createdAt = serverTimestamp();
+    const updatedAt = serverTimestamp();
+    const ts = Timestamp.fromMillis(1763714900000);
+    const dt = new Date('2026-11-21T00:00:00.000Z');
+
+    const cleaned = stripUndefinedDeep({
+      id: 'org-test-1',
+      name: 'مؤسسة رصيدي',
+      taxNumber: undefined,
+      nested: { keep: true, drop: undefined, updatedAt },
+      list: [{ a: 1, b: undefined }],
+      createdAt,
+      updatedAt,
+      ts,
+      dt,
+    });
+
+    assert.equal('taxNumber' in cleaned, false);
+    assert.equal('drop' in cleaned.nested, false);
+    assert.equal('b' in cleaned.list[0], false);
+    // Exact instance & prototype preservation (never flattened to plain { _methodName: 'serverTimestamp' })
+    assert.strictEqual(cleaned.createdAt, createdAt);
+    assert.strictEqual(cleaned.updatedAt, updatedAt);
+    assert.strictEqual(cleaned.nested.updatedAt, updatedAt);
+    assert.notEqual(Object.getPrototypeOf(cleaned.createdAt), Object.prototype);
+    assert.strictEqual(cleaned.ts, ts);
+    assert.strictEqual(cleaned.dt, dt);
   });
 });

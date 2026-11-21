@@ -70,6 +70,7 @@ import {
   FIRESTORE_FAST_BATCH_SIZE,
   normalizeValidFirestoreId,
   runResilientBatchCommits,
+  stripUndefinedDeep,
 } from './workspaceSync';
 
 export interface OrgActorInfo {
@@ -94,21 +95,6 @@ export interface ActiveOrgCallbacks {
   onError?: (scope: string, error: Error) => void;
 }
 
-function stripUndefinedDeep<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) => stripUndefinedDeep(item)) as unknown as T;
-  }
-  if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      if (v !== undefined) {
-        out[k] = stripUndefinedDeep(v);
-      }
-    }
-    return out as T;
-  }
-  return value;
-}
 
 function toTimestampMs(val: unknown, fallback = Date.now()): number {
   if (typeof val === 'number' && Number.isFinite(val)) return val;
@@ -332,7 +318,11 @@ function buildOrgCategoryPayloadForCloud(orgId: string, cat: Category): Record<s
 
 function buildOrgBudgetPayloadForCloud(orgId: string, budget: Budget, orgCurrency: string): Record<string, unknown> {
   const safeId = normalizeValidFirestoreId(budget.id, 'bgt');
-  const currency = (orgCurrency || 'EGP').trim().toUpperCase().slice(0, 8) || 'EGP';
+  const budgetCurrencyRaw =
+    typeof (budget as { currency?: unknown }).currency === 'string'
+      ? String((budget as { currency?: string }).currency)
+      : '';
+  const currency = (budgetCurrencyRaw || orgCurrency || 'EGP').trim().toUpperCase().slice(0, 8) || 'EGP';
   const rawAmount = Number(budget.amount);
   const safeAmount = Number.isFinite(rawAmount) ? Math.min(1_000_000_000, Math.abs(rawAmount)) : 0;
   const amountMinor = Math.max(0, Math.round(toMinor(safeAmount, currency)));
@@ -1847,11 +1837,13 @@ export async function createCloudOrganizationDirect(
     uPlanTier === 'business_pro' ||
     uPlanTier === 'business' ||
     uProPlan === 'business_monthly' ||
-    uProPlan === 'business_yearly';
+    uProPlan === 'business_yearly' ||
+    uProPlan === 'trial';
   const uExp =
     readTimestampOrNumberMs(uData.proExpiresAt) ??
     readTimestampOrNumberMs(uData.expiresAt);
-  const uNotExpired = uExp === null || now <= uExp + 7 * 86_400_000;
+  // Keep a small 60s safety margin so client/server clock skew never fails request.time <= uExp + 7d
+  const uNotExpired = uExp === null || now + 60_000 <= uExp + 7 * 86_400_000;
 
   let planTier: PlanTier = 'free';
   let billingCycle: BillingCycle = 'free';
@@ -1864,6 +1856,8 @@ export async function createCloudOrganizationDirect(
       billingCycle = rawCycle as BillingCycle;
     } else if (uProPlan === 'business_yearly') {
       billingCycle = 'yearly';
+    } else if (uProPlan === 'trial') {
+      billingCycle = 'trial';
     } else if (uProPlan === 'lifetime') {
       billingCycle = 'lifetime';
     } else {
@@ -1874,18 +1868,19 @@ export async function createCloudOrganizationDirect(
 
   const rawUsername = typeof uData.username === 'string' ? uData.username.trim().toLowerCase() : '';
   const validUsername = /^[a-z0-9_]{3,30}$/.test(rawUsername) ? rawUsername : undefined;
-  const cleanEmail = (currentUser.email || String(uData.email || '') || `${uid}@firebase.local`)
-    .trim()
+  const cleanEmail = (
+    (currentUser.email || '').trim() ||
+    String(uData.email || '').trim() ||
+    `${uid}@firebase.local`
+  )
     .toLowerCase()
     .slice(0, 254);
   const cleanDisplayName = (
-    currentUser.displayName ||
-    String(uData.displayName || '') ||
-    cleanEmail.split('@')[0] ||
+    (currentUser.displayName || '').trim() ||
+    String(uData.displayName || '').trim() ||
+    cleanEmail.split('@')[0]?.trim() ||
     'المالك'
-  )
-    .trim()
-    .slice(0, 120);
+  ).slice(0, 120);
 
   // Avoid spurious permission-denied reads on non-existent organizations/{id}:
   // Check the owner's own users/{uid}/orgRefs/{preferredOrgId} first.
@@ -1988,13 +1983,34 @@ export async function createCloudOrganizationDirect(
   bootstrapBatch.set(orgDocRef, orgPayload);
   bootstrapBatch.set(memberDocRef, ownerMemberPayload);
   bootstrapBatch.set(userOrgRefDoc, orgRefPayload);
-  await bootstrapBatch.commit();
+  try {
+    await bootstrapBatch.commit();
+  } catch (err) {
+    console.warn('[createCloudOrganizationDirect] bootstrapBatch.commit failed:', {
+      orgId,
+      uid,
+      planTier,
+      billingCycle,
+      hasExpiresAt: expiresAt !== null,
+      error: err,
+    });
+    throw err;
+  }
 
   const actor: OrgActorInfo = { uid, name: cleanDisplayName };
 
   // Seed subcollections (either migrating an existing local workspace or seeding clean starter data)
   if (input.seedWorkspace) {
-    await migrateLegacyOrgToCloud(orgId, input.seedWorkspace, actor, input.onMigrationProgress);
+    try {
+      await migrateLegacyOrgToCloud(orgId, input.seedWorkspace, actor, input.onMigrationProgress);
+    } catch (err) {
+      console.warn('[createCloudOrganizationDirect] migrateLegacyOrgToCloud failed:', {
+        orgId,
+        uid,
+        error: err,
+      });
+      throw err;
+    }
   } else {
     const starterWorkspace: OrgWorkspaceData = {
       organization: {

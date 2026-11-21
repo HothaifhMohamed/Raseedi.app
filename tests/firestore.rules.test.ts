@@ -23,6 +23,7 @@ import {
   updateDoc,
   writeBatch,
 } from 'firebase/firestore';
+import { stripUndefinedDeep } from '../src/services/workspaceSync';
 
 let testEnv: RulesTestEnvironment;
 
@@ -248,18 +249,38 @@ describe('Firestore Security Rules Static Contract (users/{userId} & Admin Isola
     assert.ok(orgBlock.includes('existsAfter(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid))'));
     assert.ok(orgBlock.includes('existsAfter(/databases/$(database)/documents/users/$(request.auth.uid)/orgRefs/$(orgId))'));
 
-    // Owner bootstrap branch MUST precede isOrgOwnerOrAdmin(orgId) so missing-org get() is short-circuited
+    // Owner bootstrap branch MUST precede isOrgOwnerOrAdmin(orgId) and guard getAfter with existsAfter
     const memberOwnerIdx = membersBlock.indexOf('isValidOrgOwnerMemberCreate(incoming(), memberUid)');
     const memberAdminIdx = membersBlock.indexOf('isValidOrgMemberCreate(incoming(), memberUid)');
     assert.ok(memberOwnerIdx > 0 && memberAdminIdx > memberOwnerIdx, 'owner bootstrap branch must precede admin member create branch in members');
+    assert.ok(
+      membersBlock.includes('existsAfter(/databases/$(database)/documents/organizations/$(orgId))'),
+      'members owner bootstrap guards getAfter with existsAfter'
+    );
 
     const refOwnerIdx = orgRefsBlock.indexOf('isValidOrgOwnerRefCreate(incoming(), orgId)');
     const refAdminIdx = orgRefsBlock.indexOf('isValidOrgRefCreate(incoming(), orgId)');
     assert.ok(refOwnerIdx > 0 && refAdminIdx > refOwnerIdx, 'owner bootstrap branch must precede admin orgRef create branch in orgRefs');
+    assert.ok(
+      orgRefsBlock.includes('existsAfter(/databases/$(database)/documents/organizations/$(orgId))'),
+      'orgRefs owner bootstrap guards getAfter with existsAfter'
+    );
 
     // RBAC & entitlement helpers guard get() with exists()
     assert.ok(ownerAdminFnMatch[0].includes('exists(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid))'));
     assert.ok(entitlementMatch[0].includes('exists(/databases/$(database)/documents/users/$(request.auth.uid))'));
+
+    // Payload builder regression guard: stripUndefinedDeep MUST preserve serverTimestamp() FieldValue sentinels
+    const st = serverTimestamp();
+    const cleanedOrg = stripUndefinedDeep({
+      id: 'org-check-1',
+      taxNumber: undefined,
+      createdAt: st,
+      updatedAt: st,
+    });
+    assert.strictEqual(cleanedOrg.createdAt, st, 'stripUndefinedDeep must preserve createdAt FieldValue sentinel');
+    assert.strictEqual(cleanedOrg.updatedAt, st, 'stripUndefinedDeep must preserve updatedAt FieldValue sentinel');
+    assert.equal('taxNumber' in cleanedOrg, false, 'stripUndefinedDeep must drop undefined optional keys');
   });
 });
 
@@ -769,37 +790,54 @@ test('Personal cloud backup, chunks, and history allow owner access and block ou
     const buildBootstrapBatch = (
       dbRef: ReturnType<ReturnType<typeof authContext>['firestore']>,
       orgId: string,
-      overrides?: { planTier?: string; billingCycle?: string; expiresAt?: number | null; ownerUid?: string }
+      overrides?: {
+        uid?: string;
+        email?: string;
+        planTier?: string;
+        billingCycle?: string;
+        expiresAt?: number | null;
+        ownerUid?: string;
+      }
     ) => {
+      const targetUid = overrides?.uid ?? OWNER_UID;
+      const targetEmail = overrides?.email ?? `${targetUid}@raseedi.test`;
       const batch = writeBatch(dbRef);
-      batch.set(doc(dbRef, 'organizations', orgId), {
-        id: orgId,
-        name: 'مؤسسة السحابة المباشرة',
-        currency: 'EGP',
-        industry: 'general',
-        vatRate: 14,
-        approvalThreshold: 2000,
-        ownerUid: overrides?.ownerUid ?? OWNER_UID,
-        planTier: overrides?.planTier ?? 'business_pro',
-        billingCycle: overrides?.billingCycle ?? 'yearly',
-        expiresAt: overrides?.expiresAt !== undefined ? overrides.expiresAt : proExpiresAt,
-        seatLimit: 5,
-        extraSeats: 0,
-        aiScansUsed: 0,
-        aiScansMonth: '2026-11',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      batch.set(doc(dbRef, 'organizations', orgId, 'members', OWNER_UID), {
-        uid: OWNER_UID,
-        email: `${OWNER_UID}@raseedi.test`,
-        displayName: 'Owner Name',
-        role: 'owner',
-        status: 'active',
-        joinedAt: Date.now(),
-        updatedAt: serverTimestamp(),
-      });
-      batch.set(doc(dbRef, 'users', OWNER_UID, 'orgRefs', orgId), {
+      batch.set(
+        doc(dbRef, 'organizations', orgId),
+        stripUndefinedDeep({
+          id: orgId,
+          name: 'مؤسسة السحابة المباشرة',
+          currency: 'EGP',
+          industry: 'general',
+          vatRate: 14,
+          taxNumber: undefined,
+          approvalThreshold: 2000,
+          ownerUid: overrides?.ownerUid ?? targetUid,
+          planTier: overrides?.planTier ?? 'business_pro',
+          billingCycle: overrides?.billingCycle ?? 'yearly',
+          expiresAt: overrides?.expiresAt !== undefined ? overrides.expiresAt : proExpiresAt,
+          seatLimit: 5,
+          extraSeats: 0,
+          aiScansUsed: 0,
+          aiScansMonth: '2026-11',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        })
+      );
+      batch.set(
+        doc(dbRef, 'organizations', orgId, 'members', targetUid),
+        stripUndefinedDeep({
+          uid: targetUid,
+          email: targetEmail,
+          displayName: 'Owner Name',
+          username: undefined,
+          role: 'owner',
+          status: 'active',
+          joinedAt: Date.now(),
+          updatedAt: serverTimestamp(),
+        })
+      );
+      batch.set(doc(dbRef, 'users', targetUid, 'orgRefs', orgId), {
         orgId,
         orgName: 'مؤسسة السحابة المباشرة',
         role: 'owner',
@@ -810,31 +848,85 @@ test('Personal cloud backup, chunks, and history allow owner access and block ou
       return batch;
     };
 
-    // Valid atomic bootstrap succeeds for verified Business PRO user
+    // Valid atomic bootstrap succeeds for verified Business PRO user (with stripUndefinedDeep + serverTimestamp)
     await assertSucceeds(buildBootstrapBatch(ownerDb, newOrgId).commit());
 
-    // Immediately after bootstrap, owner can migrate wallets & transactions into the cloud org
+    // Valid atomic bootstrap ALSO succeeds for verified Free Google user (e.g., zoomacc672@gmail.com)
+    const freeVerifiedDb = testEnv
+      .authenticatedContext('user_free_google', {
+        email: 'zoomacc672@gmail.com',
+        email_verified: true,
+      })
+      .firestore();
+    const freeOrgId = 'org-free-upgrade-01';
     await assertSucceeds(
-      setDoc(doc(ownerDb, 'organizations', newOrgId, 'wallets', 'org-w-1'), {
+      buildBootstrapBatch(freeVerifiedDb, freeOrgId, {
+        uid: 'user_free_google',
+        email: 'zoomacc672@gmail.com',
+        planTier: 'free',
+        billingCycle: 'free',
+        expiresAt: null,
+      }).commit()
+    );
+
+    // Immediately after bootstrap, owner can migrate wallets, costCenters, parties, transactions, & auditLogs
+    await assertSucceeds(
+      setDoc(doc(freeVerifiedDb, 'organizations', freeOrgId, 'wallets', 'org-w-1'), {
         id: 'org-w-1',
-        orgId: newOrgId,
+        orgId: freeOrgId,
         balanceMinor: 50000,
         payload: { id: 'org-w-1', name: 'الخزينة الرئيسية', currency: 'EGP', balance: 500 },
         updatedAt: serverTimestamp(),
       })
     );
     await assertSucceeds(
-      setDoc(doc(ownerDb, 'organizations', newOrgId, 'transactions', 'org-tx-1'), {
-        id: 'org-tx-1',
-        orgId: newOrgId,
-        date: '2026-11-20',
-        amountMinor: 12500,
-        submittedBy: OWNER_UID,
-        approvedBy: null,
-        approvalStatus: 'approved',
-        deletedAt: null,
-        payload: { id: 'org-tx-1', amount: 125, currency: 'EGP', date: '2026-11-20' },
-        updatedAt: serverTimestamp(),
+      setDoc(
+        doc(freeVerifiedDb, 'organizations', freeOrgId, 'costCenters', 'cc-ops-1'),
+        stripUndefinedDeep({
+          id: 'cc-ops-1',
+          orgId: freeOrgId,
+          code: 'OPS-01',
+          name: 'التشغيل والإدارة',
+          nameAr: 'التشغيل والإدارة',
+          nameEn: 'Operations & Admin',
+          type: 'department',
+          budgetAllocated: 50000,
+          budgetAllocatedMinor: 5000000,
+          isActive: true,
+          createdAt: Date.now(),
+          updatedAt: serverTimestamp(),
+        })
+      )
+    );
+    await assertSucceeds(
+      setDoc(
+        doc(freeVerifiedDb, 'organizations', freeOrgId, 'transactions', 'org-tx-1'),
+        {
+          id: 'org-tx-1',
+          orgId: freeOrgId,
+          date: '2026-11-20',
+          amountMinor: 12500,
+          submittedBy: 'user_free_google',
+          approvedBy: null,
+          approvalStatus: 'approved',
+          deletedAt: null,
+          payload: { id: 'org-tx-1', amount: 125, currency: 'EGP', date: '2026-11-20' },
+          updatedAt: serverTimestamp(),
+        }
+      )
+    );
+    await assertSucceeds(
+      setDoc(doc(freeVerifiedDb, 'organizations', freeOrgId, 'auditLogs', 'log-upgrade-1'), {
+        id: 'log-upgrade-1',
+        orgId: freeOrgId,
+        action: 'create',
+        entityType: 'organization',
+        entityId: freeOrgId,
+        actorUid: 'user_free_google',
+        actorName: 'Owner Name',
+        summary: 'ترحيل بيانات المؤسسة المحلية إلى السحابة',
+        timestamp: Date.now(),
+        createdAt: serverTimestamp(),
       })
     );
 
@@ -856,41 +948,14 @@ test('Personal cloud backup, chunks, and history allow owner access and block ou
 
     // Free outsider cannot escalate to business_pro when creating an org
     const freeOutsiderDb = authContext(OUTSIDER_UID, true).firestore();
-    const cheatBatch = writeBatch(freeOutsiderDb);
-    cheatBatch.set(doc(freeOutsiderDb, 'organizations', 'org-free-cheat'), {
-      id: 'org-free-cheat',
-      name: 'Cheat Org',
-      currency: 'EGP',
-      industry: 'general',
-      vatRate: 14,
-      approvalThreshold: 2000,
-      ownerUid: OUTSIDER_UID,
-      planTier: 'business_pro',
-      billingCycle: 'yearly',
-      expiresAt: proExpiresAt,
-      seatLimit: 5,
-      extraSeats: 0,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-    cheatBatch.set(doc(freeOutsiderDb, 'organizations', 'org-free-cheat', 'members', OUTSIDER_UID), {
-      uid: OUTSIDER_UID,
-      email: `${OUTSIDER_UID}@raseedi.test`,
-      displayName: 'Outsider',
-      role: 'owner',
-      status: 'active',
-      joinedAt: Date.now(),
-      updatedAt: serverTimestamp(),
-    });
-    cheatBatch.set(doc(freeOutsiderDb, 'users', OUTSIDER_UID, 'orgRefs', 'org-free-cheat'), {
-      orgId: 'org-free-cheat',
-      orgName: 'Cheat Org',
-      role: 'owner',
-      status: 'active',
-      currency: 'EGP',
-      joinedAt: Date.now(),
-    });
-    await assertFails(cheatBatch.commit());
+    await assertFails(
+      buildBootstrapBatch(freeOutsiderDb, 'org-free-cheat', {
+        uid: OUTSIDER_UID,
+        planTier: 'business_pro',
+        billingCycle: 'yearly',
+        expiresAt: proExpiresAt,
+      }).commit()
+    );
   });
 });
 

@@ -371,7 +371,7 @@ service cloud.firestore {
       let uActive = (uData.get('isPro', false) == true || uData.get('proActive', false) == true)
         && (
           uData.get('planTier', 'free') in ['business_pro', 'business']
-          || uData.get('proPlan', 'free') in ['business_monthly', 'business_yearly']
+          || uData.get('proPlan', 'free') in ['business_monthly', 'business_yearly', 'trial']
         );
       let uExp = ('proExpiresAt' in uData && uData.proExpiresAt is number && uData.proExpiresAt > 0)
         ? uData.proExpiresAt
@@ -965,6 +965,7 @@ service cloud.firestore {
               userId == request.auth.uid
               && isValidOrgOwnerRefCreate(incoming(), orgId)
               && !exists(/databases/$(database)/documents/organizations/$(orgId))
+              && existsAfter(/databases/$(database)/documents/organizations/$(orgId))
               && getAfter(/databases/$(database)/documents/organizations/$(orgId)).data.ownerUid == request.auth.uid
             )
             ||
@@ -1220,6 +1221,7 @@ service cloud.firestore {
               memberUid == request.auth.uid
               && isValidOrgOwnerMemberCreate(incoming(), memberUid)
               && !exists(/databases/$(database)/documents/organizations/$(orgId))
+              && existsAfter(/databases/$(database)/documents/organizations/$(orgId))
               && getAfter(/databases/$(database)/documents/organizations/$(orgId)).data.ownerUid == request.auth.uid
             )
             ||
