@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Eye,
   EyeOff,
@@ -20,6 +20,9 @@ import {
   ClipboardCheck,
   Wallet as WalletIcon,
   Plus,
+  LayoutGrid,
+  PieChart,
+  PiggyBank,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import {
@@ -36,10 +39,24 @@ import {
   computeMonthlyCashflowProgress,
   getRecentTransactions,
 } from '../../services/dashboardStats';
+import { calculateSavingsAndCashflow } from '../../services/wealthAnalytics';
+import {
+  evaluateGetStartedCards,
+  GetStartedTaskId,
+  loadDismissedGetStartedSync,
+  loadHomeSectionOrderSync,
+  saveDismissedGetStartedSync,
+  saveHomeSectionOrderSync,
+} from '../../services/homeSections';
+import { formatDisplayNumber } from '../../services/calculations';
+import { HomeSectionId } from '../../types';
 import { MoneyText } from '../common/MoneyText';
 import { HairlineEmptyState } from '../common/HairlineVisuals';
 import { DashboardSkeleton } from '../common/SkeletonLoaders';
 import { indexById } from '../../services/lookupCache';
+import { NetWorthCard } from './NetWorthCard';
+import { GetStartedCards } from './GetStartedCards';
+import { ArrangeSectionsModal } from './ArrangeSectionsModal';
 
 interface HomeDashboardProps {
   onOpenFullLedger: () => void;
@@ -68,18 +85,52 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
     categories,
     debts,
     budgets,
+    goals,
     settings,
     updateSettings,
+    activeWorkspace,
     setActiveNav,
     setIsBackupOpen,
     setEditingTransaction,
     setIsAddModalOpen,
+    openTransactionWithPreset,
     t,
     isRTL,
   } = useApp();
 
+  const workspaceKey =
+    isOrgWorkspace && activeOrganization
+      ? activeOrganization.id
+      : activeWorkspace || 'personal';
+
   const [hideBalance, setHideBalance] = useState(false);
   const [dismissedAlerts, setDismissedAlerts] = useState(false);
+  const [isArrangeOpen, setIsArrangeOpen] = useState(false);
+  const [sectionOrder, setSectionOrder] = useState<HomeSectionId[]>(() =>
+    loadHomeSectionOrderSync(
+      workspaceKey,
+      settings.homeSectionOrders?.[workspaceKey],
+      isOrgWorkspace
+    )
+  );
+  const [dismissedGetStartedIds, setDismissedGetStartedIds] = useState<string[]>(() =>
+    loadDismissedGetStartedSync(settings.dismissedGetStartedIds)
+  );
+
+  // Sync section order cleanly whenever user switches workspaces or cloud settings update
+  useEffect(() => {
+    setSectionOrder(
+      loadHomeSectionOrderSync(
+        workspaceKey,
+        settings.homeSectionOrders?.[workspaceKey],
+        isOrgWorkspace
+      )
+    );
+  }, [workspaceKey, isOrgWorkspace, settings.homeSectionOrders]);
+
+  useEffect(() => {
+    setDismissedGetStartedIds(loadDismissedGetStartedSync(settings.dismissedGetStartedIds));
+  }, [settings.dismissedGetStartedIds]);
 
   const ArrowEnd = isRTL ? ChevronLeft : ChevronRight;
 
@@ -196,99 +247,70 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
   const categoriesById = useMemo(() => indexById(categories), [categories]);
   const walletsById = useMemo(() => indexById(wallets), [wallets]);
 
+  const savingsAndCashflow = useMemo(
+    () =>
+      calculateSavingsAndCashflow(
+        currentMonthCashflow.income,
+        currentMonthCashflow.expense,
+        settings.mainCurrency
+      ),
+    [currentMonthCashflow.income, currentMonthCashflow.expense, settings.mainCurrency]
+  );
+
+  const getStartedCards = useMemo(() => {
+    if (isOrgWorkspace) return [];
+    return evaluateGetStartedCards({
+      wallets,
+      transactions,
+      budgets,
+      goals,
+      dismissedIds: dismissedGetStartedIds,
+    });
+  }, [isOrgWorkspace, wallets, transactions, budgets, goals, dismissedGetStartedIds]);
+
+  const handleSaveSectionOrder = (nextOrder: HomeSectionId[]) => {
+    setSectionOrder(nextOrder);
+    saveHomeSectionOrderSync(workspaceKey, nextOrder);
+    updateSettings({
+      homeSectionOrders: {
+        ...(settings.homeSectionOrders || {}),
+        [workspaceKey]: nextOrder,
+      },
+    });
+  };
+
+  const handleDismissGetStarted = (id: GetStartedTaskId) => {
+    const next = Array.from(new Set([...dismissedGetStartedIds, id]));
+    setDismissedGetStartedIds(next);
+    saveDismissedGetStartedSync(next);
+    updateSettings({ dismissedGetStartedIds: next });
+  };
+
+  const handleGetStartedAction = (id: GetStartedTaskId) => {
+    if (id === 'add_wallet_or_asset') {
+      setActiveNav('wallets');
+    } else if (id === 'record_first_income') {
+      setEditingTransaction(null);
+      openTransactionWithPreset({ type: 'income' });
+    } else if (id === 'set_monthly_budget') {
+      setActiveNav('budget');
+    } else if (id === 'add_savings_goal') {
+      setActiveNav('more');
+    }
+  };
+
   const canWriteTx = !isOrgWorkspace || (!isOrgReadOnly && canOrgWrite);
 
   if (isOrgWorkspace && isOrgLoading && transactions.length === 0 && wallets.length === 0) {
     return <DashboardSkeleton isRTL={isRTL} />;
   }
 
-  return (
-    <div className="flex-1 min-h-0 overflow-y-auto px-4 pt-3 pb-28 space-y-4" dir={isRTL ? 'rtl' : 'ltr'} data-testid="home-smart-dashboard">
-      {/* Contextual Backup Nudge */}
-      {showBackupNudge && (
-        <div className="p-3 rounded-2xl bg-[var(--color-gold-soft)] border border-[var(--color-gold)]/35 flex items-center justify-between gap-2 text-xs transition-all duration-300">
-          <div className="flex items-center gap-2 min-w-0">
-            <Save className="w-4 h-4 text-[var(--color-gold-text)] shrink-0" />
-            <span className="text-[var(--color-ink)] truncate font-medium">
-              {lastBackupActivityAt
-                ? isRTL
-                  ? 'مر أكثر من 14 يوماً على آخر نسخة احتياطية'
-                  : 'Over 14 days since your last backup'
-                : isRTL
-                ? 'احفظ نسخة احتياطية لبياناتك بأمان'
-                : 'Back up your financial records safely'}
-            </span>
-          </div>
-          <div className="flex items-center gap-1 shrink-0">
-            <button
-              type="button"
-              onClick={() => setIsBackupOpen(true)}
-              className="px-3 py-1.5 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] font-semibold text-[11px] min-h-[36px] active:scale-95 transition-all duration-300"
-            >
-              {isRTL ? 'نسخ الآن' : 'Backup'}
-            </button>
-            <button
-              type="button"
-              onClick={() => updateSettings({ backupReminderDismissedAt: Date.now() })}
-              className="p-1.5 text-[var(--color-muted)] hover:text-[var(--color-ink)] rounded-xl min-h-[36px] min-w-[36px] flex items-center justify-center"
-              aria-label={isRTL ? 'إخفاء التذكير' : 'Dismiss reminder'}
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Enterprise Workspace Quick Hub Shortcut */}
-      {isOrgWorkspace && activeOrganization && (
-        <div className="space-y-2">
-          <button
-            type="button"
-            onClick={() => openOrgHub(pendingApprovalsCount > 0 ? 'approvals' : 'reports')}
-            data-testid="home-open-org-hub-btn"
-            className="w-full p-3.5 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-accent)]/35 flex items-center justify-between gap-2 text-xs hover:border-[var(--color-accent)] transition-all duration-300 min-h-[48px]"
-          >
-            <div className="flex items-center gap-2.5 min-w-0">
-              <Building2 className="w-4 h-4 text-[var(--color-accent)] shrink-0" />
-              <span className="font-semibold text-[var(--color-ink)] truncate">
-                {t('orgHubTitle')} — {activeOrganization.name}
-              </span>
-            </div>
-            <span className="text-[11px] font-bold text-[var(--color-accent)] shrink-0 flex items-center gap-0.5">
-              <span>{isRTL ? 'فتح المركز' : 'Open Hub'}</span>
-              <ArrowEnd className="w-3.5 h-3.5" />
-            </span>
-          </button>
-
-          {pendingApprovalsCount > 0 && (
-            <button
-              type="button"
-              onClick={() => openOrgHub('approvals')}
-              className="w-full p-3.5 rounded-2xl bg-[var(--color-gold-soft)] border border-[var(--color-gold)]/35 flex items-center justify-between gap-2 text-xs hover:opacity-95 transition-all duration-300 min-h-[48px]"
-            >
-              <div className="flex items-center gap-2.5 min-w-0">
-                <ClipboardCheck className="w-4 h-4 text-[var(--color-gold-text)] shrink-0" />
-                <span className="font-semibold text-[var(--color-ink)] truncate">
-                  {isRTL
-                    ? pendingApprovalsCount === 1
-                      ? 'معاملة واحدة بانتظار المراجعة والاعتماد'
-                      : `${pendingApprovalsCount} معاملات بانتظار المراجعة والاعتماد`
-                    : pendingApprovalsCount === 1
-                    ? '1 transaction awaiting approval'
-                    : `${pendingApprovalsCount} transactions awaiting approval`}
-                </span>
-              </div>
-              <span className="text-[11px] font-bold text-[var(--color-gold-text)] shrink-0">
-                {isRTL ? 'مراجعة' : 'Review'}
-              </span>
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* TOP SECTION: Major Financial Summary Hero Card */}
-      {settings.showCurrentBalance && (
+  const renderSection = (sectionId: HomeSectionId): React.ReactNode => {
+    if (sectionId === 'hero') {
+      if (!settings.showCurrentBalance) return null;
+      return (
         <section
+          key="hero"
           data-testid="smart-dashboard-hero"
           className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-[var(--color-hero-from)] via-[var(--color-hero-via)] to-[var(--color-hero-to)] text-[#FFFDF8] p-5 sm:p-6 shadow-[0_16px_36px_-12px_rgba(10,75,71,0.42)] border border-[var(--color-gold)]/30 transition-all duration-300"
         >
@@ -437,98 +459,312 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
             </div>
           </div>
         </section>
-      )}
+      );
+    }
 
-      {/* MIDDLE COMPACT INSIGHTS & QUICK TOOLS */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {/* Daily Safe-to-Spend Compact Card */}
-        <button
-          type="button"
-          onClick={() => setActiveNav('budget')}
-          className={`w-full p-4 rounded-2xl border text-start flex items-center justify-between gap-3 transition-all duration-300 hover:-translate-y-0.5 active:scale-[0.99] min-h-[68px] ${
-            safeToSpend.hasBudget && safeToSpend.isNegative
-              ? 'bg-[var(--color-expense)]/10 border-[var(--color-expense)]/30'
-              : 'bg-[var(--color-surface)] border-[var(--color-line)] hover:border-[var(--color-accent)]/45'
-          }`}
+    if (sectionId === 'quick_actions') {
+      return (
+        <section
+          key="quick_actions"
+          data-testid="home-quick-actions"
+          className="grid grid-cols-2 sm:grid-cols-4 gap-2"
         >
-          <div className="flex items-center gap-3 min-w-0">
-            <div
-              className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
-                safeToSpend.hasBudget && safeToSpend.isNegative
-                  ? 'bg-[var(--color-expense)]/15 text-[var(--color-expense)]'
-                  : 'bg-[var(--color-accent)]/12 text-[var(--color-accent)]'
-              }`}
+          {canWriteTx && (
+            <button
+              type="button"
+              data-testid="quick-action-add-tx"
+              onClick={() => {
+                setEditingTransaction(null);
+                openTransactionWithPreset(undefined);
+              }}
+              className="min-h-[48px] px-3 py-2.5 rounded-2xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs hover:opacity-95 active:scale-[0.98] transition-all"
             >
-              <CalendarClock className="w-5 h-5" />
-            </div>
+              <Plus className="w-4 h-4 shrink-0" />
+              <span className="truncate">{isRTL ? 'إضافة عملية' : 'Add Entry'}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setActiveNav('wallets')}
+            className="min-h-[48px] px-3 py-2.5 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)]/50 text-xs font-bold text-[var(--color-ink)] flex items-center justify-center gap-1.5 transition-all"
+          >
+            <WalletIcon className="w-4 h-4 text-[var(--color-accent)] shrink-0" />
+            <span className="truncate">{isRTL ? 'المحافظ والأصول' : 'Wallets & Assets'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveNav('budget')}
+            className="min-h-[48px] px-3 py-2.5 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-gold)]/60 text-xs font-bold text-[var(--color-ink)] flex items-center justify-center gap-1.5 transition-all"
+          >
+            <PieChart className="w-4 h-4 text-[var(--color-gold-text)] shrink-0" />
+            <span className="truncate">{isRTL ? 'الميزانية والفواتير' : 'Budgets & Bills'}</span>
+          </button>
+          <button
+            type="button"
+            data-testid="open-arrange-sections-btn"
+            onClick={() => setIsArrangeOpen(true)}
+            className="min-h-[48px] px-3 py-2.5 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)]/50 text-xs font-bold text-[var(--color-ink)] flex items-center justify-center gap-1.5 transition-all"
+          >
+            <LayoutGrid className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
+            <span className="truncate">{isRTL ? 'ترتيب الأقسام' : 'Arrange Home'}</span>
+          </button>
+        </section>
+      );
+    }
+
+    if (sectionId === 'get_started') {
+      if (isOrgWorkspace || getStartedCards.length === 0) return null;
+      return (
+        <GetStartedCards
+          key="get_started"
+          cards={getStartedCards}
+          isRTL={isRTL}
+          onDismiss={handleDismissGetStarted}
+          onAction={handleGetStartedAction}
+        />
+      );
+    }
+
+    if (sectionId === 'net_worth') {
+      if (isOrgWorkspace) return null;
+      return (
+        <NetWorthCard
+          key="net_worth"
+          onOpenWallets={() => setActiveNav('wallets')}
+          onOpenDebts={() => setActiveNav('more')}
+        />
+      );
+    }
+
+    if (sectionId === 'cashflow_metrics') {
+      const isPos = savingsAndCashflow.cashflowStatus === 'positive';
+      const isNeg = savingsAndCashflow.cashflowStatus === 'negative';
+      const statusLabel = isPos
+        ? isRTL
+          ? 'تدفق إيجابي'
+          : 'Positive'
+        : isNeg
+        ? isRTL
+          ? 'تدفق سلبي'
+          : 'Negative'
+        : isRTL
+        ? 'متوازن'
+        : 'Balanced';
+
+      return (
+        <section
+          key="cashflow_metrics"
+          data-testid="cashflow-savings-section"
+          className={`grid gap-3 ${isOrgWorkspace ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2'}`}
+        >
+          {/* Net Cashflow Card (Shared — Prominent in Org & Personal) */}
+          <div
+            data-testid="net-cashflow-card"
+            className="p-4 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-line)] flex items-center justify-between gap-3"
+          >
             <div className="min-w-0">
-              <div className="text-[11px] font-medium text-[var(--color-muted)]">
-                {isRTL ? 'المتاح للصرف يومياً' : 'Daily Safe-to-Spend'}
+              <div className="flex items-center gap-1.5 text-xs font-bold text-[var(--color-muted)]">
+                {isNeg ? (
+                  <TrendingDown className="w-4 h-4 text-[var(--color-expense)] shrink-0" />
+                ) : (
+                  <TrendingUp className="w-4 h-4 text-[var(--color-income)] shrink-0" />
+                )}
+                <span>{isRTL ? 'صافي التدفق النقدي (هذا الشهر)' : 'Net Cashflow (This Month)'}</span>
               </div>
-              {safeToSpend.hasBudget ? (
-                <div className="flex items-baseline gap-1.5 flex-wrap mt-0.5">
-                  {hideBalance ? (
-                    <span className="text-base font-bold text-[var(--color-ink)] num-tabular">••••</span>
-                  ) : (
-                    <MoneyText
-                      amount={safeToSpend.dailySafeAmount}
-                      currency={settings.mainCurrency}
-                      className={`text-base font-bold ${
-                        safeToSpend.isNegative
-                          ? 'text-[var(--color-expense)]'
-                          : 'text-[var(--color-ink)]'
-                      }`}
-                    />
-                  )}
-                  <span className="text-[11px] text-[var(--color-muted)]">
-                    · {isRTL ? `${safeToSpend.daysLeftInMonth} يوم متبقي` : `${safeToSpend.daysLeftInMonth}d left`}
+              <div className="mt-1.5 flex items-baseline gap-2 flex-wrap">
+                {hideBalance ? (
+                  <span className="text-xl font-extrabold text-[var(--color-ink)] num-tabular">
+                    ••••
+                  </span>
+                ) : (
+                  <MoneyText
+                    amount={savingsAndCashflow.netCashflow}
+                    currency={settings.mainCurrency}
+                    showSign={true}
+                    colorByType={true}
+                    type={isNeg ? 'expense' : 'income'}
+                    className="text-xl font-extrabold"
+                  />
+                )}
+                <span
+                  data-testid="net-cashflow-status"
+                  className={`text-[11px] font-bold ${
+                    isPos
+                      ? 'text-[var(--color-income)]'
+                      : isNeg
+                      ? 'text-[var(--color-expense)]'
+                      : 'text-[var(--color-muted)]'
+                  }`}
+                >
+                  · {statusLabel}
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onOpenStatistics}
+              className="min-h-[40px] px-3 py-1.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-xs font-bold text-[var(--color-accent)] shrink-0 transition-colors"
+            >
+              {isRTL ? 'التفاصيل' : 'Details'}
+            </button>
+          </div>
+
+          {/* Savings Rate Card (Personal Account) */}
+          {!isOrgWorkspace && (
+            <div
+              data-testid="savings-rate-card"
+              className="p-4 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-line)] flex items-center justify-between gap-3"
+            >
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-[var(--color-muted)]">
+                  <PiggyBank className="w-4 h-4 text-[var(--color-gold-text)] shrink-0" />
+                  <span>{isRTL ? 'معدل الادخار (هذا الشهر)' : 'Savings Rate (This Month)'}</span>
+                </div>
+                <div className="mt-1.5 flex items-baseline gap-2 flex-wrap">
+                  <span
+                    data-testid="savings-rate-value"
+                    className={`text-xl font-extrabold num-tabular ${
+                      savingsAndCashflow.savingsRatePct === null
+                        ? 'text-[var(--color-muted)]'
+                        : savingsAndCashflow.savingsRatePct >= 0
+                        ? 'text-[var(--color-income)]'
+                        : 'text-[var(--color-expense)]'
+                    }`}
+                  >
+                    {hideBalance
+                      ? '••%'
+                      : savingsAndCashflow.savingsRatePct === null
+                      ? '—'
+                      : `${savingsAndCashflow.savingsRatePct > 0 ? '+' : ''}${formatDisplayNumber(
+                          savingsAndCashflow.savingsRatePct,
+                          1,
+                          settings.digitFormat
+                        )}%`}
+                  </span>
+                  <span className="text-[11px] text-[var(--color-muted)] font-medium">
+                    {savingsAndCashflow.savingsRatePct === null
+                      ? isRTL
+                        ? 'سجّل دخلاً لحساب النسبة'
+                        : 'Record income to calculate'
+                      : savingsAndCashflow.savingsRatePct >= 20
+                      ? isRTL
+                        ? 'أداء ادخاري ممتاز'
+                        : 'Strong savings pace'
+                      : savingsAndCashflow.savingsRatePct >= 0
+                      ? isRTL
+                        ? 'متبقي من دخلك'
+                        : 'Of income saved'
+                      : isRTL
+                      ? 'المصروف يتجاوز الدخل'
+                      : 'Spending exceeds income'}
                   </span>
                 </div>
-              ) : (
-                <div className="text-xs font-semibold text-[var(--color-accent)] mt-0.5">
-                  {isRTL ? 'حدد ميزانية شهرية للتوجيه الذكي' : 'Set a monthly budget'}
-                </div>
-              )}
+              </div>
             </div>
+          )}
+        </section>
+      );
+    }
+
+    if (sectionId === 'insights') {
+      return (
+        <div key="insights" className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {/* Daily Safe-to-Spend Compact Card */}
+          <button
+            type="button"
+            onClick={() => setActiveNav('budget')}
+            className={`w-full p-4 rounded-2xl border text-start flex items-center justify-between gap-3 transition-all duration-300 hover:-translate-y-0.5 active:scale-[0.99] min-h-[68px] ${
+              safeToSpend.hasBudget && safeToSpend.isNegative
+                ? 'bg-[var(--color-expense)]/10 border-[var(--color-expense)]/30'
+                : 'bg-[var(--color-surface)] border-[var(--color-line)] hover:border-[var(--color-accent)]/45'
+            }`}
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div
+                className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+                  safeToSpend.hasBudget && safeToSpend.isNegative
+                    ? 'bg-[var(--color-expense)]/15 text-[var(--color-expense)]'
+                    : 'bg-[var(--color-accent)]/12 text-[var(--color-accent)]'
+                }`}
+              >
+                <CalendarClock className="w-5 h-5" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-[11px] font-medium text-[var(--color-muted)]">
+                  {isRTL ? 'المتاح للصرف يومياً' : 'Daily Safe-to-Spend'}
+                </div>
+                {safeToSpend.hasBudget ? (
+                  <div className="flex items-baseline gap-1.5 flex-wrap mt-0.5">
+                    {hideBalance ? (
+                      <span className="text-base font-bold text-[var(--color-ink)] num-tabular">••••</span>
+                    ) : (
+                      <MoneyText
+                        amount={safeToSpend.dailySafeAmount}
+                        currency={settings.mainCurrency}
+                        className={`text-base font-bold ${
+                          safeToSpend.isNegative
+                            ? 'text-[var(--color-expense)]'
+                            : 'text-[var(--color-ink)]'
+                        }`}
+                      />
+                    )}
+                    <span className="text-[11px] text-[var(--color-muted)]">
+                      · {isRTL ? `${safeToSpend.daysLeftInMonth} يوم متبقي` : `${safeToSpend.daysLeftInMonth}d left`}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="text-xs font-semibold text-[var(--color-accent)] mt-0.5">
+                    {isRTL ? 'حدد ميزانية شهرية للتوجيه الذكي' : 'Set a monthly budget'}
+                  </div>
+                )}
+              </div>
+            </div>
+            <ArrowEnd className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
+          </button>
+
+          {/* Quick Tools: Statistics & Quick Templates */}
+          <div className="grid grid-cols-2 gap-2.5">
+            <button
+              type="button"
+              onClick={onOpenStatistics}
+              data-testid="dashboard-open-stats-btn"
+              className="p-3.5 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)]/50 flex flex-col justify-between gap-2 text-start transition-all duration-300 hover:-translate-y-0.5 active:scale-[0.98] min-h-[68px]"
+            >
+              <span className="w-8 h-8 rounded-full bg-[var(--color-accent)]/12 text-[var(--color-accent)] flex items-center justify-center">
+                <BarChart3 className="w-4 h-4" />
+              </span>
+              <span className="text-xs font-bold text-[var(--color-ink)] truncate">
+                {t('tabStatistics')}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onOpenTemplates}
+              data-testid="dashboard-open-templates-btn"
+              className="p-3.5 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-gold)]/60 flex flex-col justify-between gap-2 text-start transition-all duration-300 hover:-translate-y-0.5 active:scale-[0.98] min-h-[68px]"
+            >
+              <span className="w-8 h-8 rounded-full bg-[var(--color-gold)]/18 text-[var(--color-gold-text)] flex items-center justify-center">
+                <Zap className="w-4 h-4" />
+              </span>
+              <span className="text-xs font-bold text-[var(--color-ink)] truncate">
+                {t('tabTemplates')}
+              </span>
+            </button>
           </div>
-          <ArrowEnd className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
-        </button>
-
-        {/* Quick Tools: Statistics & Quick Templates */}
-        <div className="grid grid-cols-2 gap-2.5">
-          <button
-            type="button"
-            onClick={onOpenStatistics}
-            data-testid="dashboard-open-stats-btn"
-            className="p-3.5 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)]/50 flex flex-col justify-between gap-2 text-start transition-all duration-300 hover:-translate-y-0.5 active:scale-[0.98] min-h-[68px]"
-          >
-            <span className="w-8 h-8 rounded-full bg-[var(--color-accent)]/12 text-[var(--color-accent)] flex items-center justify-center">
-              <BarChart3 className="w-4 h-4" />
-            </span>
-            <span className="text-xs font-bold text-[var(--color-ink)] truncate">
-              {t('tabStatistics')}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onOpenTemplates}
-            data-testid="dashboard-open-templates-btn"
-            className="p-3.5 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-gold)]/60 flex flex-col justify-between gap-2 text-start transition-all duration-300 hover:-translate-y-0.5 active:scale-[0.98] min-h-[68px]"
-          >
-            <span className="w-8 h-8 rounded-full bg-[var(--color-gold)]/18 text-[var(--color-gold-text)] flex items-center justify-center">
-              <Zap className="w-4 h-4" />
-            </span>
-            <span className="text-xs font-bold text-[var(--color-ink)] truncate">
-              {t('tabTemplates')}
-            </span>
-          </button>
         </div>
-      </div>
+      );
+    }
 
-      {/* Smart Alerts (only rendered when budget/debt triggers exist) */}
-      {!dismissedAlerts && (activeBudgetAlerts.length > 0 || upcomingDebtReminders.length > 0) && (
-        <div className="p-3.5 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-gold)]/40 space-y-2 text-xs transition-all duration-300">
+    if (sectionId === 'alerts') {
+      if (dismissedAlerts || (activeBudgetAlerts.length === 0 && upcomingDebtReminders.length === 0)) {
+        return null;
+      }
+      return (
+        <div
+          key="alerts"
+          className="p-3.5 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-gold)]/40 space-y-2 text-xs transition-all duration-300"
+        >
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-1.5 font-bold text-[var(--color-gold-text)]">
               <BellRing className="w-4 h-4 shrink-0" />
@@ -601,162 +837,271 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
             ))}
           </div>
         </div>
-      )}
+      );
+    }
 
-      {/* BOTTOM SECTION: Recent Transactions List + "View Full Ledger" CTA */}
-      <section className="space-y-2.5" data-testid="recent-transactions-section">
-        <div className="flex items-center justify-between gap-2 px-0.5">
-          <h2 className="font-title text-base font-bold text-[var(--color-ink)]">
-            {isRTL ? 'أحدث المعاملات' : 'Recent Transactions'}
-          </h2>
-          <button
-            type="button"
-            onClick={onOpenFullLedger}
-            data-testid="view-full-ledger-btn"
-            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-bold text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 transition-all duration-300 min-h-[40px]"
-          >
-            <span>{isRTL ? 'عرض السجل بالكامل' : 'View Full Ledger'}</span>
-            <ArrowEnd className="w-4 h-4" />
-          </button>
-        </div>
+    if (sectionId === 'recent_transactions') {
+      return (
+        <section key="recent_transactions" className="space-y-2.5" data-testid="recent-transactions-section">
+          <div className="flex items-center justify-between gap-2 px-0.5">
+            <h2 className="font-title text-base font-bold text-[var(--color-ink)]">
+              {isRTL ? 'أحدث المعاملات' : 'Recent Transactions'}
+            </h2>
+            <button
+              type="button"
+              onClick={onOpenFullLedger}
+              data-testid="view-full-ledger-btn"
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-bold text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 transition-all duration-300 min-h-[40px]"
+            >
+              <span>{isRTL ? 'عرض السجل بالكامل' : 'View Full Ledger'}</span>
+              <ArrowEnd className="w-4 h-4" />
+            </button>
+          </div>
 
-        <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-2xl overflow-hidden divide-y divide-[var(--color-line)] shadow-xs">
-          {recentTransactions.length === 0 ? (
-            <HairlineEmptyState
-              figure="drawer"
-              surface="surface"
-              title={isRTL ? 'لا توجد معاملات مسجلة بعد' : 'No transactions recorded yet'}
-              description={
-                isRTL
-                  ? 'ابدأ بتسجيل أول دخل أو مصروف ليظهر هنا بشكل فوري ومرتب.'
-                  : 'Record your first income or expense to see your cashflow here.'
-              }
-              action={
-                canWriteTx ? (
+          <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-2xl overflow-hidden divide-y divide-[var(--color-line)] shadow-xs">
+            {recentTransactions.length === 0 ? (
+              <HairlineEmptyState
+                figure="drawer"
+                surface="surface"
+                title={isRTL ? 'لا توجد معاملات مسجلة بعد' : 'No transactions recorded yet'}
+                description={
+                  isRTL
+                    ? 'ابدأ بتسجيل أول دخل أو مصروف ليظهر هنا بشكل فوري ومرتب.'
+                    : 'Record your first income or expense to see your cashflow here.'
+                }
+                action={
+                  canWriteTx ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingTransaction(null);
+                        setIsAddModalOpen(true);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-[var(--color-accent)] text-[var(--color-on-accent)] rounded-xl text-xs font-semibold hover:opacity-95 transition-all duration-300 min-h-[44px]"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>{isRTL ? 'إضافة معاملة' : 'Add Transaction'}</span>
+                    </button>
+                  ) : undefined
+                }
+              />
+            ) : (
+              recentTransactions.map((tx) => {
+                const cat = categoriesById.get(tx.categoryId);
+                const wallet = walletsById.get(tx.walletId);
+                const toWallet = tx.toWalletId ? walletsById.get(tx.toWalletId) : undefined;
+                const catName = isRTL ? cat?.nameAr || 'عام' : cat?.nameEn || 'General';
+                const isApprovedEmployeeLocked =
+                  isOrgWorkspace &&
+                  activeOrgRole === 'employee' &&
+                  (tx.approvalStatus === 'approved' || tx.approvalStatus === 'paid');
+                const canEdit = canWriteTx && !isApprovedEmployeeLocked;
+
+                const iconConfig =
+                  tx.type === 'income'
+                    ? {
+                        bg: 'bg-[var(--color-income)]/14 text-[var(--color-income)]',
+                        Icon: ArrowDownLeft,
+                      }
+                    : tx.type === 'transfer'
+                    ? {
+                        bg: 'bg-[var(--color-gold)]/18 text-[var(--color-gold-text)]',
+                        Icon: ArrowLeftRight,
+                      }
+                    : {
+                        bg: 'bg-[var(--color-expense)]/14 text-[var(--color-expense)]',
+                        Icon: ArrowUpRight,
+                      };
+
+                const TypeIcon = iconConfig.Icon;
+
+                return (
                   <button
+                    key={tx.id}
                     type="button"
                     onClick={() => {
-                      setEditingTransaction(null);
-                      setIsAddModalOpen(true);
+                      if (canEdit) {
+                        setEditingTransaction(tx);
+                        setIsAddModalOpen(true);
+                      }
                     }}
-                    className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-[var(--color-accent)] text-[var(--color-on-accent)] rounded-xl text-xs font-semibold hover:opacity-95 transition-all duration-300 min-h-[44px]"
+                    className={`w-full p-3.5 sm:px-4 flex items-center justify-between gap-3 text-start transition-all duration-300 min-h-[64px] ${
+                      canEdit
+                        ? 'hover:bg-[var(--color-surface-subtle)]/70 active:scale-[0.995] cursor-pointer'
+                        : 'cursor-default'
+                    }`}
                   >
-                    <Plus className="w-4 h-4" />
-                    <span>{isRTL ? 'إضافة معاملة' : 'Add Transaction'}</span>
-                  </button>
-                ) : undefined
-              }
-            />
-          ) : (
-            recentTransactions.map((tx) => {
-              const cat = categoriesById.get(tx.categoryId);
-              const wallet = walletsById.get(tx.walletId);
-              const toWallet = tx.toWalletId ? walletsById.get(tx.toWalletId) : undefined;
-              const catName = isRTL ? cat?.nameAr || 'عام' : cat?.nameEn || 'General';
-              const isApprovedEmployeeLocked =
-                isOrgWorkspace &&
-                activeOrgRole === 'employee' &&
-                (tx.approvalStatus === 'approved' || tx.approvalStatus === 'paid');
-              const canEdit = canWriteTx && !isApprovedEmployeeLocked;
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span
+                        className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${iconConfig.bg}`}
+                        aria-hidden="true"
+                      >
+                        <TypeIcon className="w-4 h-4 stroke-[2.3]" />
+                      </span>
 
-              const iconConfig =
-                tx.type === 'income'
-                  ? {
-                      bg: 'bg-[var(--color-income)]/14 text-[var(--color-income)]',
-                      Icon: ArrowDownLeft,
-                    }
-                  : tx.type === 'transfer'
-                  ? {
-                      bg: 'bg-[var(--color-gold)]/18 text-[var(--color-gold-text)]',
-                      Icon: ArrowLeftRight,
-                    }
-                  : {
-                      bg: 'bg-[var(--color-expense)]/14 text-[var(--color-expense)]',
-                      Icon: ArrowUpRight,
-                    };
-
-              const TypeIcon = iconConfig.Icon;
-
-              return (
-                <button
-                  key={tx.id}
-                  type="button"
-                  onClick={() => {
-                    if (canEdit) {
-                      setEditingTransaction(tx);
-                      setIsAddModalOpen(true);
-                    }
-                  }}
-                  className={`w-full p-3.5 sm:px-4 flex items-center justify-between gap-3 text-start transition-all duration-300 min-h-[64px] ${
-                    canEdit
-                      ? 'hover:bg-[var(--color-surface-subtle)]/70 active:scale-[0.995] cursor-pointer'
-                      : 'cursor-default'
-                  }`}
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    {/* Circular Colored Icon indicating Transaction Type */}
-                    <span
-                      className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${iconConfig.bg}`}
-                      aria-hidden="true"
-                    >
-                      <TypeIcon className="w-4 h-4 stroke-[2.3]" />
-                    </span>
-
-                    <div className="min-w-0 space-y-0.5">
-                      <div className="text-[13px] font-bold text-[var(--color-ink)] truncate">
-                        {tx.type === 'transfer'
-                          ? `${wallet?.name || ''} ➔ ${toWallet?.name || ''}`
-                          : catName}
-                      </div>
-                      <div className="flex items-center gap-1.5 text-[11px] text-[var(--color-muted)] truncate">
-                        {tx.type !== 'transfer' && wallet?.name && (
-                          <>
-                            <span className="truncate">{wallet.name}</span>
-                            <span aria-hidden="true">·</span>
-                          </>
-                        )}
-                        <span className="num-tabular shrink-0">{tx.date}</span>
-                        {tx.notes && (
-                          <>
-                            <span aria-hidden="true">·</span>
-                            <span className="truncate max-w-[120px]">{tx.notes}</span>
-                          </>
-                        )}
+                      <div className="min-w-0 space-y-0.5">
+                        <div className="text-[13px] font-bold text-[var(--color-ink)] truncate">
+                          {tx.type === 'transfer'
+                            ? `${wallet?.name || ''} ➔ ${toWallet?.name || ''}`
+                            : catName}
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[11px] text-[var(--color-muted)] truncate">
+                          {tx.type !== 'transfer' && wallet?.name && (
+                            <>
+                              <span className="truncate">{wallet.name}</span>
+                              <span aria-hidden="true">·</span>
+                            </>
+                          )}
+                          <span className="num-tabular shrink-0">{tx.date}</span>
+                          {tx.notes && (
+                            <>
+                              <span aria-hidden="true">·</span>
+                              <span className="truncate max-w-[120px]">{tx.notes}</span>
+                            </>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  <div className="text-end shrink-0">
-                    <MoneyText
-                      amount={tx.amount}
-                      currency={tx.currency}
-                      type={tx.type}
-                      showSign={true}
-                      colorByType={true}
-                      className="text-sm font-bold"
-                    />
-                  </div>
-                </button>
-              );
-            })
+                    <div className="text-end shrink-0">
+                      <MoneyText
+                        amount={tx.amount}
+                        currency={tx.currency}
+                        type={tx.type}
+                        showSign={true}
+                        colorByType={true}
+                        className="text-sm font-bold"
+                      />
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+
+          {transactions.length > 0 && (
+            <button
+              type="button"
+              onClick={onOpenFullLedger}
+              className="w-full py-3 px-4 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-xs font-bold text-[var(--color-accent)] flex items-center justify-center gap-2 transition-all duration-300 active:scale-[0.99] min-h-[46px]"
+            >
+              <span>
+                {isRTL
+                  ? `عرض السجل بالكامل (${transactions.length})`
+                  : `View Full Ledger (${transactions.length})`}
+              </span>
+              <ArrowEnd className="w-4 h-4" />
+            </button>
           )}
-        </div>
+        </section>
+      );
+    }
 
-        {transactions.length > 0 && (
+    return null;
+  };
+
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto px-4 pt-3 pb-28 space-y-4" dir={isRTL ? 'rtl' : 'ltr'} data-testid="home-smart-dashboard">
+      {/* Contextual Backup Nudge */}
+      {showBackupNudge && (
+        <div className="p-3 rounded-2xl bg-[var(--color-gold-soft)] border border-[var(--color-gold)]/35 flex items-center justify-between gap-2 text-xs transition-all duration-300">
+          <div className="flex items-center gap-2 min-w-0">
+            <Save className="w-4 h-4 text-[var(--color-gold-text)] shrink-0" />
+            <span className="text-[var(--color-ink)] truncate font-medium">
+              {lastBackupActivityAt
+                ? isRTL
+                  ? 'مر أكثر من 14 يوماً على آخر نسخة احتياطية'
+                  : 'Over 14 days since your last backup'
+                : isRTL
+                ? 'احفظ نسخة احتياطية لبياناتك بأمان'
+                : 'Back up your financial records safely'}
+            </span>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              onClick={() => setIsBackupOpen(true)}
+              className="px-3 py-1.5 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] font-semibold text-[11px] min-h-[36px] active:scale-95 transition-all duration-300"
+            >
+              {isRTL ? 'نسخ الآن' : 'Backup'}
+            </button>
+            <button
+              type="button"
+              onClick={() => updateSettings({ backupReminderDismissedAt: Date.now() })}
+              className="p-1.5 text-[var(--color-muted)] hover:text-[var(--color-ink)] rounded-xl min-h-[36px] min-w-[36px] flex items-center justify-center"
+              aria-label={isRTL ? 'إخفاء التذكير' : 'Dismiss reminder'}
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Enterprise Workspace Quick Hub Shortcut */}
+      {isOrgWorkspace && activeOrganization && (
+        <div className="space-y-2">
           <button
             type="button"
-            onClick={onOpenFullLedger}
-            className="w-full py-3 px-4 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-xs font-bold text-[var(--color-accent)] flex items-center justify-center gap-2 transition-all duration-300 active:scale-[0.99] min-h-[46px]"
+            onClick={() => openOrgHub(pendingApprovalsCount > 0 ? 'approvals' : 'reports')}
+            data-testid="home-open-org-hub-btn"
+            className="w-full p-3.5 rounded-2xl bg-[var(--color-surface)] border border-[var(--color-accent)]/35 flex items-center justify-between gap-2 text-xs hover:border-[var(--color-accent)] transition-all duration-300 min-h-[48px]"
           >
-            <span>
-              {isRTL
-                ? `عرض السجل بالكامل (${transactions.length})`
-                : `View Full Ledger (${transactions.length})`}
+            <div className="flex items-center gap-2.5 min-w-0">
+              <Building2 className="w-4 h-4 text-[var(--color-accent)] shrink-0" />
+              <span className="font-semibold text-[var(--color-ink)] truncate">
+                {t('orgHubTitle')} — {activeOrganization.name}
+              </span>
+            </div>
+            <span className="text-[11px] font-bold text-[var(--color-accent)] shrink-0 flex items-center gap-0.5">
+              <span>{isRTL ? 'فتح المركز' : 'Open Hub'}</span>
+              <ArrowEnd className="w-3.5 h-3.5" />
             </span>
-            <ArrowEnd className="w-4 h-4" />
           </button>
-        )}
-      </section>
+
+          {pendingApprovalsCount > 0 && (
+            <button
+              type="button"
+              onClick={() => openOrgHub('approvals')}
+              className="w-full p-3.5 rounded-2xl bg-[var(--color-gold-soft)] border border-[var(--color-gold)]/35 flex items-center justify-between gap-2 text-xs hover:opacity-95 transition-all duration-300 min-h-[48px]"
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <ClipboardCheck className="w-4 h-4 text-[var(--color-gold-text)] shrink-0" />
+                <span className="font-semibold text-[var(--color-ink)] truncate">
+                  {isRTL
+                    ? pendingApprovalsCount === 1
+                      ? 'معاملة واحدة بانتظار المراجعة والاعتماد'
+                      : `${pendingApprovalsCount} معاملات بانتظار المراجعة والاعتماد`
+                    : pendingApprovalsCount === 1
+                    ? '1 transaction awaiting approval'
+                    : `${pendingApprovalsCount} transactions awaiting approval`}
+                </span>
+              </div>
+              <span className="text-[11px] font-bold text-[var(--color-gold-text)] shrink-0">
+                {isRTL ? 'مراجعة' : 'Review'}
+              </span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Reorderable Workspace Home Sections */}
+      {sectionOrder.map((sectionId) => renderSection(sectionId))}
+
+      <ArrangeSectionsModal
+        isOpen={isArrangeOpen}
+        onClose={() => setIsArrangeOpen(false)}
+        currentOrder={sectionOrder}
+        isOrgWorkspace={isOrgWorkspace}
+        workspaceLabel={
+          isOrgWorkspace && activeOrganization
+            ? activeOrganization.name
+            : isRTL
+            ? 'الحساب الشخصي'
+            : 'Personal Account'
+        }
+        isRTL={isRTL}
+        onSaveOrder={handleSaveSectionOrder}
+      />
     </div>
   );
 };

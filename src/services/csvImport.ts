@@ -3,10 +3,11 @@
  * Auto Column Mapper, Validator & Duplicate Detector
  */
 import * as XLSX from 'xlsx';
-import { Category, Transaction, TransactionType, Wallet } from '../types';
+import { Category, MerchantRule, Transaction, TransactionType, Wallet } from '../types';
 import { normalizeArabicText, normalizeDigits } from './dialectParser';
 import { normalizeArabicPersianNumerals } from './numbers';
 import { normalizeWorkspaceId } from './workspaceSync';
+import { matchMerchantRule } from './merchantRules';
 import {
   buildImportProgressState,
   ImportProgressState,
@@ -58,6 +59,8 @@ export interface CsvPreviewRow {
   toWalletId?: string;
   toWalletName?: string;
   isNewToWallet?: boolean;
+  costCenterId?: string;
+  matchedRuleKeyword?: string;
   workspaceId?: string;
   notes: string;
   isDuplicate: boolean;
@@ -1251,6 +1254,7 @@ export function mapCsvRowsToTransactions(params: {
   wallets?: Wallet[];
   defaultCurrency?: string;
   workspaceId?: string;
+  merchantRules?: MerchantRule[];
 }): CsvImportMappingResult {
   const {
     rows,
@@ -1260,8 +1264,11 @@ export function mapCsvRowsToTransactions(params: {
     wallets = [],
     defaultCurrency = wallets[0]?.currency || 'EGP',
     workspaceId,
+    merchantRules = [],
   } = params;
   const safeWorkspaceId = normalizeWorkspaceId(workspaceId);
+  const categoryById = new Map<string, Category>(categories.map((c) => [c.id, c]));
+  const walletById = new Map<string, Wallet>(wallets.map((w) => [w.id, w]));
 
   // Pre-index existing transactions in O(N) for fast duplicate detection even at 5,000+ rows
   const existingKeys = new Set<string>();
@@ -1484,11 +1491,30 @@ export function mapCsvRowsToTransactions(params: {
     let isNewToWallet = false;
     let matchedCat: Category = fallbackCategory;
     let isNewCategory = false;
+    let matchedCostCenterId: string | undefined;
+    let matchedRuleKeyword: string | undefined;
 
     if (isValid) {
-      const srcRes = resolveOrCreateWallet(rawWallet);
-      matchedWallet = srcRes.wallet;
-      isNewWallet = srcRes.isNew;
+      const ruleMatch =
+        merchantRules.length > 0
+          ? matchMerchantRule(`${rawNotes} ${rawCat}`.trim(), merchantRules, type)
+          : null;
+
+      if (ruleMatch) {
+        matchedRuleKeyword = ruleMatch.rule.keyword;
+        if (ruleMatch.costCenterId) {
+          matchedCostCenterId = ruleMatch.costCenterId;
+        }
+      }
+
+      if (!rawWallet.trim() && ruleMatch?.walletId && walletById.has(ruleMatch.walletId)) {
+        matchedWallet = walletById.get(ruleMatch.walletId);
+        isNewWallet = false;
+      } else {
+        const srcRes = resolveOrCreateWallet(rawWallet);
+        matchedWallet = srcRes.wallet;
+        isNewWallet = srcRes.isNew;
+      }
 
       if (type === 'transfer' && rawToWallet.trim()) {
         const dstRes = resolveOrCreateWallet(rawToWallet);
@@ -1496,9 +1522,32 @@ export function mapCsvRowsToTransactions(params: {
         isNewToWallet = dstRes.isNew;
       }
 
-      const catRes = resolveOrCreateCategory(rawCat, type);
-      matchedCat = catRes.category;
-      isNewCategory = catRes.isNew;
+      if (!rawCat.trim() && ruleMatch?.categoryId && categoryById.has(ruleMatch.categoryId)) {
+        matchedCat = categoryById.get(ruleMatch.categoryId)!;
+        isNewCategory = false;
+      } else {
+        const catRes = resolveOrCreateCategory(rawCat, type);
+        if (
+          (catRes.isNew || catRes.category.id === 'cat-other') &&
+          ruleMatch?.categoryId &&
+          categoryById.has(ruleMatch.categoryId)
+        ) {
+          if (catRes.isNew) {
+            // Avoid keeping an unused auto-created category if this was the row that created it
+            const createdIdx = autoCreatedCategories.findIndex((c) => c.id === catRes.category.id);
+            if (createdIdx >= 0 && autoCreatedCategories.length - 1 === createdIdx) {
+              autoCreatedCategories.pop();
+              autoCatByNormName.delete(normalizeArabicText(rawCat.trim()));
+              usedCatIds.delete(catRes.category.id);
+            }
+          }
+          matchedCat = categoryById.get(ruleMatch.categoryId)!;
+          isNewCategory = false;
+        } else {
+          matchedCat = catRes.category;
+          isNewCategory = catRes.isNew;
+        }
+      }
     } else if (rawCat.trim()) {
       // Keep display label clean for invalid preview row without mutating autoCreatedCategories
       matchedCat = {
@@ -1542,6 +1591,8 @@ export function mapCsvRowsToTransactions(params: {
       toWalletId: matchedToWallet?.id,
       toWalletName: matchedToWallet?.name || (rawToWallet.trim() || undefined),
       isNewToWallet,
+      ...(matchedCostCenterId ? { costCenterId: matchedCostCenterId } : {}),
+      ...(matchedRuleKeyword ? { matchedRuleKeyword } : {}),
       workspaceId: safeWorkspaceId,
       notes: rawNotes.trim(),
       isDuplicate,
@@ -1574,6 +1625,7 @@ export async function mapCsvRowsToTransactionsChunked(params: {
   wallets?: Wallet[];
   defaultCurrency?: string;
   workspaceId?: string;
+  merchantRules?: MerchantRule[];
   chunkSize?: number;
   onProgress?: (processed: number, total: number) => void;
   shouldAbort?: () => boolean;
@@ -1586,12 +1638,15 @@ export async function mapCsvRowsToTransactionsChunked(params: {
     wallets = [],
     defaultCurrency = wallets[0]?.currency || 'EGP',
     workspaceId,
+    merchantRules = [],
     chunkSize = 200,
     onProgress,
     shouldAbort,
   } = params;
   const safeWorkspaceId = normalizeWorkspaceId(workspaceId);
   const safeChunk = Math.max(50, Math.floor(chunkSize));
+  const categoryById = new Map<string, Category>(categories.map((c) => [c.id, c]));
+  const walletById = new Map<string, Wallet>(wallets.map((w) => [w.id, w]));
 
   const existingKeys = new Set<string>();
   for (let i = 0; i < existingTransactions.length; i++) {
@@ -1857,11 +1912,30 @@ export async function mapCsvRowsToTransactionsChunked(params: {
       let isNewToWallet = false;
       let matchedCat: Category = fallbackCategory;
       let isNewCategory = false;
+      let matchedCostCenterId: string | undefined;
+      let matchedRuleKeyword: string | undefined;
 
       if (isValid) {
-        const srcRes = resolveOrCreateWallet(rawWallet);
-        matchedWallet = srcRes.wallet;
-        isNewWallet = srcRes.isNew;
+        const ruleMatch =
+          merchantRules.length > 0
+            ? matchMerchantRule(`${rawNotes} ${rawCat}`.trim(), merchantRules, type)
+            : null;
+
+        if (ruleMatch) {
+          matchedRuleKeyword = ruleMatch.rule.keyword;
+          if (ruleMatch.costCenterId) {
+            matchedCostCenterId = ruleMatch.costCenterId;
+          }
+        }
+
+        if (!rawWallet.trim() && ruleMatch?.walletId && walletById.has(ruleMatch.walletId)) {
+          matchedWallet = walletById.get(ruleMatch.walletId);
+          isNewWallet = false;
+        } else {
+          const srcRes = resolveOrCreateWallet(rawWallet);
+          matchedWallet = srcRes.wallet;
+          isNewWallet = srcRes.isNew;
+        }
 
         if (type === 'transfer' && rawToWallet.trim()) {
           const dstRes = resolveOrCreateWallet(rawToWallet);
@@ -1869,9 +1943,31 @@ export async function mapCsvRowsToTransactionsChunked(params: {
           isNewToWallet = dstRes.isNew;
         }
 
-        const catRes = resolveOrCreateCategory(rawCat, type);
-        matchedCat = catRes.category;
-        isNewCategory = catRes.isNew;
+        if (!rawCat.trim() && ruleMatch?.categoryId && categoryById.has(ruleMatch.categoryId)) {
+          matchedCat = categoryById.get(ruleMatch.categoryId)!;
+          isNewCategory = false;
+        } else {
+          const catRes = resolveOrCreateCategory(rawCat, type);
+          if (
+            (catRes.isNew || catRes.category.id === 'cat-other') &&
+            ruleMatch?.categoryId &&
+            categoryById.has(ruleMatch.categoryId)
+          ) {
+            if (catRes.isNew) {
+              const createdIdx = autoCreatedCategories.findIndex((c) => c.id === catRes.category.id);
+              if (createdIdx >= 0 && autoCreatedCategories.length - 1 === createdIdx) {
+                autoCreatedCategories.pop();
+                autoCatByNormName.delete(normalizeArabicText(rawCat.trim()));
+                usedCatIds.delete(catRes.category.id);
+              }
+            }
+            matchedCat = categoryById.get(ruleMatch.categoryId)!;
+            isNewCategory = false;
+          } else {
+            matchedCat = catRes.category;
+            isNewCategory = catRes.isNew;
+          }
+        }
       } else if (rawCat.trim()) {
         matchedCat = {
           ...(fallbackCategory || {
@@ -1922,6 +2018,8 @@ export async function mapCsvRowsToTransactionsChunked(params: {
         toWalletId: matchedToWallet?.id,
         toWalletName: matchedToWallet?.name || (rawToWallet.trim() || undefined),
         isNewToWallet,
+        ...(matchedCostCenterId ? { costCenterId: matchedCostCenterId } : {}),
+        ...(matchedRuleKeyword ? { matchedRuleKeyword } : {}),
         workspaceId: safeWorkspaceId,
         notes: rawNotes.trim(),
         isDuplicate,
@@ -1986,6 +2084,7 @@ export function buildImportedTransactionsPayload(params: {
         categoryId: r.categoryId,
         walletId: rowWallet?.id || '',
         ...(r.type === 'transfer' && r.toWalletId ? { toWalletId: r.toWalletId } : {}),
+        ...(r.costCenterId ? { costCenterId: r.costCenterId } : {}),
         notes: r.notes,
         priority: 'normal' as const,
         doesNotAffectBalance: false,
@@ -2048,6 +2147,7 @@ export async function buildImportedTransactionsPayloadChunked(params: {
         categoryId: r.categoryId,
         walletId: rowWallet?.id || '',
         ...(r.type === 'transfer' && r.toWalletId ? { toWalletId: r.toWalletId } : {}),
+        ...(r.costCenterId ? { costCenterId: r.costCenterId } : {}),
         notes: r.notes,
         priority: 'normal' as const,
         doesNotAffectBalance: false,

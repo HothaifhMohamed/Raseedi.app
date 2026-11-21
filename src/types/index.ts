@@ -28,6 +28,44 @@ export type OrganizationIndustry =
   | 'medical'
   | 'general';
 export type WalletType = 'standard' | 'petty_cash' | 'bank_account';
+export type WalletAssetClass = 'spendable' | 'asset';
+export type WalletAssetSubtype =
+  | 'cash'
+  | 'bank'
+  | 'ewallet'
+  | 'card'
+  | 'savings'
+  | 'certificate'
+  | 'gold'
+  | 'investment'
+  | 'real_estate'
+  | 'vehicle'
+  | 'other_asset';
+export type MerchantRuleMatchType = 'contains' | 'starts_with' | 'exact';
+export type NetWorthTimeframe = '1M' | '3M' | '1Y' | 'ALL';
+export type HomeSectionId =
+  | 'hero'
+  | 'quick_actions'
+  | 'get_started'
+  | 'net_worth'
+  | 'cashflow_metrics'
+  | 'insights'
+  | 'alerts'
+  | 'recent_transactions';
+
+export interface MerchantRule {
+  id: string;
+  keyword: string;
+  matchType?: MerchantRuleMatchType;
+  type?: 'expense' | 'income' | 'both';
+  categoryId?: string;
+  walletId?: string;
+  costCenterId?: string;
+  isEnabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export type OrganizationRole = 'owner' | 'admin' | 'accountant' | 'employee' | 'viewer';
 export type CanonicalApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'paid';
 export type ApprovalStatus = CanonicalApprovalStatus | 'pending_approval';
@@ -58,6 +96,8 @@ export interface Wallet {
   pinSalt?: string;
   order?: number;
   walletType?: WalletType;
+  assetClass?: WalletAssetClass;
+  assetSubtype?: WalletAssetSubtype;
   custodianMemberUid?: string;
   workspaceId?: string;
   updatedAt?: number;
@@ -367,6 +407,7 @@ export interface OrgWorkspaceData {
   goals: SavingsGoal[];
   templates: Template[];
   auditLogs: AuditLogEntry[];
+  merchantRules?: MerchantRule[];
 }
 
 export interface AppNotificationItem {
@@ -434,6 +475,9 @@ export interface AppSettings {
     facebookUrl?: string;
     instagramUrl?: string;
   };
+  homeSectionOrders?: Record<string, HomeSectionId[]>;
+  dismissedGetStartedIds?: string[];
+  merchantRulesByWorkspace?: Record<string, MerchantRule[]>;
 }
 
 export interface VerifiedProEntitlement {

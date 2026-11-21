@@ -5,6 +5,8 @@ import {
   Wallet as WalletIcon,
   Crown,
   TrendingUp,
+  TrendingDown,
+  PiggyBank,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { IconRenderer } from '../common/IconRenderer';
@@ -14,44 +16,68 @@ import {
   getEffectiveTransactionAmount,
   getTransactionsInDateRange,
   calculateMonthEndForecast,
+  formatDisplayNumber,
+  formatLocalDate,
   getActiveFiscalMonthStr,
   getCustomMonthDateRange,
-  getPreviousMonthStr,
   roundCurrency,
 } from '../../services/calculations';
+import {
+  calculateSavingsAndCashflow,
+  getTimeframeStartDate,
+} from '../../services/wealthAnalytics';
 import { MoneyText } from '../common/MoneyText';
 import { AdBanner } from '../common/AdBanner';
 import { HairlineEmptyState, HairlineFigure } from '../common/HairlineVisuals';
+import { NetWorthCard } from './NetWorthCard';
 
 const CHART_PALETTE = ['#B5523B', '#C99A2E', '#5E7F3A', '#1E6F73', '#7A4E6D', '#6B5E50'];
 
 export const StatisticsTab: React.FC = () => {
-  const { transactions, categories, wallets, settings, t, isRTL, isPro, setIsUpgradeModalOpen } = useApp();
+  const {
+    transactions,
+    categories,
+    wallets,
+    settings,
+    t,
+    isRTL,
+    isPro,
+    isOrgWorkspace,
+    setActiveNav,
+    setIsUpgradeModalOpen,
+  } = useApp();
 
-  const [dateRangeOption, setDateRangeOption] = useState<'this_month' | 'last_month' | 'this_year' | 'all'>('this_month');
+  const [dateRangeOption, setDateRangeOption] = useState<'1M' | '3M' | '1Y' | 'ALL'>('1M');
   const [activeStatView, setActiveStatView] = useState<'category' | 'priority' | 'wallets'>('category');
 
-  // Compute active date range (respecting firstDayOfMonth setting)
+  // Compute active date range (1M / 3M / 1Y / ALL)
   const activeDateRange = useMemo(() => {
     const now = new Date();
     const firstDay = settings.firstDayOfMonth || 1;
-    const activeMonth = getActiveFiscalMonthStr(now, firstDay);
+    const endStr = formatLocalDate(now);
 
-    if (dateRangeOption === 'this_month') {
+    if (dateRangeOption === '1M') {
+      const activeMonth = getActiveFiscalMonthStr(now, firstDay);
       const range = getCustomMonthDateRange(activeMonth, firstDay);
-      return { start: range.startDate, end: range.endDate, label: isRTL ? 'هذا الشهر' : 'This Month' };
+      return { start: range.startDate, end: range.endDate, label: isRTL ? 'شهر' : '1M' };
     }
-    if (dateRangeOption === 'last_month') {
-      const prevMonth = getPreviousMonthStr(activeMonth);
-      const range = getCustomMonthDateRange(prevMonth, firstDay);
-      return { start: range.startDate, end: range.endDate, label: isRTL ? 'الشهر الماضي' : 'Last Month' };
+    if (dateRangeOption === '3M') {
+      const start = getTimeframeStartDate('3M', now);
+      return {
+        start: start ? formatLocalDate(start) : '1970-01-01',
+        end: endStr,
+        label: isRTL ? '٣ شهور' : '3M',
+      };
     }
-    if (dateRangeOption === 'this_year') {
-      const start = `${now.getFullYear()}-01-01`;
-      const end = `${now.getFullYear()}-12-31`;
-      return { start, end, label: isRTL ? 'هذا العام' : 'This Year' };
+    if (dateRangeOption === '1Y') {
+      const start = getTimeframeStartDate('1Y', now);
+      return {
+        start: start ? formatLocalDate(start) : `${now.getFullYear()}-01-01`,
+        end: endStr,
+        label: isRTL ? 'سنة' : '1Y',
+      };
     }
-    return { start: '1970-01-01', end: '2099-12-31', label: isRTL ? 'جميع الأوقات' : 'All Time' };
+    return { start: '1970-01-01', end: '2099-12-31', label: isRTL ? 'الكل' : 'All' };
   }, [dateRangeOption, settings.firstDayOfMonth, isRTL]);
 
   // Filter transactions
@@ -179,7 +205,11 @@ export const StatisticsTab: React.FC = () => {
     });
   }, [categoryStats]);
 
-  const netBalance = totalIncome - totalExpense;
+  const cashflowMetrics = useMemo(
+    () => calculateSavingsAndCashflow(totalIncome, totalExpense, settings.mainCurrency),
+    [totalIncome, totalExpense, settings.mainCurrency]
+  );
+  const netBalance = cashflowMetrics.netCashflow;
 
   const monthEndForecast = useMemo(() => {
     return calculateMonthEndForecast(
@@ -193,18 +223,19 @@ export const StatisticsTab: React.FC = () => {
 
   return (
     <div className="flex flex-col flex-1 min-h-0 overflow-y-auto px-4 py-3 pb-24 space-y-4">
-      {/* Date Range Selector Bar */}
+      {/* Quick Timeframe Filter Bar (1M / 3M / 1Y / All) */}
       <div className="flex items-center justify-between p-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl">
         {[
-          { id: 'this_month', label: isRTL ? 'هذا الشهر' : 'This Month' },
-          { id: 'last_month', label: isRTL ? 'الشهر الماضي' : 'Last Month' },
-          { id: 'this_year', label: isRTL ? 'هذا العام' : 'This Year' },
-          { id: 'all', label: isRTL ? 'الكل' : 'All' },
+          { id: '1M', label: isRTL ? 'شهر (1M)' : '1M' },
+          { id: '3M', label: isRTL ? '٣ شهور (3M)' : '3M' },
+          { id: '1Y', label: isRTL ? 'سنة (1Y)' : '1Y' },
+          { id: 'ALL', label: isRTL ? 'الكل' : 'All' },
         ].map((opt) => (
           <button
             key={opt.id}
-            onClick={() => setDateRangeOption(opt.id as any)}
-            className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-colors min-h-[36px] ${
+            data-testid={`stats-tf-${opt.id}`}
+            onClick={() => setDateRangeOption(opt.id as '1M' | '3M' | '1Y' | 'ALL')}
+            className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-colors min-h-[38px] ${
               dateRangeOption === opt.id
                 ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
                 : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
@@ -213,6 +244,101 @@ export const StatisticsTab: React.FC = () => {
             {opt.label}
           </button>
         ))}
+      </div>
+
+      {/* Personal Net Worth Overview */}
+      {!isOrgWorkspace && (
+        <NetWorthCard
+          onOpenWallets={() => setActiveNav('wallets')}
+          onOpenDebts={() => setActiveNav('more')}
+        />
+      )}
+
+      {/* Net Cashflow & Savings Rate Highlight Strip */}
+      <div className={`grid gap-3 ${isOrgWorkspace ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2'}`}>
+        <div className="p-3.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 text-[11px] font-bold text-[var(--color-muted)]">
+              {cashflowMetrics.cashflowStatus === 'negative' ? (
+                <TrendingDown className="w-3.5 h-3.5 text-[var(--color-expense)]" />
+              ) : (
+                <TrendingUp className="w-3.5 h-3.5 text-[var(--color-income)]" />
+              )}
+              <span>{isRTL ? 'صافي التدفق النقدي' : 'Net Cashflow'}</span>
+            </div>
+            <div className="mt-1 flex items-baseline gap-2">
+              <MoneyText
+                amount={netBalance}
+                currency={settings.mainCurrency}
+                showSign={true}
+                colorByType={true}
+                type={netBalance >= 0 ? 'income' : 'expense'}
+                className="font-extrabold text-base"
+              />
+              <span
+                className={`text-[11px] font-bold ${
+                  cashflowMetrics.cashflowStatus === 'positive'
+                    ? 'text-[var(--color-income)]'
+                    : cashflowMetrics.cashflowStatus === 'negative'
+                    ? 'text-[var(--color-expense)]'
+                    : 'text-[var(--color-muted)]'
+                }`}
+              >
+                ·{' '}
+                {cashflowMetrics.cashflowStatus === 'positive'
+                  ? isRTL
+                    ? 'إيجابي'
+                    : 'Positive'
+                  : cashflowMetrics.cashflowStatus === 'negative'
+                  ? isRTL
+                    ? 'سلبي'
+                    : 'Negative'
+                  : isRTL
+                  ? 'متوازن'
+                  : 'Balanced'}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {!isOrgWorkspace && (
+          <div className="p-3.5 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 text-[11px] font-bold text-[var(--color-muted)]">
+                <PiggyBank className="w-3.5 h-3.5 text-[var(--color-gold-text)]" />
+                <span>{isRTL ? 'معدل الادخار' : 'Savings Rate'}</span>
+              </div>
+              <div className="mt-1 flex items-baseline gap-2">
+                <span
+                  className={`text-base font-extrabold num-tabular ${
+                    cashflowMetrics.savingsRatePct === null
+                      ? 'text-[var(--color-muted)]'
+                      : cashflowMetrics.savingsRatePct >= 0
+                      ? 'text-[var(--color-income)]'
+                      : 'text-[var(--color-expense)]'
+                  }`}
+                >
+                  {cashflowMetrics.savingsRatePct === null
+                    ? '—'
+                    : `${cashflowMetrics.savingsRatePct > 0 ? '+' : ''}${formatDisplayNumber(
+                        cashflowMetrics.savingsRatePct,
+                        1,
+                        settings.digitFormat
+                      )}%`}
+                </span>
+                <span className="text-[11px] text-[var(--color-muted)]">
+                  {cashflowMetrics.savingsRatePct === null
+                    ? isRTL
+                      ? 'لا يوجد دخل بالفترة'
+                      : 'No income in range'
+                    : isRTL
+                    ? 'من إجمالي الدخل'
+                    : 'of income'}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Income vs Expense Comparative Gauge */}

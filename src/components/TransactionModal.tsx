@@ -46,6 +46,7 @@ import {
   parseLocalizedNumber,
 } from '../services/numbers';
 import { prepareReceiptImageDataUrl, ReceiptScanError, scanReceiptWithAI } from '../services/receiptScanner';
+import { matchMerchantRule, sanitizeMerchantRules } from '../services/merchantRules';
 
 import { TransactionDraftPreset } from '../services/walletQuickActions';
 
@@ -90,9 +91,24 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     orgMembers,
     orgCostCenters,
     orgParties,
+    activeWorkspace,
     t,
     isRTL,
   } = useApp();
+
+  const workspaceRuleKey =
+    isOrgWorkspace && activeOrganization
+      ? activeOrganization.id
+      : activeWorkspace || 'personal';
+  const activeMerchantRules = useMemo(
+    () => sanitizeMerchantRules(settings.merchantRulesByWorkspace?.[workspaceRuleKey]),
+    [settings.merchantRulesByWorkspace, workspaceRuleKey]
+  );
+  const manualTypeOverrideRef = useRef(false);
+  const manualCategoryOverrideRef = useRef(false);
+  const manualWalletOverrideRef = useRef(false);
+  const manualCostCenterOverrideRef = useRef(false);
+  const [matchedRuleKeyword, setMatchedRuleKeyword] = useState<string | null>(null);
 
   // Form State
   const [type, setType] = useState<TransactionType>('expense');
@@ -351,6 +367,11 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     setSplitMode('half');
     setSplitValueInput('');
     setReceiptAuthPrompt(false);
+    manualTypeOverrideRef.current = Boolean(presetDraft?.type);
+    manualCategoryOverrideRef.current = false;
+    manualWalletOverrideRef.current = false;
+    manualCostCenterOverrideRef.current = false;
+    setMatchedRuleKeyword(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, editTransaction, presetDraft]);
 
@@ -384,6 +405,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
   }, [isOpen, attachmentPaths]);
 
   const handleWalletChange = (wId: string) => {
+    manualWalletOverrideRef.current = true;
     setWalletId(wId);
     const selected = wallets.find((w) => w.id === wId);
     if (selected) {
@@ -395,6 +417,62 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
         wallets.find((w) => w.id !== wId);
       setToWalletId(nextTo?.id || '');
     }
+  };
+
+  const applyMerchantRulesForText = (text: string, overrideType?: TransactionType) => {
+    const activeType = overrideType ?? type;
+    if (editTransaction || activeType === 'transfer' || activeMerchantRules.length === 0) {
+      setMatchedRuleKeyword(null);
+      return;
+    }
+    let match = matchMerchantRule(text, activeMerchantRules, activeType);
+    let switchedType = false;
+    if (!match && !manualTypeOverrideRef.current && !overrideType) {
+      const anyTypeMatch = matchMerchantRule(text, activeMerchantRules);
+      if (
+        anyTypeMatch &&
+        (anyTypeMatch.rule.type === 'expense' || anyTypeMatch.rule.type === 'income')
+      ) {
+        match = anyTypeMatch;
+        setType(anyTypeMatch.rule.type);
+        switchedType = true;
+      }
+    }
+    if (!match) {
+      setMatchedRuleKeyword(null);
+      return;
+    }
+    let appliedAny = switchedType;
+    if (
+      match.categoryId &&
+      !manualCategoryOverrideRef.current &&
+      categories.some((c) => c.id === match.categoryId && !c.isHidden)
+    ) {
+      setCategoryId(match.categoryId);
+      appliedAny = true;
+    }
+    if (
+      match.walletId &&
+      !manualWalletOverrideRef.current &&
+      wallets.some((w) => w.id === match.walletId && !w.isArchived)
+    ) {
+      const targetW = wallets.find((w) => w.id === match.walletId);
+      if (targetW) {
+        setWalletId(targetW.id);
+        setCurrency(targetW.currency);
+        appliedAny = true;
+      }
+    }
+    if (
+      isOrgWorkspace &&
+      match.costCenterId &&
+      !manualCostCenterOverrideRef.current &&
+      orgCostCenters.some((cc) => cc.id === match.costCenterId && cc.isActive)
+    ) {
+      setCostCenterId(match.costCenterId);
+      appliedAny = true;
+    }
+    setMatchedRuleKeyword(appliedAny ? match.rule.keyword : null);
   };
 
   const applyQuickCombo = (combo: (typeof quickAddCombos)[number]) => {
@@ -1149,9 +1227,12 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
             <button
               type="button"
               onClick={() => {
+                manualTypeOverrideRef.current = true;
+                manualCategoryOverrideRef.current = false;
                 setType('expense');
                 const defaultCat = categories.find((c) => c.type === 'expense' || c.type === 'both');
                 if (defaultCat) setCategoryId(defaultCat.id);
+                if (notes.trim()) applyMerchantRulesForText(notes, 'expense');
               }}
               className={`py-2 text-xs font-semibold rounded-lg transition-colors min-h-[40px] ${
                 type === 'expense'
@@ -1164,9 +1245,12 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
             <button
               type="button"
               onClick={() => {
+                manualTypeOverrideRef.current = true;
+                manualCategoryOverrideRef.current = false;
                 setType('income');
                 const defaultCat = categories.find((c) => c.type === 'income' || c.type === 'both');
                 if (defaultCat) setCategoryId(defaultCat.id);
+                if (notes.trim()) applyMerchantRulesForText(notes, 'income');
               }}
               className={`py-2 text-xs font-semibold rounded-lg transition-colors min-h-[40px] ${
                 type === 'income'
@@ -1178,7 +1262,11 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => setType('transfer')}
+              onClick={() => {
+                manualTypeOverrideRef.current = true;
+                setType('transfer');
+                setMatchedRuleKeyword(null);
+              }}
               className={`py-2 text-xs font-semibold rounded-lg transition-colors min-h-[40px] ${
                 type === 'transfer'
                   ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
@@ -1426,6 +1514,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                         id={`cat-pill-${c.id}`}
                         type="button"
                         onClick={() => {
+                          manualCategoryOverrideRef.current = true;
                           setCategoryId(c.id);
                           setErrorMsg('');
                         }}
@@ -1483,11 +1572,38 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
             </label>
             <input
               type="text"
+              data-testid="tx-notes-input"
               value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder={isRTL ? 'وصف المعاملة أو المكان...' : 'Note or place...'}
+              onChange={(e) => {
+                const nextVal = e.target.value;
+                setNotes(nextVal);
+                applyMerchantRulesForText(nextVal);
+              }}
+              placeholder={isRTL ? 'وصف المعاملة أو اسم التاجر...' : 'Note or merchant name...'}
               className="w-full px-3 py-2 bg-[var(--color-bg)] border border-[var(--color-line)] rounded-xl text-xs text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:outline-none focus:border-[var(--color-accent)] min-h-[44px]"
             />
+            {matchedRuleKeyword && (
+              <div
+                data-testid="tx-merchant-rule-applied"
+                className="mt-1.5 flex items-center justify-between gap-2 text-[11px] font-semibold text-[var(--color-accent)]"
+              >
+                <span className="inline-flex items-center gap-1 truncate">
+                  <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">
+                    {isRTL
+                      ? `تم تطبيق قاعدة التصنيف التلقائي «${matchedRuleKeyword}» (يمكنك التعديل يدوياً)`
+                      : `Auto-categorized via rule "${matchedRuleKeyword}" (manual override allowed)`}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setMatchedRuleKeyword(null)}
+                  className="text-[var(--color-muted)] hover:text-[var(--color-ink)] shrink-0"
+                >
+                  {isRTL ? 'إخفاء' : 'Hide'}
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Enterprise Accounting Controls (Organization Workspace only) */}

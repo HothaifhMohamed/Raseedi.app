@@ -2,6 +2,7 @@ import React, { useCallback } from 'react';
 import { ArrowDown, ArrowUp, EyeOff, GripVertical, Lock } from 'lucide-react';
 import { Wallet } from '../../types';
 import { convertCurrency } from '../../services/currency';
+import { getAssetSubtypeMeta, getWalletAssetClass } from '../../services/wealthAnalytics';
 import { IconRenderer } from '../common/IconRenderer';
 import { MoneyText } from '../common/MoneyText';
 
@@ -221,7 +222,25 @@ const WalletCardComponent: React.FC<WalletCardProps> = ({
       <div className="relative flex items-end justify-between gap-3 pt-4 mt-2 border-t border-white/15">
         <div className="min-w-0 flex-1">
           <span className="text-[11px] text-white/80 block mb-0.5">
-            {isRTL ? 'الرصيد المتاح' : 'Available Balance'}
+            {(() => {
+              const isOwnedAsset = getWalletAssetClass(w) === 'asset';
+              const sub = getAssetSubtypeMeta(w.assetSubtype);
+              if (isOwnedAsset) {
+                const subText = sub ? (isRTL ? sub.labelAr : sub.labelEn) : '';
+                return isRTL
+                  ? subText
+                    ? `أصل مملوك · ${subText}`
+                    : 'أصل وممتلكات'
+                  : subText
+                  ? `Owned Asset · ${subText}`
+                  : 'Owned Asset';
+              }
+              return sub
+                ? `${isRTL ? 'متاح للصرف' : 'Spendable'} · ${isRTL ? sub.labelAr : sub.labelEn}`
+                : isRTL
+                ? 'الرصيد المتاح'
+                : 'Available Balance';
+            })()}
           </span>
           <div className="text-2xl sm:text-3xl font-bold tracking-tight text-white">
             {isLocked ? (

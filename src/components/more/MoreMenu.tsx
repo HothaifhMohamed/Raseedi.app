@@ -29,8 +29,12 @@ import {
   UploadCloud,
   KeyRound,
   LogIn,
+  Wand2,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { MerchantRulesModal } from './MerchantRulesModal';
+import { WhatsNewModal } from './WhatsNewModal';
+import { sanitizeMerchantRules } from '../../services/merchantRules';
 import { AdBanner } from '../common/AdBanner';
 import { SUPPORT_CONFIG } from '../../constants/support';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
@@ -126,12 +130,22 @@ export const MoreMenu: React.FC = () => {
   const [reportsOpen, setReportsOpen] = useState(false);
   const [categoriesOpen, setCategoriesOpen] = useState(false);
   const [moneyCirclesOpen, setMoneyCirclesOpen] = useState(false);
+  const [merchantRulesOpen, setMerchantRulesOpen] = useState(false);
+  const [whatsNewOpen, setWhatsNewOpen] = useState(false);
   const [supportLegalTab, setSupportLegalTab] = useState<'support' | 'legal' | null>(null);
   const [activeSubModal, setActiveSubModal] = useState<string | null>(null);
+
+  const activeRulesWorkspaceKey =
+    isOrgWorkspace && activeOrganization ? activeOrganization.id : 'personal';
+  const merchantRulesCount = sanitizeMerchantRules(
+    settings.merchantRulesByWorkspace?.[activeRulesWorkspaceKey]
+  ).length;
 
   useModalBackHandler(reportsOpen, () => setReportsOpen(false), 'more-reports');
   useModalBackHandler(categoriesOpen, () => setCategoriesOpen(false), 'more-categories');
   useModalBackHandler(moneyCirclesOpen, () => setMoneyCirclesOpen(false), 'more-money-circles');
+  useModalBackHandler(merchantRulesOpen, () => setMerchantRulesOpen(false), 'more-merchant-rules');
+  useModalBackHandler(whatsNewOpen, () => setWhatsNewOpen(false), 'more-whats-new');
   useModalBackHandler(supportLegalTab !== null, () => setSupportLegalTab(null), 'more-support-legal');
   useModalBackHandler(activeSubModal !== null, () => setActiveSubModal(null), 'more-submodal');
 
@@ -548,6 +562,29 @@ export const MoreMenu: React.FC = () => {
             </div>
             <ArrowIcon className="w-4 h-4 text-[var(--color-muted)]" />
           </button>
+
+          {/* Merchant Auto-Categorization Rules */}
+          <button
+            type="button"
+            data-testid="more-merchant-rules-btn"
+            onClick={() => setMerchantRulesOpen(true)}
+            className="w-full p-3.5 flex items-center justify-between text-xs hover:bg-[var(--color-bg)] transition-colors text-start min-h-[44px]"
+          >
+            <div className="flex items-center gap-3">
+              <Wand2 className="w-5 h-5 text-[var(--color-accent)] shrink-0" />
+              <div>
+                <div className="font-semibold text-[var(--color-ink)]">
+                  {isRTL ? 'قواعد التصنيف التلقائي للتجار' : 'Merchant Auto-Categorization Rules'}
+                </div>
+                <div className="text-[11px] text-[var(--color-muted)]">
+                  {isRTL
+                    ? `تصنيف تلقائي حسب اسم التاجر وعند الاستيراد (${merchantRulesCount})`
+                    : `Auto-assign category, wallet & cost center (${merchantRulesCount})`}
+                </div>
+              </div>
+            </div>
+            <ArrowIcon className="w-4 h-4 text-[var(--color-muted)]" />
+          </button>
         </div>
       </div>
 
@@ -727,6 +764,27 @@ export const MoreMenu: React.FC = () => {
           </button>
 
           <DirectPWAInstallButton variant="menu" />
+
+          {/* What's New */}
+          <button
+            type="button"
+            data-testid="more-whats-new-btn"
+            onClick={() => setWhatsNewOpen(true)}
+            className="w-full p-3.5 flex items-center justify-between text-xs hover:bg-[var(--color-bg)] transition-colors text-start min-h-[44px]"
+          >
+            <div className="flex items-center gap-3">
+              <Sparkles className="w-5 h-5 text-[var(--color-gold-text)] shrink-0" />
+              <div>
+                <div className="font-semibold text-[var(--color-ink)]">
+                  {isRTL ? 'ما الجديد في رَصِيدِي' : "What's New"}
+                </div>
+                <div className="text-[11px] text-[var(--color-muted)]">
+                  {isRTL ? 'استعرض أحدث المزايا والتحسينات العملية' : 'Explore the latest features and updates'}
+                </div>
+              </div>
+            </div>
+            <ArrowIcon className="w-4 h-4 text-[var(--color-muted)]" />
+          </button>
 
           {/* Support & Contact */}
           <button
@@ -1193,6 +1251,17 @@ export const MoreMenu: React.FC = () => {
           </div>
         </div>
       )}
+
+      <MerchantRulesModal
+        isOpen={merchantRulesOpen}
+        onClose={() => setMerchantRulesOpen(false)}
+      />
+
+      <WhatsNewModal
+        isOpen={whatsNewOpen}
+        onClose={() => setWhatsNewOpen(false)}
+        isRTL={isRTL}
+      />
     </div>
   );
 };

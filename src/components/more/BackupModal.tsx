@@ -56,6 +56,7 @@ import {
   tagTransactionsWithWorkspace,
   tagWalletsWithWorkspace,
 } from '../../services/workspaceSync';
+import { sanitizeMerchantRules } from '../../services/merchantRules';
 import {
   isManualBackupHistoryEntry,
   MAX_AUTO_CLOUD_BACKUPS,
@@ -782,6 +783,9 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
           })
         );
       }
+      const workspaceRules = sanitizeMerchantRules(
+        settings.merchantRulesByWorkspace?.[activeWorkspace || 'personal']
+      );
       const mapped = await mapCsvRowsToTransactionsChunked({
         rows: csvRows,
         mapping: { ...csvMapping, typeIndex: -1 },
@@ -790,6 +794,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
         wallets,
         defaultCurrency: importDefaultCurrency,
         workspaceId: activeWorkspace,
+        merchantRules: workspaceRules,
         onProgress: (processed, total) => {
           if (cancelled || jobId !== previewJobIdRef.current) return;
           if (shouldShowProgress) {
@@ -825,6 +830,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     wallets,
     importDefaultCurrency,
     activeWorkspace,
+    settings.merchantRulesByWorkspace,
     user?.isLoggedIn,
   ]);
 

@@ -11,7 +11,9 @@ import {
   Lock,
   PauseCircle,
   PlayCircle,
+  Plus,
   ReceiptText,
+  SlidersHorizontal,
   Trash2,
   Unlock,
   X,
@@ -20,6 +22,7 @@ import { Wallet } from '../../types';
 import { IconRenderer } from '../common/IconRenderer';
 import { MoneyText } from '../common/MoneyText';
 import { canTransferFromWallet } from '../../services/walletQuickActions';
+import { getAssetSubtypeMeta, getWalletAssetClass } from '../../services/wealthAnalytics';
 
 interface WalletQuickActionsSheetProps {
   wallet: Wallet | null;
@@ -30,8 +33,10 @@ interface WalletQuickActionsSheetProps {
   onDeposit: (wallet: Wallet) => void;
   onWithdraw: (wallet: Wallet) => void;
   onTransfer: (wallet: Wallet) => void;
+  onAdjustBalance?: (wallet: Wallet) => void;
   onViewTransactions: (wallet: Wallet) => void;
   onEdit: (wallet: Wallet) => void;
+  onAddWallet?: () => void;
   onToggleHideBalance: (wallet: Wallet) => void;
   onToggleLock: (wallet: Wallet) => void;
   onToggleArchive: (wallet: Wallet) => void;
@@ -47,8 +52,10 @@ export const WalletQuickActionsSheet: React.FC<WalletQuickActionsSheetProps> = (
   onDeposit,
   onWithdraw,
   onTransfer,
+  onAdjustBalance,
   onViewTransactions,
   onEdit,
+  onAddWallet,
   onToggleHideBalance,
   onToggleLock,
   onToggleArchive,
@@ -131,6 +138,29 @@ export const WalletQuickActionsSheet: React.FC<WalletQuickActionsSheetProps> = (
                     className="font-bold text-[var(--color-ink)] num-tabular"
                   />
                 )}
+                {(() => {
+                  const cls = getWalletAssetClass(wallet);
+                  const sub = getAssetSubtypeMeta(wallet.assetSubtype);
+                  const label = sub
+                    ? isRTL
+                      ? sub.labelAr
+                      : sub.labelEn
+                    : cls === 'asset'
+                    ? isRTL
+                      ? 'أصل / مدخرات'
+                      : 'Owned Asset'
+                    : isRTL
+                    ? 'متاح للصرف'
+                    : 'Spendable';
+                  return (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className={cls === 'asset' ? 'text-[var(--color-gold-text)] font-semibold' : ''}>
+                        {label}
+                      </span>
+                    </>
+                  );
+                })()}
                 {wallet.isArchived && (
                   <>
                     <span aria-hidden="true">·</span>
@@ -248,6 +278,32 @@ export const WalletQuickActionsSheet: React.FC<WalletQuickActionsSheetProps> = (
               <ChevronEnd className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
             </button>
 
+            {onAdjustBalance && (
+              <button
+                type="button"
+                data-testid="quick-action-adjust-balance"
+                onClick={() => onAdjustBalance(wallet)}
+                className="w-full px-3.5 py-3 flex items-center justify-between gap-3 text-start transition-all duration-300 hover:bg-[var(--color-surface)] min-h-[54px]"
+              >
+                <span className="flex items-center gap-3 min-w-0">
+                  <span className="w-9 h-9 rounded-xl bg-[var(--color-gold-soft)] text-[var(--color-gold-text)] flex items-center justify-center shrink-0">
+                    <SlidersHorizontal className="w-4 h-4" />
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-xs font-bold text-[var(--color-ink)] truncate">
+                      {isRTL ? 'تعديل الرصيد (تسوية)' : 'Adjust Balance'}
+                    </span>
+                    <span className="block text-[11px] text-[var(--color-muted)] truncate mt-0.5">
+                      {isRTL
+                        ? 'ضبط الرصيد الفعلي الحالي بقيد تسوية تلقائي'
+                        : 'Reconcile to actual current balance automatically'}
+                    </span>
+                  </span>
+                </span>
+                <ChevronEnd className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
+              </button>
+            )}
+
             <button
               type="button"
               data-testid="quick-action-edit"
@@ -264,13 +320,39 @@ export const WalletQuickActionsSheet: React.FC<WalletQuickActionsSheetProps> = (
                   </span>
                   <span className="block text-[11px] text-[var(--color-muted)] truncate mt-0.5">
                     {isRTL
-                      ? 'تغيير الاسم، العملة، اللون أو الرصيد الافتتاحي'
-                      : 'Update name, currency, color, or opening balance'}
+                      ? 'تغيير الاسم، التصنيف، العملة أو الرصيد الافتتاحي'
+                      : 'Update name, asset class, currency, or opening balance'}
                   </span>
                 </span>
               </span>
               <ChevronEnd className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
             </button>
+
+            {onAddWallet && (
+              <button
+                type="button"
+                data-testid="quick-action-add-wallet"
+                onClick={() => onAddWallet()}
+                className="w-full px-3.5 py-3 flex items-center justify-between gap-3 text-start transition-all duration-300 hover:bg-[var(--color-surface)] min-h-[54px]"
+              >
+                <span className="flex items-center gap-3 min-w-0">
+                  <span className="w-9 h-9 rounded-xl bg-[var(--color-accent)]/12 text-[var(--color-accent)] flex items-center justify-center shrink-0">
+                    <Plus className="w-4 h-4" />
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-xs font-bold text-[var(--color-ink)] truncate">
+                      {isRTL ? 'إضافة محفظة أو أصل جديد' : 'Add New Wallet / Asset'}
+                    </span>
+                    <span className="block text-[11px] text-[var(--color-muted)] truncate mt-0.5">
+                      {isRTL
+                        ? 'إنشاء محفظة للصرف أو أصل ادخاري جديد'
+                        : 'Create another spendable wallet or owned asset'}
+                    </span>
+                  </span>
+                </span>
+                <ChevronEnd className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
+              </button>
+            )}
           </div>
 
           {/* Privacy & Security Row: Hide/Show Balance + Lock/Unlock PIN */}

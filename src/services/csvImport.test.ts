@@ -211,3 +211,54 @@ test('commitImportedTransactionsWithCloudSync emits validating -> saving_local -
     );
   }
 });
+
+test('mapCsvRowsToTransactionsChunked applies merchantRules for category, wallet, and costCenterId', async () => {
+  const mapped = await mapCsvRowsToTransactionsChunked({
+    rows: [
+      ['2026-05-01', '-180', '', '', 'مشوار اوبر للمكتب'],
+      ['2026-05-02', '5000', 'راتب', 'كاش', 'دفعة شهرية'],
+    ],
+    mapping: {
+      dateIndex: 0,
+      amountIndex: 1,
+      categoryIndex: 2,
+      walletIndex: 3,
+      notesIndex: 4,
+    },
+    categories: SAMPLE_CATEGORIES,
+    existingTransactions: [],
+    wallets: SAMPLE_WALLETS,
+    defaultCurrency: 'EGP',
+    workspaceId: 'org-1',
+    merchantRules: [
+      {
+        id: 'mr-uber',
+        keyword: 'أوبر',
+        matchType: 'contains',
+        type: 'expense',
+        categoryId: 'cat-food',
+        walletId: 'w-main',
+        costCenterId: 'cc-sales',
+        isEnabled: true,
+        createdAt: 1000,
+        updatedAt: 1000,
+      },
+    ],
+  });
+
+  assert.equal(mapped.validCount, 2);
+  assert.equal(mapped.previewRows[0].categoryId, 'cat-food');
+  assert.equal(mapped.previewRows[0].walletId, 'w-main');
+  assert.equal(mapped.previewRows[0].costCenterId, 'cc-sales');
+  assert.equal(mapped.previewRows[0].matchedRuleKeyword, 'أوبر');
+
+  const payload = await buildImportedTransactionsPayloadChunked({
+    rows: mapped.previewRows,
+    existingWallets: SAMPLE_WALLETS,
+    newWallets: mapped.autoCreatedWallets,
+    defaultCurrency: 'EGP',
+    workspaceId: 'org-1',
+  });
+  assert.equal(payload.transactions[0].costCenterId, 'cc-sales');
+});
+

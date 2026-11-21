@@ -41,6 +41,19 @@ export function toArabicNumerals(numStr: string | number): string {
   return String(numStr).replace(/[0-9]/g, (w) => arabicDigits[+w]);
 }
 
+export function formatDisplayNumber(
+  value: number,
+  decimals = 1,
+  digitFormat: 'arabic' | 'western' = 'western'
+): string {
+  if (!Number.isFinite(value)) return '0';
+  const rounded = value.toLocaleString('en-US', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+  return digitFormat === 'arabic' ? toArabicNumerals(rounded) : rounded;
+}
+
 export function resolveDisplayDecimals(currencyCode: string, configuredDecimals?: number): number {
   const currencyDecimals = getCurrencyDecimals(currencyCode, 2);
   if (configuredDecimals === undefined || configuredDecimals === 2) {
