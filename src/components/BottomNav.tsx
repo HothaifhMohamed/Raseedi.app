@@ -52,7 +52,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({ onHomeReset }) => {
       <nav
         aria-label={isRTL ? 'التنقل الرئيسي' : 'Main Navigation'}
         data-testid="floating-bottom-nav"
-        className="pointer-events-auto w-full max-w-md rounded-2xl bg-[var(--color-surface)]/85 backdrop-blur-xl border border-[var(--color-line)]/90 shadow-[0_12px_32px_-8px_rgba(14,90,67,0.22)] dark:shadow-[0_14px_34px_-8px_rgba(0,0,0,0.65)] px-2 py-1.5 flex items-center justify-between gap-1 transition-all duration-300"
+        className="pointer-events-auto w-full max-w-md rounded-2xl bg-[var(--color-surface)]/92 backdrop-blur-xl border border-[var(--color-line)] shadow-[0_12px_32px_-8px_rgba(14,94,88,0.18)] dark:shadow-[0_14px_34px_-8px_rgba(4,16,15,0.75)] px-2 py-1.5 flex items-center justify-between gap-1 transition-all duration-300"
       >
         {/* 1. Home */}
         <button

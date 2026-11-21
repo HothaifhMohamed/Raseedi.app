@@ -26,29 +26,30 @@
   --color-fab-to: #13766E;
 }
 
-.dark {
-  /* Raseedi Brand Identity — Dark Mode (Graded Deep Petrol-Charcoal + Warm Ivory Ink + Coin Gold) */
-  --color-bg: #0B1516;
-  --color-surface: #122122;
-  --color-surface-subtle: #1A2E2F;
-  --color-ink: #F5F0E6;
-  --color-muted: #94ADA9;
-  --color-line: #253E40;
-  --color-accent: #2CB8A6;
-  --color-accent-strong: #147269;
-  --color-on-accent: #061E1C;
-  --color-gold: #E7BA4F;
-  --color-gold-soft: #2A2212;
-  --color-gold-text: #F3CF74;
-  --color-income: #45C792;
-  --color-expense: #EB7C6C;
-  --color-warning: #E7BA4F;
-  --color-warning-text: #F3CF74;
-  --color-hero-from: #104C49;
-  --color-hero-via: #0B3A39;
-  --color-hero-to: #072627;
-  --color-fab-from: #2CB8A6;
-  --color-fab-to: #178B7E;
+.dark,
+[data-theme="dark"] {
+  /* Raseedi Brand Identity — Dark Mode (Deep Petrol-Emerald + Warm Ivory Ink + Coin Gold) */
+  --color-bg: #081615;
+  --color-surface: #0F2422;
+  --color-surface-subtle: #16322F;
+  --color-ink: #F6F1E7;
+  --color-muted: #92B0AC;
+  --color-line: #224542;
+  --color-accent: #E2B54B;
+  --color-accent-strong: #C7962B;
+  --color-on-accent: #081615;
+  --color-gold: #E8BE56;
+  --color-gold-soft: #252012;
+  --color-gold-text: #F5D680;
+  --color-income: #42CF95;
+  --color-expense: #F07668;
+  --color-warning: #E8BE56;
+  --color-warning-text: #F5D680;
+  --color-hero-from: #124844;
+  --color-hero-via: #0C3633;
+  --color-hero-to: #072322;
+  --color-fab-from: #E8BE56;
+  --color-fab-to: #C7942A;
 }
 
 @layer base {

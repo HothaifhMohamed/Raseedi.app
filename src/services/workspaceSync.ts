@@ -836,7 +836,7 @@ export function applyThemeToDocument(theme: ThemePreference): boolean {
 
     const themeMeta = document.querySelector('meta#raseedi-theme-color');
     if (themeMeta) {
-      themeMeta.setAttribute('content', isDark ? '#0B1516' : '#F5EFE3');
+      themeMeta.setAttribute('content', isDark ? '#081615' : '#F5EFE3');
     }
   }
 

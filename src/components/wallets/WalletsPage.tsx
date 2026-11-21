@@ -325,7 +325,7 @@ export const WalletsPage: React.FC = () => {
           <Plus className="w-4 h-4" />
           <span>{t('addWallet')}</span>
           {shouldShowPersonalUpgradeUi(subscriptionSummary) && wallets.length >= 3 && (
-            <Crown className="w-3.5 h-3.5 ms-0.5 text-[var(--color-gold)]" />
+            <Crown className="w-3.5 h-3.5 ms-0.5 text-[var(--color-gold)] dark:text-[var(--color-on-accent)]" />
           )}
         </button>
       </div>
