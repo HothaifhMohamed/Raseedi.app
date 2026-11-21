@@ -119,6 +119,16 @@ export function formatFirestoreErrorForDisplay(err: unknown, isRTL: boolean): st
   const code = obj?.code ? String(obj.code) : '';
   const rawMessage = err instanceof Error ? err.message : String(obj?.message || err);
 
+  if (rawMessage.includes('BACKUP_TOO_LARGE')) {
+    return isRTL
+      ? 'حجم النسخة السحابية يتجاوز الحد الأقصى المسموح به (حتى 40,000 معاملة / 99 حزمة). لم يتم حفظ النسخة لمنع فقدان أي معاملات — يُنصح بتصدير نسخة JSON محلية أو أرشفة المعاملات القديمة.'
+      : 'Cloud backup exceeds the maximum allowed size (up to 40,000 transactions / 99 chunks). The backup was cancelled to prevent silent data loss — please export a local JSON backup or archive older transactions.';
+  }
+  if (rawMessage.includes('BACKUP_META_TOO_LARGE')) {
+    return isRTL
+      ? 'حجم بيانات النسخة الاحتياطية يتجاوز الحد الأقصى المسموح به في السحابة. يُنصح بتصدير نسخة JSON محلية.'
+      : 'Cloud backup metadata exceeds the maximum allowed document size. Please export a local JSON backup.';
+  }
   if (isFirestoreMissingIndexError(err)) {
     return isRTL
       ? `خطأ فهرس Firestore (${code || 'failed-precondition'}): ${rawMessage}`

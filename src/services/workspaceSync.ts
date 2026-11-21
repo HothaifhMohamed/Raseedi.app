@@ -733,7 +733,7 @@ export function parseStoredThemePreference(
 }
 
 export function readStoredThemePreference(
-  storage?: Pick<Storage, 'getItem'> | null
+  storage?: (Pick<Storage, 'getItem'> & Partial<Pick<Storage, 'setItem'>>) | null
 ): StoredThemePreference | null {
   const store =
     storage !== undefined
@@ -743,10 +743,25 @@ export function readStoredThemePreference(
       : null;
   if (!store) return null;
 
+  const writableStore: Pick<Storage, 'setItem'> | null =
+    typeof store.setItem === 'function' ? (store as Pick<Storage, 'setItem'>) : null;
+
+  const pinIfLegacy = (pref: StoredThemePreference, forceWrite = false): StoredThemePreference => {
+    if (pref.updatedAt === 0) {
+      return writeStoredThemePreference(pref.theme, Date.now(), writableStore);
+    }
+    if (forceWrite && writableStore) {
+      return writeStoredThemePreference(pref.theme, pref.updatedAt, writableStore);
+    }
+    return pref;
+  };
+
   try {
     const dedicatedRaw = store.getItem(THEME_PREF_STORAGE_KEY);
     const dedicated = parseStoredThemePreference(dedicatedRaw);
-    if (dedicated) return dedicated;
+    if (dedicated) {
+      return pinIfLegacy(dedicated);
+    }
 
     // Seamless migration fallback for existing users who saved theme in raseedi_settings_v1
     const legacyRaw = store.getItem(LEGACY_SETTINGS_STORAGE_KEY);
@@ -757,10 +772,11 @@ export function readStoredThemePreference(
       } | null;
       const legacyTheme = normalizeThemePreference(parsedLegacy?.theme);
       if (legacyTheme) {
-        return {
+        const legacyPref: StoredThemePreference = {
           theme: legacyTheme,
           updatedAt: normalizeTimestampMs(parsedLegacy?.themeUpdatedAt),
         };
+        return pinIfLegacy(legacyPref, true);
       }
     }
   } catch {

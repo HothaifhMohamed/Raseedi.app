@@ -2009,7 +2009,11 @@ export const OrganizationHubModal: React.FC = () => {
                                 });
                               } else {
                                 setTeamFeedback({
-                                  text: isRTL
+                                  text: res.retainedExtrasNotice
+                                    ? isRTL
+                                      ? `تم تحويل المؤسسة إلى مؤسسة سحابية بنجاح! ${res.retainedExtrasNotice}`
+                                      : `Organization upgraded to Cloud successfully! ${res.retainedExtrasNotice}`
+                                    : isRTL
                                     ? 'تم تحويل المؤسسة إلى مؤسسة سحابية بنجاح! يمكنك الآن إضافة أعضاء الفريق مباشرة.'
                                     : 'Organization upgraded to Cloud successfully! You can now add team members directly.',
                                 });

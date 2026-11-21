@@ -14,6 +14,7 @@ import type {
 } from '../types';
 import type { OrgSubscriptionState } from '../services/entitlements';
 import type { DirectOrgUserLookupResult } from '../services/orgCloud';
+import type { UnmigratedOrgExtrasSummary } from '../services/localOrgHelpers';
 
 export type OrgHubTab = 'approvals' | 'cost_centers' | 'parties' | 'team' | 'reports';
 
@@ -70,8 +71,17 @@ export interface OrgContextValue {
   dismissLegacyOrgMigration: () => void;
   completeLegacyOrgMigration: (
     migratedOrgIds: string[],
-    options?: { keepLocalWorkspaces?: boolean }
-  ) => Promise<void>;
+    options?: {
+      keepLocalWorkspaces?: boolean;
+      migratedToCloudIds?: Record<string, string>;
+    }
+  ) => Promise<{
+    retainedOrgs: Array<{
+      orgId: string;
+      orgName: string;
+      summary: UnmigratedOrgExtrasSummary;
+    }>;
+  }>;
   queueLegacyOrgsForMigration: (workspaces: Record<string, OrgWorkspaceData>) => void;
 
   approveOrgTransaction: (txId: string) => void;

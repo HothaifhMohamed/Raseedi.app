@@ -252,6 +252,8 @@ export interface Organization {
   extraSeats?: number;
   localFirstMode?: boolean;
   cloudBackedUpAt?: number;
+  migratedToCloudOrgId?: string;
+  retainedLocalExtrasOnly?: boolean;
   createdAt: number;
   updatedAt: number;
 }

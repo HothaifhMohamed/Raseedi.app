@@ -1440,23 +1440,15 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                         type="button"
                         disabled={isCloudSyncing}
                         onClick={async () => {
+                          setMessage(null);
                           const ok = await syncToCloudNow();
-                          setMessage(
-                            ok
-                              ? {
-                                  text: isRTL
-                                    ? 'تم حفظ نسختك السحابية واشتراكك بنجاح!'
-                                    : 'Cloud backup & PRO status synced!',
-                                }
-                              : {
-                                  text:
-                                    cloudSyncError ||
-                                    (isRTL
-                                      ? 'تعذرت المزامنة السحابية. تحقق من اتصالك بالإنترنت.'
-                                      : 'Cloud sync failed. Check your connection.'),
-                                  error: true,
-                                }
-                          );
+                          if (ok) {
+                            setMessage({
+                              text: isRTL
+                                ? 'تم حفظ نسختك السحابية واشتراكك بنجاح!'
+                                : 'Cloud backup & PRO status synced!',
+                            });
+                          }
                         }}
                         className="py-2 px-3 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-semibold flex items-center justify-center gap-1.5 min-h-[40px] disabled:opacity-50"
                       >
@@ -1685,7 +1677,14 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                 )}
 
                 {cloudSyncError && (
-                  <p className="text-[11px] text-[var(--color-expense)]">{cloudSyncError}</p>
+                  <div
+                    data-testid="cloud-sync-error-banner"
+                    role="alert"
+                    className="p-2.5 rounded-lg bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/30 text-[11px] text-[var(--color-expense)] flex items-start gap-2 leading-relaxed"
+                  >
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                    <span>{cloudSyncError}</span>
+                  </div>
                 )}
 
                 {cloudSkippedAttachmentsWarning > 0 && (

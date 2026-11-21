@@ -9,6 +9,7 @@ import {
   getDocFromServer,
   getDocs,
   getDocsFromServer,
+  increment,
   limit,
   onSnapshot,
   orderBy,
@@ -72,6 +73,10 @@ import {
   runResilientBatchCommits,
   stripUndefinedDeep,
 } from './workspaceSync';
+import {
+  getUnmigratedOrgExtrasSummary,
+  UnmigratedOrgExtrasSummary,
+} from './localOrgHelpers';
 
 export interface OrgActorInfo {
   uid: string;
@@ -170,7 +175,7 @@ function parseTransactionDoc(docData: Record<string, unknown>): Transaction | nu
   };
 }
 
-function parseWalletDoc(docData: Record<string, unknown>): Wallet | null {
+export function parseWalletDoc(docData: Record<string, unknown>): Wallet | null {
   const rawPayload = docData.payload as Partial<Wallet> | undefined;
   if (!rawPayload || typeof rawPayload !== 'object') return null;
   const id = String(docData.id || rawPayload.id || '');
@@ -224,7 +229,7 @@ function sanitizeOrgDateForCloud(rawDate: unknown): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-function buildOrgTxPayloadForCloud(orgId: string, tx: Transaction): Record<string, unknown> {
+export function buildOrgTxPayloadForCloud(orgId: string, tx: Transaction): Record<string, unknown> {
   const safeId = normalizeValidFirestoreId(tx.id, 'tx');
   const currency = (tx.currency || 'EGP').trim().toUpperCase().slice(0, 8) || 'EGP';
   const rawAmount = Number(tx.amount);
@@ -798,23 +803,14 @@ function applyWalletDeltasToBatch(
   wallets: Wallet[],
   deltas: Map<string, number>
 ): void {
-  for (const [walletId, deltaMinor] of deltas.entries()) {
+  for (const [walletId, rawDeltaMinor] of deltas.entries()) {
+    const deltaMinor = Math.round(rawDeltaMinor);
     if (deltaMinor === 0) continue;
     const w = wallets.find((item) => item.id === walletId);
     if (!w) continue;
-    const currentMinor =
-      typeof w.balanceMinor === 'number' ? w.balanceMinor : toMinor(w.balance, w.currency);
-    const nextMinor = currentMinor + deltaMinor;
-    const nextWallet: Wallet = stripUndefinedDeep(
-      stripSensitivePinFromWallet({
-        ...w,
-        balanceMinor: nextMinor,
-        balance: fromMinor(nextMinor, w.currency),
-      })
-    );
     batch.update(doc(db, 'organizations', orgId, 'wallets', walletId), {
-      balanceMinor: nextMinor,
-      payload: nextWallet,
+      balanceMinor: increment(deltaMinor),
+      'payload.balanceMinor': increment(deltaMinor),
       updatedAt: serverTimestamp(),
     });
   }
@@ -834,7 +830,8 @@ export async function createOrgTransactionCloud(
     submittedBy: tx.submittedBy || actor.uid,
     submittedByName: tx.submittedByName || actor.name,
   });
-  batch.set(doc(db, 'organizations', orgId, 'transactions', tx.id), txDoc);
+  const txDocId = String(txDoc.id);
+  batch.set(doc(db, 'organizations', orgId, 'transactions', txDocId), txDoc);
 
   const deltas = computeWalletBalanceDeltas(tx, wallets, customRates, 1);
   applyWalletDeltasToBatch(batch, orgId, wallets, deltas);
@@ -843,7 +840,7 @@ export async function createOrgTransactionCloud(
     orgId,
     'create',
     'transaction',
-    tx.id,
+    txDocId,
     actor,
     auditSummary || `إضافة معاملة (${tx.type}): ${tx.amount} ${tx.currency}`,
     undefined,
@@ -1097,24 +1094,15 @@ export async function moveOrgTransactionsCloud(
     for (const [k, v] of add.entries()) totalDeltas.set(k, (totalDeltas.get(k) || 0) + v);
   }
 
-  for (const [walletId, deltaMinor] of totalDeltas.entries()) {
+  for (const [walletId, rawDeltaMinor] of totalDeltas.entries()) {
+    const deltaMinor = Math.round(rawDeltaMinor);
     if (deltaMinor === 0) continue;
     const w = wallets.find((item) => item.id === walletId);
     if (!w) continue;
-    const currentMinor =
-      typeof w.balanceMinor === 'number' ? w.balanceMinor : toMinor(w.balance, w.currency);
-    const nextMinor = currentMinor + deltaMinor;
-    const nextWallet: Wallet = stripUndefinedDeep(
-      stripSensitivePinFromWallet({
-        ...w,
-        balanceMinor: nextMinor,
-        balance: fromMinor(nextMinor, w.currency),
-      })
-    );
     ops.push((batch) => {
       batch.update(doc(db, 'organizations', orgId, 'wallets', walletId), {
-        balanceMinor: nextMinor,
-        payload: nextWallet,
+        balanceMinor: increment(deltaMinor),
+        'payload.balanceMinor': increment(deltaMinor),
         updatedAt: serverTimestamp(),
       });
     });
@@ -1185,41 +1173,89 @@ export async function importOrgTransactionsBatchCloud(
     }
   }
 
-  await runResilientBatchCommits({
-    items: newTransactions,
-    batchSize: FIRESTORE_FAST_BATCH_SIZE,
-    concurrency: FIRESTORE_BATCH_CONCURRENCY,
-    maxRetries: 3,
-    onProgress,
-    commitChunk: async (slice, batchIndex) => {
-      const batch = writeBatch(db);
-      for (const tx of slice) {
-        const cloudDoc = buildOrgTxPayloadForCloud(orgId, {
-          ...tx,
-          submittedBy: tx.submittedBy || actor.uid,
-          submittedByName: tx.submittedByName || actor.name,
-        });
-        batch.set(doc(db, 'organizations', orgId, 'transactions', tx.id), cloudDoc);
-      }
-      if (batchIndex === 0 && slice.length > 0) {
-        const audit = makeAuditDocPayload(
-          orgId,
-          'create',
-          'transaction',
-          slice[0].id,
-          actor,
-          `استيراد دفعة معاملات (${total})`
-        );
-        batch.set(doc(db, 'organizations', orgId, 'auditLogs', audit.id), audit.data);
-      }
-      await batch.commit();
-    },
-  });
+  let committedBatchCount = 0;
 
-  if (totalDeltas.size > 0) {
-    const walletBatch = writeBatch(db);
-    applyWalletDeltasToBatch(walletBatch, orgId, wallets, totalDeltas);
-    await walletBatch.commit();
+  try {
+    await runResilientBatchCommits({
+      items: newTransactions,
+      batchSize: FIRESTORE_FAST_BATCH_SIZE,
+      concurrency: FIRESTORE_BATCH_CONCURRENCY,
+      maxRetries: 3,
+      onProgress,
+      commitChunk: async (slice, batchIndex) => {
+        const batch = writeBatch(db);
+        let firstDocId = '';
+        for (const tx of slice) {
+          const cloudDoc = buildOrgTxPayloadForCloud(orgId, {
+            ...tx,
+            submittedBy: tx.submittedBy || actor.uid,
+            submittedByName: tx.submittedByName || actor.name,
+          });
+          const cloudDocId = String(cloudDoc.id);
+          if (!firstDocId) firstDocId = cloudDocId;
+          batch.set(doc(db, 'organizations', orgId, 'transactions', cloudDocId), cloudDoc);
+        }
+        if (batchIndex === 0 && slice.length > 0) {
+          const audit = makeAuditDocPayload(
+            orgId,
+            'create',
+            'transaction',
+            firstDocId || normalizeValidFirestoreId(slice[0].id, 'tx'),
+            actor,
+            `استيراد دفعة معاملات (${total})`
+          );
+          batch.set(doc(db, 'organizations', orgId, 'auditLogs', audit.id), audit.data);
+        }
+        await batch.commit();
+        committedBatchCount += 1;
+      },
+    });
+
+    if (totalDeltas.size > 0) {
+      const walletBatch = writeBatch(db);
+      applyWalletDeltasToBatch(walletBatch, orgId, wallets, totalDeltas);
+      await walletBatch.commit();
+    }
+  } catch (err) {
+    // If one or more transaction batches already landed in Firestore before failure,
+    // heal wallet balances directly from authoritative approved transactions.
+    if (committedBatchCount > 0) {
+      try {
+        const [serverTxResult, walletsSnap] = await Promise.all([
+          forceFetchOrgTransactionsFromServer(orgId).catch(async () => {
+            const snap = await getDocs(collection(db, 'organizations', orgId, 'transactions'));
+            const active: Transaction[] = [];
+            const trash: Transaction[] = [];
+            for (const d of snap.docs) {
+              const parsed = parseTransactionDoc(d.data() as Record<string, unknown>);
+              if (!parsed) continue;
+              if (parsed.deletedAt) trash.push(parsed);
+              else active.push(parsed);
+            }
+            return { active, trash };
+          }),
+          getDocsFromServer(collection(db, 'organizations', orgId, 'wallets')).catch(() =>
+            getDocs(collection(db, 'organizations', orgId, 'wallets'))
+          ),
+        ]);
+        const latestWallets = walletsSnap.docs
+          .map((d) => parseWalletDoc(d.data() as Record<string, unknown>))
+          .filter((w): w is Wallet => w !== null);
+        await recalculateOrgBalancesFromApproved(
+          orgId,
+          latestWallets.length > 0 ? latestWallets : wallets,
+          serverTxResult.active,
+          customRates,
+          actor
+        );
+      } catch (recalcErr) {
+        console.warn(
+          '[importOrgTransactionsBatchCloud] Balance recalculation after partial batch failure failed:',
+          recalcErr
+        );
+      }
+    }
+    throw err;
   }
 }
 
@@ -1616,7 +1652,7 @@ export async function migrateLegacyOrgToCloud(
   legacyWorkspace: OrgWorkspaceData,
   actor: OrgActorInfo,
   onProgress?: (completed: number, total: number) => void
-): Promise<void> {
+): Promise<UnmigratedOrgExtrasSummary> {
   const orgCurrency = (legacyWorkspace.organization.currency || 'EGP').trim().toUpperCase().slice(0, 8) || 'EGP';
   const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
 
@@ -1764,6 +1800,8 @@ export async function migrateLegacyOrgToCloud(
       await batch.commit();
     },
   });
+
+  return getUnmigratedOrgExtrasSummary(legacyWorkspace);
 }
 
 export interface CreateCloudOrgDirectInput {

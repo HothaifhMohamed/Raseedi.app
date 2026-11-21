@@ -173,3 +173,18 @@ test('mergeCloudAndLocalState never lets stale cloud light theme overwrite newer
   assert.equal(merged.settings.themeUpdatedAt, 1_760_000_050_000);
 });
 
+test('formatFirestoreErrorForDisplay formats BACKUP_TOO_LARGE and BACKUP_META_TOO_LARGE clearly in Arabic and English', () => {
+  const tooLargeAr = formatFirestoreErrorForDisplay(new Error('BACKUP_TOO_LARGE'), true);
+  assert.match(tooLargeAr, /حجم النسخة الاحتياطية|تصدير/);
+
+  const tooLargeEn = formatFirestoreErrorForDisplay(new Error('BACKUP_TOO_LARGE'), false);
+  assert.match(tooLargeEn, /backup size exceeds|export/i);
+
+  const metaTooLargeAr = formatFirestoreErrorForDisplay(new Error('BACKUP_META_TOO_LARGE'), true);
+  assert.match(metaTooLargeAr, /حجم بيانات النسخة الاحتياطية|الحد الأقصى المسموح/);
+
+  const metaTooLargeEn = formatFirestoreErrorForDisplay(new Error('BACKUP_META_TOO_LARGE'), false);
+  assert.match(metaTooLargeEn, /metadata exceeds|limit/i);
+});
+
+

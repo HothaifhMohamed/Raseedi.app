@@ -5,13 +5,18 @@ import {
   applyOrgTxBalanceToWallets,
   buildLocalOrgWorkspace,
   doesOrgTxCountTowardBalance,
+  formatUnmigratedOrgExtrasNotice,
+  getUnmigratedOrgExtrasSummary,
+  isRetainedExtrasOnlyWorkspace,
   recalculateLocalOrgWallets,
+  retainUnmigratedLocalOrgExtras,
 } from './localOrgHelpers';
 import {
   getLocalTodayDateString,
   normalizeScannedReceiptResult,
   validateScanReceiptPayload,
 } from './serverSecurity';
+import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS, validateBackupSchema } from './db';
 import { Transaction } from '../types';
 
 test('buildLocalOrgWorkspace initializes localFirstMode org with wallets, minor units, and owner member', () => {
@@ -243,3 +248,120 @@ test('serverSecurity receipt scan validation and normalization helpers work reli
   assert.equal(normalized.merchant, 'Carrefour Egypt');
   assert.equal(normalized.type, 'expense');
 });
+
+test('retainUnmigratedLocalOrgExtras preserves debts, goals, and templates safely while clearing migrated collections and passing backup schema validation', () => {
+  const ws = buildLocalOrgWorkspace({
+    name: 'مؤسسة النجاح',
+    currency: 'EGP',
+    loadSampleData: false,
+    actor: { uid: 'u1', name: 'Owner' },
+    now: 1_760_000_000_000,
+  });
+
+  // Empty extras check
+  assert.equal(getUnmigratedOrgExtrasSummary(ws).hasUnmigratedExtras, false);
+  assert.equal(isRetainedExtrasOnlyWorkspace(ws), false);
+
+  const wsWithExtras = {
+    ...ws,
+    debts: [
+      {
+        id: 'debt-1',
+        type: 'owed_to_me' as const,
+        personName: 'شركة الموردين',
+        totalAmount: 2500,
+        paidAmount: 500,
+        currency: 'EGP',
+        dueDate: '2026-06-01',
+        payments: [],
+        isSettled: false,
+        createdAt: 1000,
+      },
+    ],
+    goals: [
+      {
+        id: 'goal-1',
+        name: 'احتياطي الطوارئ',
+        targetAmount: 50000,
+        currentAmount: 12000,
+        currency: 'EGP',
+        color: '#0D5C53',
+        icon: 'Target',
+        isCompleted: false,
+        createdAt: 1000,
+      },
+    ],
+    templates: [
+      {
+        id: 'tpl-1',
+        name: 'إيجار المكتب',
+        type: 'expense' as const,
+        amount: 8000,
+        currency: 'EGP',
+        categoryId: 'cat-rent',
+        walletId: ws.wallets[0].id,
+        priority: 'normal' as const,
+        doesNotAffectBalance: false,
+      },
+    ],
+  };
+
+  const summary = getUnmigratedOrgExtrasSummary(wsWithExtras);
+  assert.equal(summary.hasUnmigratedExtras, true);
+  assert.equal(summary.debtsCount, 1);
+  assert.equal(summary.goalsCount, 1);
+  assert.equal(summary.templatesCount, 1);
+  assert.equal(summary.totalCount, 3);
+
+  const cloudOrgId = 'org-cloud-999';
+  const retained = retainUnmigratedLocalOrgExtras(wsWithExtras, cloudOrgId, 1_760_000_099_000);
+
+  assert.equal(isRetainedExtrasOnlyWorkspace(retained), true);
+  assert.equal(retained.organization.id, cloudOrgId);
+  assert.equal(retained.organization.migratedToCloudOrgId, cloudOrgId);
+  assert.equal(retained.organization.localFirstMode, false);
+  assert.equal(retained.organization.retainedLocalExtrasOnly, true);
+
+  // Migrated collections cleared so they never double-count or confuse switchers
+  assert.equal(retained.wallets.length, 0);
+  assert.equal(retained.transactions.length, 0);
+  assert.equal(retained.members.length, 0);
+  assert.equal(retained.budgets.length, 0);
+
+  // Unmigrated collections strictly preserved
+  assert.equal(retained.debts.length, 1);
+  assert.equal(retained.debts[0].id, 'debt-1');
+  assert.equal(retained.goals.length, 1);
+  assert.equal(retained.goals[0].id, 'goal-1');
+  assert.equal(retained.templates.length, 1);
+  assert.equal(retained.templates[0].id, 'tpl-1');
+
+  // Backup schema validation passes when keyed under cloudOrgId
+  const validation = validateBackupSchema({
+    transactions: [],
+    wallets: [],
+    categories: DEFAULT_CATEGORIES,
+    budgets: [],
+    debts: [],
+    goals: [],
+    templates: [],
+    moneyCircles: [],
+    orgWorkspaces: { [cloudOrgId]: retained },
+    activeWorkspace: cloudOrgId,
+    settings: DEFAULT_SETTINGS,
+    hasCompletedOnboarding: true,
+  });
+  assert.equal(validation.valid, true);
+
+  // Localized user notices mention retained items
+  const noticeAr = formatUnmigratedOrgExtrasNotice(summary, true);
+  assert.match(noticeAr, /1 دين/);
+  assert.match(noticeAr, /1 هدف/);
+  assert.match(noticeAr, /1 قالب/);
+
+  const noticeEn = formatUnmigratedOrgExtrasNotice(summary, false);
+  assert.match(noticeEn, /1 debt/i);
+  assert.match(noticeEn, /1 goal/i);
+  assert.match(noticeEn, /1 template/i);
+});
+

@@ -105,7 +105,12 @@ import {
   appendLocalOrgAuditLog,
   applyOrgTxBalanceToWallets,
   buildLocalOrgWorkspace,
+  formatUnmigratedOrgExtrasNotice,
+  getUnmigratedOrgExtrasSummary,
+  isRetainedExtrasOnlyWorkspace,
   recalculateLocalOrgWallets,
+  retainUnmigratedLocalOrgExtras,
+  UnmigratedOrgExtrasSummary,
 } from '../services/localOrgHelpers';
 import { verifyAndUpgradePin } from '../services/security';
 import { isPrimarySystemAdminEmail } from '../services/licenseCodes';
@@ -362,7 +367,12 @@ interface AppContextType {
   upgradeLocalOrgToCloud: (
     orgId: string,
     onProgress?: (completed: number, total: number) => void
-  ) => Promise<{ ok: boolean; orgId?: string; error?: string }>;
+  ) => Promise<{
+    ok: boolean;
+    orgId?: string;
+    error?: string;
+    retainedExtrasNotice?: string;
+  }>;
   joinOrganizationByCode: (
     inviteCode: string
   ) => Promise<{ ok: boolean; orgId?: string; orgName?: string; error?: string }>;
@@ -381,8 +391,17 @@ interface AppContextType {
   dismissLegacyOrgMigration: () => void;
   completeLegacyOrgMigration: (
     migratedOrgIds: string[],
-    options?: { keepLocalWorkspaces?: boolean }
-  ) => Promise<void>;
+    options?: {
+      keepLocalWorkspaces?: boolean;
+      migratedToCloudIds?: Record<string, string>;
+    }
+  ) => Promise<{
+    retainedOrgs: Array<{
+      orgId: string;
+      orgName: string;
+      summary: UnmigratedOrgExtrasSummary;
+    }>;
+  }>;
   queueLegacyOrgsForMigration: (workspaces: Record<string, OrgWorkspaceData>) => void;
 
   // Enterprise Operations
@@ -1153,10 +1172,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     [activeWorkspace, orgRefs]
   );
 
-  const activeLocalOrgWs = useMemo(
-    () => (activeWorkspace !== 'personal' ? localOrgWorkspaces[activeWorkspace] || null : null),
-    [activeWorkspace, localOrgWorkspaces]
-  );
+  const activeLocalOrgWs = useMemo(() => {
+    if (activeWorkspace === 'personal') return null;
+    const candidate = localOrgWorkspaces[activeWorkspace] || null;
+    return candidate && !isRetainedExtrasOnlyWorkspace(candidate) ? candidate : null;
+  }, [activeWorkspace, localOrgWorkspaces]);
 
   const isCloudActiveOrg = Boolean(user?.isLoggedIn && activeOrgRef);
   const isUsingLocalOrgMode = activeWorkspace !== 'personal' && !isCloudActiveOrg && Boolean(activeLocalOrgWs);
@@ -1278,7 +1298,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     }
     for (const ws of Object.values(localOrgWorkspaces)) {
-      if (ws?.organization?.id && !byId.has(ws.organization.id)) {
+      if (ws?.organization?.id && !isRetainedExtrasOnlyWorkspace(ws) && !byId.has(ws.organization.id)) {
         byId.set(ws.organization.id, ws.organization);
       }
     }
@@ -1920,6 +1940,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 w &&
                   w.organization &&
                   w.organization.id &&
+                  !isRetainedExtrasOnlyWorkspace(w) &&
                   !w.organization.localFirstMode &&
                   !w.organization.cloudBackedUpAt
               )
@@ -2274,6 +2295,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             w &&
               w.organization &&
               w.organization.id &&
+              !isRetainedExtrasOnlyWorkspace(w) &&
               !w.organization.localFirstMode &&
               !w.organization.cloudBackedUpAt
           )
@@ -3837,7 +3859,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       });
       return true;
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Cloud backup failed';
+      const isAr = snap.settings.language !== 'en';
+      const msg = formatFirestoreErrorForDisplay(err, isAr);
       setCloudSyncStatus('error');
       setCloudSyncError(msg);
       return false;
@@ -4397,12 +4420,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           return next;
         });
       } catch (err) {
-        const msg =
-          err instanceof Error
-            ? err.message
-            : snap.settings.language === 'en'
-            ? 'Auto cloud sync failed'
-            : 'فشلت المزامنة السحابية التلقائية';
+        const isAr = snap.settings.language !== 'en';
+        const msg = formatFirestoreErrorForDisplay(err, isAr);
         setCloudSyncStatus('error');
         setCloudSyncError(msg);
       }
@@ -4633,10 +4652,27 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, []);
 
   const completeLegacyOrgMigration = useCallback(
-    async (migratedOrgIds: string[], options?: { keepLocalWorkspaces?: boolean }) => {
+    async (
+      migratedOrgIds: string[],
+      options?: {
+        keepLocalWorkspaces?: boolean;
+        migratedToCloudIds?: Record<string, string>;
+      }
+    ): Promise<{
+      retainedOrgs: Array<{
+        orgId: string;
+        orgName: string;
+        summary: UnmigratedOrgExtrasSummary;
+      }>;
+    }> => {
       const idSet = new Set(migratedOrgIds);
       const currentStored = await loadOrgWorkspaces();
       const nextMap: Record<string, OrgWorkspaceData> = {};
+      const retainedOrgs: Array<{
+        orgId: string;
+        orgName: string;
+        summary: UnmigratedOrgExtrasSummary;
+      }> = [];
       const now = Date.now();
 
       for (const [k, ws] of Object.entries(currentStored.workspaces || {})) {
@@ -4652,6 +4688,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 updatedAt: now,
               },
             };
+          } else if (ws) {
+            const extrasSummary = getUnmigratedOrgExtrasSummary(ws);
+            if (extrasSummary.hasUnmigratedExtras) {
+              const targetCloudId =
+                options?.migratedToCloudIds?.[orgId] ||
+                options?.migratedToCloudIds?.[k] ||
+                orgId;
+              nextMap[targetCloudId] = retainUnmigratedLocalOrgExtras(ws, targetCloudId, now);
+              retainedOrgs.push({
+                orgId: targetCloudId,
+                orgName: ws.organization?.name || orgId,
+                summary: extrasSummary,
+              });
+            }
           }
         } else if (ws) {
           nextMap[k] = ws;
@@ -4668,13 +4718,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
         return next;
       });
+      return { retainedOrgs };
     },
     []
   );
 
   const queueLegacyOrgsForMigration = useCallback((workspaces: Record<string, OrgWorkspaceData>) => {
     const list = Object.values(workspaces || {}).filter(
-      (w): w is OrgWorkspaceData => Boolean(w && w.organization && w.organization.id)
+      (w): w is OrgWorkspaceData =>
+        Boolean(w && w.organization && w.organization.id && !isRetainedExtrasOnlyWorkspace(w))
     );
     if (list.length === 0) return;
     const mergedMap = { ...latestLocalOrgWorkspacesRef.current, ...workspaces };
@@ -4832,7 +4884,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     async (
       orgId: string,
       onProgress?: (completed: number, total: number) => void
-    ): Promise<{ ok: boolean; orgId?: string; error?: string }> => {
+    ): Promise<{
+      ok: boolean;
+      orgId?: string;
+      error?: string;
+      retainedExtrasNotice?: string;
+    }> => {
       const isAr = latestPersonalRef.current.settings.language !== 'en';
       if (!auth.currentUser?.uid || !user?.isLoggedIn) {
         return {
@@ -4892,24 +4949,40 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         );
         setActiveCloudOrg(result.organization);
 
-        // Remove local-only copy after successful migration to Firestore
+        // Protect unmigrated local-only collections (debts, goals, templates) safely
+        // without creating duplicate workspace entries in the switcher.
+        const extrasSummary = getUnmigratedOrgExtrasSummary(localWs);
+        const retainedExtrasNotice = extrasSummary.hasUnmigratedExtras
+          ? formatUnmigratedOrgExtrasNotice(extrasSummary, isAr)
+          : undefined;
+
         const nextLocalMap = { ...latestLocalOrgWorkspacesRef.current };
         delete nextLocalMap[orgId];
+        if (extrasSummary.hasUnmigratedExtras) {
+          nextLocalMap[result.orgId] = retainUnmigratedLocalOrgExtras(localWs, result.orgId);
+        }
         latestLocalOrgWorkspacesRef.current = nextLocalMap;
         setLocalOrgWorkspaces(nextLocalMap);
         await saveOrgWorkspaces(result.orgId, nextLocalMap);
-        void removeOrgWorkspaceFromBackupMeta(auth.currentUser.uid, orgId).catch(() => null);
+
+        if (!extrasSummary.hasUnmigratedExtras || result.orgId !== orgId) {
+          void removeOrgWorkspaceFromBackupMeta(auth.currentUser.uid, orgId).catch(() => null);
+        }
 
         setActiveWorkspace(result.orgId);
         saveActiveWorkspacePref(result.orgId);
         setOrgActionError(null);
         showToast(
-          isAr
+          retainedExtrasNotice
+            ? isAr
+              ? `تم تحويل "${result.organization.name}" إلى مؤسسة سحابية بنجاح! ${retainedExtrasNotice}`
+              : `"${result.organization.name}" upgraded to Cloud! ${retainedExtrasNotice}`
+            : isAr
             ? `تم تحويل "${result.organization.name}" إلى مؤسسة سحابية بنجاح — يمكنك الآن إضافة أعضاء الفريق!`
             : `"${result.organization.name}" upgraded to Cloud Organization — you can now add team members!`,
-          'success'
+          retainedExtrasNotice ? 'warning' : 'success'
         );
-        return { ok: true, orgId: result.orgId };
+        return { ok: true, orgId: result.orgId, retainedExtrasNotice };
       } catch (err) {
         const msg = formatFirestoreErrorForDisplay(err, isAr);
         return { ok: false, error: msg };

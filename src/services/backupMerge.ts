@@ -102,3 +102,44 @@ export function resolveSafeCloudBackupWrite(params: {
     mergedData: localData,
   };
 }
+
+export const MAX_CLOUD_BACKUP_TRANSACTIONS = 40_000;
+export const MAX_CLOUD_BACKUP_CHUNKS = 99;
+
+export interface PreparedCloudBackupChunks<T> {
+  chunks: T[][];
+  storedTxCount: number;
+}
+
+/**
+ * Validates cloud backup transaction count and chunk count against Firestore limits.
+ * Throws `BACKUP_TOO_LARGE` instead of silently truncating transactions or chunks.
+ */
+export function prepareCloudBackupChunks<T>(
+  transactions: readonly T[],
+  buildChunks: (items: T[]) => T[][],
+  limits?: {
+    maxTransactions?: number;
+    maxChunks?: number;
+  }
+): PreparedCloudBackupChunks<T> {
+  const maxTransactions = limits?.maxTransactions ?? MAX_CLOUD_BACKUP_TRANSACTIONS;
+  const maxChunks = limits?.maxChunks ?? MAX_CLOUD_BACKUP_CHUNKS;
+
+  if (transactions.length > maxTransactions) {
+    throw new Error('BACKUP_TOO_LARGE');
+  }
+
+  const chunks = buildChunks(Array.from(transactions));
+  if (chunks.length > maxChunks) {
+    throw new Error('BACKUP_TOO_LARGE');
+  }
+
+  const storedTxCount = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  if (storedTxCount !== transactions.length) {
+    throw new Error('BACKUP_TOO_LARGE');
+  }
+
+  return { chunks, storedTxCount };
+}
+

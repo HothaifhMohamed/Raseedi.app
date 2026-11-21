@@ -507,5 +507,67 @@ describe('workspaceSync unified path and workspace isolation', () => {
     assert.equal(merged.adoptedIncomingTheme, false);
     assert.equal(THEME_PREF_STORAGE_KEY, 'raseedi_theme_pref_v1');
   });
+
+  it('pins legacy stored theme values with updatedAt === 0 immediately so stale cloud snapshots cannot overwrite them', () => {
+    // 1) Plain string legacy value in raseedi_theme_pref_v1
+    const mem1 = new Map<string, string>([[THEME_PREF_STORAGE_KEY, 'dark']]);
+    const storage1 = {
+      getItem: (k: string) => mem1.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        mem1.set(k, v);
+      },
+    };
+
+    const pinned1 = readStoredThemePreference(storage1);
+    assert.ok(pinned1);
+    assert.equal(pinned1.theme, 'dark');
+    assert.ok(pinned1.updatedAt > 0, 'legacy plain-string theme must be pinned with updatedAt > 0');
+    const persisted1 = JSON.parse(mem1.get(THEME_PREF_STORAGE_KEY) || '{}');
+    assert.equal(persisted1.theme, 'dark');
+    assert.equal(persisted1.updatedAt, pinned1.updatedAt);
+
+    // An older cloud snapshot with themeUpdatedAt: 1000 must NOT overwrite the pinned dark theme
+    const reconciled = reconcileThemeSettings(
+      { theme: 'dark', themeUpdatedAt: 0 },
+      { theme: 'light', themeUpdatedAt: 1000 },
+      pinned1
+    );
+    assert.equal(reconciled.theme, 'dark');
+    assert.equal(reconciled.adoptedIncoming, false);
+
+    // 2) JSON object with updatedAt: 0 in raseedi_theme_pref_v1
+    const mem2 = new Map<string, string>([
+      [THEME_PREF_STORAGE_KEY, JSON.stringify({ theme: 'dark', updatedAt: 0 })],
+    ]);
+    const storage2 = {
+      getItem: (k: string) => mem2.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        mem2.set(k, v);
+      },
+    };
+    const pinned2 = readStoredThemePreference(storage2);
+    assert.ok(pinned2);
+    assert.equal(pinned2.theme, 'dark');
+    assert.ok(pinned2.updatedAt > 0);
+    assert.equal(JSON.parse(mem2.get(THEME_PREF_STORAGE_KEY) || '{}').updatedAt, pinned2.updatedAt);
+
+    // 3) Legacy raseedi_settings_v1 with theme: 'dark' and no themeUpdatedAt
+    const mem3 = new Map<string, string>([
+      ['raseedi_settings_v1', JSON.stringify({ theme: 'dark', language: 'ar' })],
+    ]);
+    const storage3 = {
+      getItem: (k: string) => mem3.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        mem3.set(k, v);
+      },
+    };
+    const pinned3 = readStoredThemePreference(storage3);
+    assert.ok(pinned3);
+    assert.equal(pinned3.theme, 'dark');
+    assert.ok(pinned3.updatedAt > 0);
+    assert.equal(JSON.parse(mem3.get(THEME_PREF_STORAGE_KEY) || '{}').theme, 'dark');
+    assert.equal(JSON.parse(mem3.get(THEME_PREF_STORAGE_KEY) || '{}').updatedAt, pinned3.updatedAt);
+  });
 });
+
 

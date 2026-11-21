@@ -21,6 +21,11 @@ import {
 } from '../../services/orgCloud';
 import { loadOrgWorkspaces } from '../../services/db';
 import { formatLocalDate } from '../../services/calculations';
+import { formatFirestoreErrorForDisplay } from '../../services/safeRecovery';
+import {
+  formatUnmigratedOrgExtrasNotice,
+  getUnmigratedOrgExtrasSummary,
+} from '../../services/localOrgHelpers';
 import { OrgWorkspaceData } from '../../types';
 
 export const OrgMigrationWizardModal: React.FC = () => {
@@ -119,6 +124,7 @@ export const OrgMigrationWizardModal: React.FC = () => {
     downloadSafetyJson();
 
     const serverMigratedIds: string[] = [];
+    const migratedToCloudIds: Record<string, string> = {};
     const fallbackTargets: OrgWorkspaceData[] = [];
     let lastCreatedOrgId = '';
     try {
@@ -158,6 +164,7 @@ export const OrgMigrationWizardModal: React.FC = () => {
           );
 
           serverMigratedIds.push(org.id);
+          migratedToCloudIds[org.id] = created.orgId;
           lastCreatedOrgId = created.orgId;
         } catch {
           // Server endpoint unavailable (e.g. static Vercel hosting) -> try direct atomic Firestore Cloud Org creation
@@ -176,6 +183,7 @@ export const OrgMigrationWizardModal: React.FC = () => {
               },
             });
             serverMigratedIds.push(org.id);
+            migratedToCloudIds[org.id] = directCreated.orgId;
             lastCreatedOrgId = directCreated.orgId;
           } catch {
             // Final offline-safe fallback to user Cloud Backup
@@ -226,14 +234,34 @@ export const OrgMigrationWizardModal: React.FC = () => {
         );
       }
 
+      let retainedNotice = '';
       if (serverMigratedIds.length > 0) {
-        await completeLegacyOrgMigration(serverMigratedIds);
+        const migrationRes = await completeLegacyOrgMigration(serverMigratedIds, {
+          migratedToCloudIds,
+        });
+        if (migrationRes.retainedOrgs.length > 0) {
+          const combined = migrationRes.retainedOrgs.reduce(
+            (acc, item) => ({
+              debtsCount: acc.debtsCount + item.summary.debtsCount,
+              goalsCount: acc.goalsCount + item.summary.goalsCount,
+              templatesCount: acc.templatesCount + item.summary.templatesCount,
+              totalCount: acc.totalCount + item.summary.totalCount,
+              hasUnmigratedExtras: true,
+            }),
+            { debtsCount: 0, goalsCount: 0, templatesCount: 0, totalCount: 0, hasUnmigratedExtras: false }
+          );
+          retainedNotice = formatUnmigratedOrgExtrasNotice(combined, isRTL);
+        }
       }
 
       const totalMigrated = serverMigratedIds.length + fallbackTargets.length;
       setDoneCount(totalMigrated);
       setOrgMigrationSuccessMessage(
-        isRTL
+        retainedNotice
+          ? isRTL
+            ? `تم ترحيل بيانات المؤسسة إلى السحابة بنجاح! ${retainedNotice}`
+            : `Organization migrated to Cloud successfully! ${retainedNotice}`
+          : isRTL
           ? 'تم حفظ وترحيل بيانات المؤسسة في نسختك السحابية بنجاح!'
           : 'Organization data saved to your Cloud Backup successfully!'
       );
@@ -243,11 +271,11 @@ export const OrgMigrationWizardModal: React.FC = () => {
       dismissLegacyOrgMigration();
     } catch (err) {
       if (serverMigratedIds.length > 0) {
-        await completeLegacyOrgMigration(serverMigratedIds);
+        await completeLegacyOrgMigration(serverMigratedIds, { migratedToCloudIds });
       }
       setError(
         err instanceof Error
-          ? err.message
+          ? formatFirestoreErrorForDisplay(err, isRTL)
           : isRTL
           ? 'حدث خطأ أثناء ترحيل البيانات السحابي. تم حفظ نسخة أمان JSON على جهازك.'
           : 'Migration error occurred. A safety JSON backup was downloaded to your device.'
@@ -320,6 +348,7 @@ export const OrgMigrationWizardModal: React.FC = () => {
         <div className="space-y-2">
           {legacyLocalOrgs.map((ws) => {
             const checked = selectedIds.includes(ws.organization.id);
+            const extras = getUnmigratedOrgExtrasSummary(ws);
             return (
               <label
                 key={ws.organization.id}
@@ -348,6 +377,11 @@ export const OrgMigrationWizardModal: React.FC = () => {
                       {isRTL ? 'محفظة' : 'wallets'} • {ws.parties?.length || 0}{' '}
                       {isRTL ? 'مورد/عميل' : 'parties'}
                     </div>
+                    {extras.hasUnmigratedExtras && (
+                      <div className="text-[10px] text-[var(--color-gold-text)] mt-0.5 leading-snug">
+                        {formatUnmigratedOrgExtrasNotice(extras, isRTL)}
+                      </div>
+                    )}
                   </div>
                 </div>
               </label>

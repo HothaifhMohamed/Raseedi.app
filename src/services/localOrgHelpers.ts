@@ -244,3 +244,90 @@ export function recalculateLocalOrgWallets(
     ),
   };
 }
+
+export interface UnmigratedOrgExtrasSummary {
+  debtsCount: number;
+  goalsCount: number;
+  templatesCount: number;
+  totalCount: number;
+  hasUnmigratedExtras: boolean;
+}
+
+export function getUnmigratedOrgExtrasSummary(
+  ws: OrgWorkspaceData | null | undefined
+): UnmigratedOrgExtrasSummary {
+  const debtsCount = Array.isArray(ws?.debts) ? ws.debts.length : 0;
+  const goalsCount = Array.isArray(ws?.goals) ? ws.goals.length : 0;
+  const templatesCount = Array.isArray(ws?.templates) ? ws.templates.length : 0;
+  const totalCount = debtsCount + goalsCount + templatesCount;
+  return {
+    debtsCount,
+    goalsCount,
+    templatesCount,
+    totalCount,
+    hasUnmigratedExtras: totalCount > 0,
+  };
+}
+
+export function isRetainedExtrasOnlyWorkspace(
+  ws: OrgWorkspaceData | null | undefined
+): boolean {
+  return Boolean(ws?.organization?.retainedLocalExtrasOnly);
+}
+
+/**
+ * Retains only unmigrated local-only collections (`debts`, `goals`, `templates`)
+ * under the migrated Cloud Org ID so zero user records are lost while avoiding
+ * duplicate organizations or stale local financial data in workspace switchers.
+ */
+export function retainUnmigratedLocalOrgExtras(
+  ws: OrgWorkspaceData,
+  cloudOrgId?: string,
+  now = Date.now()
+): OrgWorkspaceData {
+  const targetId = (cloudOrgId || '').trim() || ws.organization.id;
+  return {
+    organization: {
+      ...ws.organization,
+      id: targetId,
+      localFirstMode: false,
+      cloudBackedUpAt: now,
+      migratedToCloudOrgId: targetId,
+      retainedLocalExtrasOnly: true,
+      updatedAt: now,
+    },
+    members: [],
+    costCenters: [],
+    parties: [],
+    wallets: [],
+    categories: [],
+    transactions: [],
+    budgets: [],
+    debts: Array.isArray(ws.debts) ? ws.debts : [],
+    goals: Array.isArray(ws.goals) ? ws.goals : [],
+    templates: Array.isArray(ws.templates) ? ws.templates : [],
+    auditLogs: [],
+  };
+}
+
+export function formatUnmigratedOrgExtrasNotice(
+  summary: UnmigratedOrgExtrasSummary,
+  isRTL: boolean
+): string {
+  if (!summary.hasUnmigratedExtras) return '';
+  const parts: string[] = [];
+  if (summary.debtsCount > 0) {
+    parts.push(isRTL ? `${summary.debtsCount} دين` : `${summary.debtsCount} debt(s)`);
+  }
+  if (summary.goalsCount > 0) {
+    parts.push(isRTL ? `${summary.goalsCount} هدف` : `${summary.goalsCount} goal(s)`);
+  }
+  if (summary.templatesCount > 0) {
+    parts.push(isRTL ? `${summary.templatesCount} قالب` : `${summary.templatesCount} template(s)`);
+  }
+  const joined = parts.join(isRTL ? ' و ' : ', ');
+  return isRTL
+    ? `تم الاحتفاظ محلياً بأمان بـ (${joined}) لعدم نقلها إلى سحابة المؤسسة.`
+    : `Safely retained (${joined}) locally on this device since Cloud Orgs do not sync these items yet.`;
+}
+

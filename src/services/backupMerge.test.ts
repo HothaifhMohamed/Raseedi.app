@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveSafeCloudBackupWrite, CloudBackupWriteCandidate } from './backupMerge';
+import {
+  resolveSafeCloudBackupWrite,
+  CloudBackupWriteCandidate,
+  prepareCloudBackupChunks,
+  MAX_CLOUD_BACKUP_CHUNKS,
+  MAX_CLOUD_BACKUP_TRANSACTIONS,
+} from './backupMerge';
 import { DEFAULT_CATEGORIES, DEFAULT_SETTINGS } from './db';
 
 const makeLocalCandidate = (
@@ -88,3 +94,52 @@ test('allows writing empty array only when allowEmptyOverwrite is explicitly tru
     assert.equal(decision.mergedData.transactions.length, 0);
   }
 });
+
+test('prepareCloudBackupChunks throws BACKUP_TOO_LARGE instead of silently truncating transactions or chunks', () => {
+  assert.equal(MAX_CLOUD_BACKUP_TRANSACTIONS, 40_000);
+  assert.equal(MAX_CLOUD_BACKUP_CHUNKS, 99);
+
+  // Within limits: returns exact chunks and storedTxCount
+  const items = Array.from({ length: 10 }, (_, idx) => ({ id: `tx-${idx}` }));
+  const prepared = prepareCloudBackupChunks(
+    items,
+    (list) => [list.slice(0, 4), list.slice(4, 8), list.slice(8)],
+    { maxTransactions: 10, maxChunks: 3 }
+  );
+  assert.equal(prepared.chunks.length, 3);
+  assert.equal(prepared.storedTxCount, 10);
+
+  // Transaction count exceeds maxTransactions -> throws BACKUP_TOO_LARGE
+  assert.throws(
+    () =>
+      prepareCloudBackupChunks(
+        items,
+        (list) => [list],
+        { maxTransactions: 9, maxChunks: 99 }
+      ),
+    /BACKUP_TOO_LARGE/
+  );
+
+  // Chunk count exceeds maxChunks (e.g. > 99) -> throws BACKUP_TOO_LARGE instead of .slice(0, 99)
+  assert.throws(
+    () =>
+      prepareCloudBackupChunks(
+        Array.from({ length: 100 }, (_, idx) => ({ id: `tx-${idx}` })),
+        (list) => list.map((item) => [item]),
+        { maxTransactions: 40_000, maxChunks: 99 }
+      ),
+    /BACKUP_TOO_LARGE/
+  );
+
+  // Chunk builder drops items silently -> throws BACKUP_TOO_LARGE
+  assert.throws(
+    () =>
+      prepareCloudBackupChunks(
+        items,
+        (list) => [list.slice(0, 8)],
+        { maxTransactions: 10, maxChunks: 99 }
+      ),
+    /BACKUP_TOO_LARGE/
+  );
+});
+

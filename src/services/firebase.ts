@@ -93,7 +93,11 @@ import {
   validateUsernameFormat,
 } from './usernameService';
 import { shouldFallbackAccountDeleteError } from './accountDeletion';
-import { resolveSafeCloudBackupWrite } from './backupMerge';
+import {
+  MAX_CLOUD_BACKUP_TRANSACTIONS,
+  prepareCloudBackupChunks,
+  resolveSafeCloudBackupWrite,
+} from './backupMerge';
 import { sortTransactionsDescending } from './orgTransactionQuery';
 import {
   isPrimarySystemAdminEmail,
@@ -2380,8 +2384,13 @@ export async function saveCloudBackup(
     handleFirestoreError(error, OperationType.GET, metaPath);
   }
 
+  const rawTransactions = effectiveData.transactions || [];
+  if (rawTransactions.length > MAX_CLOUD_BACKUP_TRANSACTIONS) {
+    throw new Error('BACKUP_TOO_LARGE');
+  }
+
   let skippedAttachmentsCount = 0;
-  const sanitizedTransactions = (effectiveData.transactions || []).slice(0, 40000).map((tx) => {
+  const sanitizedTransactions = rawTransactions.map((tx) => {
     if (!tx.attachments || tx.attachments.length === 0) return tx;
     const kept = tx.attachments.filter((att) => att.length <= 24_000);
     skippedAttachmentsCount += tx.attachments.length - kept.length;
@@ -2392,7 +2401,11 @@ export async function saveCloudBackup(
   });
 
   // Measure actual UTF-8 byte lengths so every chunk and meta document stays well under 800KB.
-  const chunks = buildSafeSizeChunks(sanitizedTransactions, 780_000).slice(0, 99);
+  // Never silently truncate chunks; throw BACKUP_TOO_LARGE if limits are exceeded.
+  const { chunks, storedTxCount } = prepareCloudBackupChunks(
+    sanitizedTransactions,
+    (items) => buildSafeSizeChunks(items, 780_000)
+  );
   const updatedAtMs = Date.now();
 
   const rawOrgEntries =
@@ -2442,7 +2455,7 @@ export async function saveCloudBackup(
     uid,
     schemaVersion: 2,
     chunkCount: chunks.length,
-    totalTransactions: sanitizedTransactions.length,
+    totalTransactions: storedTxCount,
     wallets: cloudSafeWallets,
     categories: (effectiveData.categories || []).slice(0, 300),
     budgets: (effectiveData.budgets || []).slice(0, 200),
@@ -2478,7 +2491,7 @@ export async function saveCloudBackup(
         )
       : 0;
 
-    const totalChunkTxs = sanitizedTransactions.length;
+    const totalChunkTxs = storedTxCount;
 
     // Write transaction chunks concurrently with bounded parallelism & automatic retry
     if (chunks.length > 0) {
