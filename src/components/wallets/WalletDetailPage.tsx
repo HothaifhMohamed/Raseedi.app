@@ -250,9 +250,9 @@ export const WalletDetailPage: React.FC<WalletDetailPageProps> = ({ walletId }) 
           className="rounded-2xl p-5 border border-white/15 text-white shadow-[0_12px_28px_-10px_rgba(9,50,37,0.35)] relative overflow-hidden"
           style={{
             background: `linear-gradient(135deg, ${
-              wallet.color?.startsWith('#') ? wallet.color : '#0E5A43'
+              wallet.color?.startsWith('#') ? wallet.color : '#0E5E58'
             } 0%, color-mix(in srgb, ${
-              wallet.color?.startsWith('#') ? wallet.color : '#0E5A43'
+              wallet.color?.startsWith('#') ? wallet.color : '#0E5E58'
             } 74%, #061A14) 100%)`,
           }}
         >

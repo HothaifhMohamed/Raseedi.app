@@ -390,6 +390,8 @@ export interface AppNotificationItem {
   actionTarget?: string;
 }
 
+export type ThemePreference = 'dark' | 'light' | 'system';
+
 export interface AppSettings {
   firstDayOfMonth: number; // 1 to 31
   firstDayOfWeek: number; // 0 = Sunday, 1 = Monday, 6 = Saturday
@@ -406,7 +408,8 @@ export interface AppSettings {
   showAllData: boolean;
   collapsibleSections: boolean;
   showBudgetIndicator: boolean;
-  theme: 'dark' | 'light';
+  theme: ThemePreference;
+  themeUpdatedAt?: number;
   language: 'ar' | 'en';
   isPro: boolean;
   appPin?: string;

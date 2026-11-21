@@ -42,6 +42,7 @@ import {
 } from '../services/workspaceCleanup';
 import { auth, resolveFirebaseUserEmail } from '../services/firebase';
 import { canUserAccessAdminPanelUi } from '../services/adminAuth';
+import { getSystemPrefersDark, resolveEffectiveDarkMode } from '../services/workspaceSync';
 
 export const Navbar: React.FC = () => {
   const {
@@ -199,8 +200,13 @@ export const Navbar: React.FC = () => {
     setIsOverflowOpen(false);
   };
 
+  const isEffectiveDarkTheme = resolveEffectiveDarkMode(
+    settings.theme,
+    getSystemPrefersDark()
+  );
+
   const toggleTheme = () => {
-    updateSettings({ theme: settings.theme === 'dark' ? 'light' : 'dark' });
+    updateSettings({ theme: isEffectiveDarkTheme ? 'light' : 'dark' });
     setIsOverflowOpen(false);
   };
 
@@ -488,7 +494,7 @@ export const Navbar: React.FC = () => {
                 <div
                   data-testid="navbar-notifications-dropdown"
                   onClick={(e) => e.stopPropagation()}
-                  className="pointer-events-auto w-full max-w-sm sm:w-80 bg-white dark:bg-[#17231E] border border-[var(--color-line)] rounded-2xl shadow-xl overflow-hidden transition-all duration-200 animate-in fade-in zoom-in-95"
+                  className="pointer-events-auto w-full max-w-sm sm:w-80 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-2xl shadow-xl overflow-hidden transition-all duration-200 animate-in fade-in zoom-in-95"
                 >
                   <div className="px-3 py-2.5 border-b border-[var(--color-line)] flex items-center justify-between bg-[var(--color-surface-subtle)]">
                     <span className="text-xs font-bold text-[var(--color-ink)]">
@@ -577,7 +583,7 @@ export const Navbar: React.FC = () => {
                 <div
                   data-testid="navbar-overflow-dropdown"
                   onClick={(e) => e.stopPropagation()}
-                  className="pointer-events-auto w-64 sm:w-72 max-h-[calc(100vh-84px)] overflow-y-auto bg-white dark:bg-[#17231E] border border-[var(--color-line)] rounded-2xl shadow-xl py-1.5 divide-y divide-[var(--color-line)] transition-all duration-200 animate-in fade-in zoom-in-95"
+                  className="pointer-events-auto w-64 sm:w-72 max-h-[calc(100vh-84px)] overflow-y-auto bg-[var(--color-surface)] border border-[var(--color-line)] rounded-2xl shadow-xl py-1.5 divide-y divide-[var(--color-line)] transition-all duration-200 animate-in fade-in zoom-in-95"
                 >
                   {/* Section 1: Filter & Quick Backup */}
                   <div className="py-1">
@@ -636,11 +642,12 @@ export const Navbar: React.FC = () => {
 
                     <button
                       type="button"
+                      data-testid="navbar-theme-toggle"
                       onClick={toggleTheme}
                       className="w-full px-3 py-2 text-xs flex items-center justify-between text-[var(--color-ink)] hover:bg-[var(--color-bg)] transition-colors text-start min-h-[40px]"
                     >
                       <div className="flex items-center gap-2">
-                        {settings.theme === 'dark' ? (
+                        {isEffectiveDarkTheme ? (
                           <Sun className="w-4 h-4 text-[var(--color-muted)]" />
                         ) : (
                           <Moon className="w-4 h-4 text-[var(--color-muted)]" />
@@ -648,7 +655,13 @@ export const Navbar: React.FC = () => {
                         <span>{isRTL ? 'المظهر' : 'Theme'}</span>
                       </div>
                       <span className="text-[11px] font-medium text-[var(--color-muted)]">
-                        {settings.theme === 'dark' ? (isRTL ? 'فاتح' : 'Light') : isRTL ? 'داكن' : 'Dark'}
+                        {isEffectiveDarkTheme
+                          ? isRTL
+                            ? 'فاتح'
+                            : 'Light'
+                          : isRTL
+                          ? 'داكن'
+                          : 'Dark'}
                       </span>
                     </button>
                   </div>
@@ -899,7 +912,7 @@ export const Navbar: React.FC = () => {
             aria-modal="true"
             aria-labelledby="workspace-selector-title"
             onClick={(e) => e.stopPropagation()}
-            className="w-full sm:max-w-md bg-white dark:bg-[#17231E] border border-[var(--color-line)] rounded-t-3xl sm:rounded-2xl shadow-2xl overflow-hidden animate-in slide-in-from-bottom-4 sm:zoom-in-95 duration-200"
+            className="w-full sm:max-w-md bg-[var(--color-surface)] border border-[var(--color-line)] rounded-t-3xl sm:rounded-2xl shadow-2xl overflow-hidden animate-in slide-in-from-bottom-4 sm:zoom-in-95 duration-200"
           >
             {/* Mobile Bottom Sheet Handle */}
             <div className="sm:hidden flex justify-center pt-2.5 pb-1">
@@ -931,7 +944,7 @@ export const Navbar: React.FC = () => {
                 data-testid="workspace-modal-close-btn"
                 onClick={() => setIsWorkspaceModalOpen(false)}
                 aria-label={t('close')}
-                className="w-8 h-8 rounded-lg border border-[var(--color-line)] bg-white dark:bg-[#1E2E27] flex items-center justify-center text-[var(--color-muted)] hover:text-[var(--color-ink)] shrink-0"
+                className="w-8 h-8 rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] flex items-center justify-center text-[var(--color-muted)] hover:text-[var(--color-ink)] shrink-0"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -950,7 +963,7 @@ export const Navbar: React.FC = () => {
                 className={`w-full p-3 rounded-xl border text-start flex items-center justify-between gap-3 transition-all duration-200 min-h-[56px] ${
                   activeWorkspace === 'personal'
                     ? 'bg-[var(--color-accent)]/10 border-[var(--color-accent)] text-[var(--color-accent)] shadow-xs'
-                    : 'bg-white dark:bg-[#1E2E27] border-[var(--color-line)] text-[var(--color-ink)] hover:border-[var(--color-accent)]/50'
+                    : 'bg-[var(--color-surface)] border-[var(--color-line)] text-[var(--color-ink)] hover:border-[var(--color-accent)]/50'
                 }`}
               >
                 <div className="flex items-center gap-3 min-w-0">
@@ -996,7 +1009,7 @@ export const Navbar: React.FC = () => {
                     className={`w-full rounded-xl border flex items-center justify-between gap-1 transition-all duration-200 min-h-[56px] ${
                       active
                         ? 'bg-[var(--color-accent)]/10 border-[var(--color-accent)] text-[var(--color-accent)] shadow-xs'
-                        : 'bg-white dark:bg-[#1E2E27] border-[var(--color-line)] text-[var(--color-ink)] hover:border-[var(--color-accent)]/50'
+                        : 'bg-[var(--color-surface)] border-[var(--color-line)] text-[var(--color-ink)] hover:border-[var(--color-accent)]/50'
                     }`}
                   >
                     <button
@@ -1097,7 +1110,7 @@ export const Navbar: React.FC = () => {
                   setIsWorkspaceModalOpen(false);
                   setShowJoinOrg(true);
                 }}
-                className="px-3 py-2.5 rounded-xl bg-white dark:bg-[#1E2E27] border border-[var(--color-line)] text-[var(--color-ink)] text-xs font-semibold flex items-center justify-center gap-1.5 min-h-[42px] hover:border-[var(--color-accent)]"
+                className="px-3 py-2.5 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-ink)] text-xs font-semibold flex items-center justify-center gap-1.5 min-h-[42px] hover:border-[var(--color-accent)]"
               >
                 <KeyRound className="w-4 h-4 text-[var(--color-muted)] shrink-0" />
                 <span className="truncate">{t('joinOrganization')}</span>
@@ -1123,7 +1136,7 @@ export const Navbar: React.FC = () => {
             aria-modal="true"
             aria-labelledby="workspace-delete-confirm-title"
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm bg-white dark:bg-[#17231E] border border-[var(--color-expense)]/40 rounded-2xl p-5 space-y-4 shadow-2xl"
+            className="w-full max-w-sm bg-[var(--color-surface)] border border-[var(--color-expense)]/40 rounded-2xl p-5 space-y-4 shadow-2xl"
           >
             <div className="flex items-start gap-3">
               <div className="w-10 h-10 rounded-xl bg-rose-500/15 text-rose-600 dark:text-rose-400 flex items-center justify-center shrink-0">
@@ -1157,7 +1170,7 @@ export const Navbar: React.FC = () => {
                   setDeleteTargetOrg(null);
                   setDeleteWorkspaceError(null);
                 }}
-                className="px-4 py-2 rounded-xl border border-[var(--color-line)] bg-white dark:bg-[#1E2E27] text-xs font-semibold text-[var(--color-ink)] min-h-[40px] disabled:opacity-50"
+                className="px-4 py-2 rounded-xl border border-[var(--color-line)] bg-[var(--color-surface-subtle)] text-xs font-semibold text-[var(--color-ink)] min-h-[40px] disabled:opacity-50"
               >
                 {t('cancel')}
               </button>
@@ -1199,7 +1212,7 @@ export const Navbar: React.FC = () => {
           <form
             onSubmit={handleCreateOrgSubmit}
             dir={isRTL ? 'rtl' : 'ltr'}
-            className="w-full max-w-sm bg-white dark:bg-[#17231E] border border-[var(--color-line)] rounded-2xl p-5 space-y-4 shadow-2xl"
+            className="w-full max-w-sm bg-[var(--color-surface)] border border-[var(--color-line)] rounded-2xl p-5 space-y-4 shadow-2xl"
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -1401,7 +1414,7 @@ export const Navbar: React.FC = () => {
           <form
             onSubmit={handleJoinOrgSubmit}
             dir={isRTL ? 'rtl' : 'ltr'}
-            className="w-full max-w-sm bg-white dark:bg-[#17231E] border border-[var(--color-line)] rounded-2xl p-5 space-y-4 shadow-2xl"
+            className="w-full max-w-sm bg-[var(--color-surface)] border border-[var(--color-line)] rounded-2xl p-5 space-y-4 shadow-2xl"
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">

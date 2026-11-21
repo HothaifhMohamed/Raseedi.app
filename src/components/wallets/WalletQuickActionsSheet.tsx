@@ -67,7 +67,7 @@ export const WalletQuickActionsSheet: React.FC<WalletQuickActionsSheetProps> = (
 
   if (!wallet) return null;
 
-  const cardColor = wallet.color?.startsWith('#') ? wallet.color : '#0E5A43';
+  const cardColor = wallet.color?.startsWith('#') ? wallet.color : '#0E5E58';
   const canTransfer = canTransferFromWallet(wallet, allWallets);
   const ChevronEnd = isRTL ? ChevronLeft : ChevronRight;
 

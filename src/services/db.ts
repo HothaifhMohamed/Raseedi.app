@@ -21,6 +21,7 @@ import {
 } from '../types';
 import { SUPPORT_CONFIG } from '../constants/support';
 import { removeOrgFromWorkspacesMap } from './workspaceCleanup';
+import { normalizeThemePreference, THEME_PREF_STORAGE_KEY } from './workspaceSync';
 
 const DB_NAME = 'raseedi_expense_tracker_db';
 const DB_VERSION = 1;
@@ -67,9 +68,12 @@ export function mergeSettingsWithDefaults(
     instagramUrl:
       rawSettings?.socialLinks?.instagramUrl?.trim() || SUPPORT_CONFIG.defaultInstagramUrl,
   };
+  const normalizedTheme =
+    normalizeThemePreference(rawSettings?.theme) ?? DEFAULT_SETTINGS.theme;
   return {
     ...DEFAULT_SETTINGS,
     ...(rawSettings || {}),
+    theme: normalizedTheme,
     socialLinks: mergedSocial,
     isPro: false,
   };
@@ -793,7 +797,11 @@ export async function clearLocalAppStorageAndDb(): Promise<void> {
     const keysToRemove: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
-      if (k && (k.startsWith('raseedi_pin_lockout_v1:') || k.startsWith('raseedi_'))) {
+      if (
+        k &&
+        k !== THEME_PREF_STORAGE_KEY &&
+        (k.startsWith('raseedi_pin_lockout_v1:') || k.startsWith('raseedi_'))
+      ) {
         keysToRemove.push(k);
       }
     }

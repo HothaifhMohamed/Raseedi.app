@@ -17,9 +17,7 @@
     <meta name="twitter:title" content="رَصِيدِي - الإدارة المالية الشخصية وإدارة الشركات" />
     <meta name="twitter:description" content="تطبيق رَصِيدِي للإدارة المالية المتكاملة للأفراد والشركات: تتبع المصاريف، الميزانيات، الجمعيات المالية، حسابات المؤسسات، الضرائب، وسندات القبض والصرف دون اتصال." />
     <meta name="twitter:image" content="/app-icon.png" />
-    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#F4F7F4" />
-    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0F1714" />
-    <meta name="theme-color" content="#0E5A43" />
+    <meta name="theme-color" id="raseedi-theme-color" content="#F5EFE3" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -32,8 +30,57 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=Reem+Kufi:wght@500;600;700&display=swap" rel="stylesheet">
+    <script>
+      (function () {
+        try {
+          var raw = window.localStorage.getItem('raseedi_theme_pref_v1');
+          var theme = null;
+          if (raw) {
+            if (raw === 'dark' || raw === 'light' || raw === 'system') {
+              theme = raw;
+            } else {
+              var parsed = JSON.parse(raw);
+              if (
+                parsed &&
+                (parsed.theme === 'dark' || parsed.theme === 'light' || parsed.theme === 'system')
+              ) {
+                theme = parsed.theme;
+              }
+            }
+          }
+          if (!theme) {
+            var legacy = window.localStorage.getItem('raseedi_settings_v1');
+            if (legacy) {
+              var parsedLegacy = JSON.parse(legacy);
+              if (
+                parsedLegacy &&
+                (parsedLegacy.theme === 'dark' ||
+                  parsedLegacy.theme === 'light' ||
+                  parsedLegacy.theme === 'system')
+              ) {
+                theme = parsedLegacy.theme;
+              }
+            }
+          }
+          var isDark =
+            theme === 'dark'
+              ? true
+              : theme === 'system'
+              ? Boolean(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
+              : false;
+          var root = document.documentElement;
+          root.classList.toggle('dark', isDark);
+          root.style.colorScheme = isDark ? 'dark' : 'light';
+          if (theme) root.dataset.theme = theme;
+          var themeMeta = document.getElementById('raseedi-theme-color');
+          if (themeMeta) {
+            themeMeta.setAttribute('content', isDark ? '#0B1516' : '#F5EFE3');
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
-  <body class="bg-[#F4F7F4] text-[#11221B] antialiased selection:bg-[#0E5A43] selection:text-white min-h-screen">
+  <body class="bg-[var(--color-bg)] text-[var(--color-ink)] antialiased selection:bg-[var(--color-accent)] selection:text-[var(--color-on-accent)] min-h-screen">
     <div id="root"></div>
     <script>
       window.addEventListener('vite:preloadError', function (event) {

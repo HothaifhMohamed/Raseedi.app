@@ -92,7 +92,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({ onHomeReset }) => {
           aria-label={t('navAdd')}
           className={`w-12 h-11 rounded-xl flex items-center justify-center shrink-0 transition-all duration-300 min-h-[44px] min-w-[48px] ${
             canAddTransaction
-              ? 'bg-gradient-to-br from-[#0E5A43] to-[#17785A] dark:from-[#34B383] dark:to-[#1E8E64] text-white dark:text-[#081A13] border border-[#D4A12A]/45 shadow-[0_6px_16px_-4px_rgba(14,90,67,0.45)] hover:scale-105 hover:shadow-[0_8px_20px_-4px_rgba(201,154,46,0.45)] active:scale-95'
+              ? 'bg-gradient-to-br from-[var(--color-fab-from)] to-[var(--color-fab-to)] text-[var(--color-on-accent)] border border-[var(--color-gold)]/45 shadow-[0_6px_16px_-4px_rgba(14,94,88,0.42)] hover:scale-105 hover:shadow-[0_8px_20px_-4px_rgba(201,142,31,0.42)] active:scale-95'
               : 'bg-[var(--color-line)] text-[var(--color-muted)] cursor-not-allowed opacity-70'
           }`}
         >

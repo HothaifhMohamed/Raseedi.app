@@ -5,6 +5,10 @@ import {
   mergeTransactionsById,
   sortTransactionsDescending,
 } from './orgTransactionQuery';
+import {
+  mergeSettingsPreservingTheme,
+  readStoredThemePreference,
+} from './workspaceSync';
 
 export interface CloudStartupCheckInput {
   localTransactionsCount: number;
@@ -94,9 +98,12 @@ export function mergeCloudAndLocalState(params: MergeCloudAndLocalInput): Omit<A
       ...(cloudData.orgWorkspaces || {}),
     },
     activeWorkspace: cloudData.activeWorkspace || localData.activeWorkspace,
-    settings: preferCloud
-      ? { ...localData.settings, ...(cloudData.settings || {}) }
-      : { ...(cloudData.settings || {}), ...localData.settings },
+    settings: mergeSettingsPreservingTheme(
+      localData.settings,
+      cloudData.settings,
+      preferCloud,
+      readStoredThemePreference()
+    ).settings,
     hasCompletedOnboarding: Boolean(
       cloudData.hasCompletedOnboarding ?? localData.hasCompletedOnboarding ?? true
     ),

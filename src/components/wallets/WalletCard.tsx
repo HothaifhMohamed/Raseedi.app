@@ -36,7 +36,7 @@ const WalletCardComponent: React.FC<WalletCardProps> = ({
   onSelect,
   onMove,
 }) => {
-  const cardColor = w.color?.startsWith('#') ? w.color : '#0E5A43';
+  const cardColor = w.color?.startsWith('#') ? w.color : '#0E5E58';
   const isExcluded = Boolean(w.excludeFromTotal);
 
   const secondaryMeta = [

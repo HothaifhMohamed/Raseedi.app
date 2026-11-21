@@ -186,7 +186,7 @@ export const MoreMenu: React.FC = () => {
           data-testid="more-workspace-switcher-btn"
           aria-expanded={isWorkspaceModalOpen}
           onClick={() => setIsWorkspaceModalOpen(true)}
-          className="w-full p-3.5 rounded-xl bg-white dark:bg-[#17231E] border border-[var(--color-line)] hover:border-[var(--color-accent)]/60 shadow-xs transition-all duration-200 flex items-center justify-between gap-3 text-start min-h-[54px]"
+          className="w-full p-3.5 rounded-xl bg-[var(--color-surface)] border border-[var(--color-line)] hover:border-[var(--color-accent)]/60 shadow-xs transition-all duration-200 flex items-center justify-between gap-3 text-start min-h-[54px]"
         >
           <div className="flex items-center gap-3 min-w-0">
             <div className="w-9 h-9 rounded-xl bg-[var(--color-accent)]/12 text-[var(--color-accent)] flex items-center justify-center shrink-0">

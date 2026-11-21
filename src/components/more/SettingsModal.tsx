@@ -3,6 +3,7 @@ import {
   Settings as SettingsIcon,
   Moon,
   Sun,
+  Monitor,
   Lock,
   Bell,
   Trash2,
@@ -464,32 +465,61 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {isRTL ? 'اللغة والمظهر' : 'Appearance & Language'}
             </h4>
 
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-[var(--color-muted)]">{t('themeSetting')}</span>
-              <div className="flex items-center gap-1 p-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg">
-                <button
-                  onClick={() => updateSettings({ theme: 'dark' })}
-                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors min-h-[32px] ${
-                    settings.theme === 'dark'
-                      ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
-                      : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
-                  }`}
-                >
-                  <Moon className="w-3.5 h-3.5" />
-                  <span>{isRTL ? 'داكن' : 'Dark'}</span>
-                </button>
-                <button
-                  onClick={() => updateSettings({ theme: 'light' })}
-                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors min-h-[32px] ${
-                    settings.theme === 'light'
-                      ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
-                      : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
-                  }`}
-                >
-                  <Sun className="w-3.5 h-3.5" />
-                  <span>{isRTL ? 'فاتح' : 'Light'}</span>
-                </button>
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs text-[var(--color-muted)]">{t('themeSetting')}</span>
+                <div className="flex items-center gap-1 p-1 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg">
+                  <button
+                    type="button"
+                    data-testid="theme-btn-dark"
+                    aria-pressed={settings.theme === 'dark'}
+                    onClick={() => updateSettings({ theme: 'dark' })}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors min-h-[32px] ${
+                      settings.theme === 'dark'
+                        ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
+                        : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+                    }`}
+                  >
+                    <Moon className="w-3.5 h-3.5" />
+                    <span>{isRTL ? 'داكن' : 'Dark'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="theme-btn-light"
+                    aria-pressed={settings.theme === 'light'}
+                    onClick={() => updateSettings({ theme: 'light' })}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors min-h-[32px] ${
+                      settings.theme === 'light'
+                        ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
+                        : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+                    }`}
+                  >
+                    <Sun className="w-3.5 h-3.5" />
+                    <span>{isRTL ? 'فاتح' : 'Light'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="theme-btn-system"
+                    aria-pressed={settings.theme === 'system'}
+                    onClick={() => updateSettings({ theme: 'system' })}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors min-h-[32px] ${
+                      settings.theme === 'system'
+                        ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-xs'
+                        : 'text-[var(--color-muted)] hover:text-[var(--color-ink)]'
+                    }`}
+                  >
+                    <Monitor className="w-3.5 h-3.5" />
+                    <span>{isRTL ? 'تلقائي' : 'System'}</span>
+                  </button>
+                </div>
               </div>
+              {settings.theme === 'system' && (
+                <p className="text-[11px] text-[var(--color-muted)]">
+                  {isRTL
+                    ? 'يتبع مظهر الجهاز تلقائياً دون التأثير على الوضع اليدوي.'
+                    : 'Follows your device appearance automatically.'}
+                </p>
+              )}
             </div>
 
             <div className="flex items-center justify-between pt-2 border-t border-[var(--color-line)]">

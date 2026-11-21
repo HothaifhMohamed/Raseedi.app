@@ -168,13 +168,18 @@ import {
 } from '../services/userProfileSync';
 import { shouldIgnoreAuthStateChangeDuringInteractiveSignIn } from '../services/googleAuthFlow';
 import {
+  applyThemeToDocument,
   canPerformAutomaticCloudWrite,
   isActiveWorkspaceTransaction,
+  normalizeThemePreference,
   normalizeWorkspaceId,
+  readStoredThemePreference,
+  reconcileThemeSettings,
   reconcileWorkspaceTransactions,
   resolveWorkspaceSyncPriority,
   tagTransactionsWithWorkspace,
   tagWalletsWithWorkspace,
+  writeStoredThemePreference,
 } from '../services/workspaceSync';
 import {
   resolveFallbackWorkspaceAfterDelete,
@@ -677,7 +682,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [personalGoals, setPersonalGoals] = useState<SavingsGoal[]>([]);
   const [personalTemplates, setPersonalTemplates] = useState<Template[]>([]);
   const [personalMoneyCircles, setPersonalMoneyCircles] = useState<MoneyCircle[]>([]);
-  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<AppSettings>(() => {
+    const storedTheme = readStoredThemePreference();
+    if (!storedTheme) return DEFAULT_SETTINGS;
+    return {
+      ...DEFAULT_SETTINGS,
+      theme: storedTheme.theme,
+      ...(storedTheme.updatedAt > 0 ? { themeUpdatedAt: storedTheme.updatedAt } : {}),
+    };
+  });
   const [user, setUser] = useState<UserAccount | null>(null);
   const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState(false);
   const [isGuestMode, setIsGuestMode] = useState<boolean>(() => loadGuestModePref());
@@ -1757,10 +1770,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setPersonalGoals(restoredData.goals);
     setPersonalTemplates(restoredData.templates);
     setPersonalMoneyCircles(restoredData.moneyCircles || []);
-    setSettings((prev) => ({
-      ...mergeSettingsWithDefaults(restoredData.settings),
-      lastKnownCloudUpdatedAtMs: prev.lastKnownCloudUpdatedAtMs,
-    }));
+    setSettings((prev) => {
+      const restoredSettings = mergeSettingsWithDefaults(restoredData.settings);
+      const reconciledTheme = reconcileThemeSettings(
+        prev,
+        restoredSettings,
+        readStoredThemePreference()
+      );
+      if (reconciledTheme.adoptedIncoming) {
+        writeStoredThemePreference(reconciledTheme.theme, reconciledTheme.themeUpdatedAt);
+        applyThemeToDocument(reconciledTheme.theme);
+      }
+      return {
+        ...restoredSettings,
+        theme: reconciledTheme.theme,
+        ...(reconciledTheme.themeUpdatedAt > 0
+          ? { themeUpdatedAt: reconciledTheme.themeUpdatedAt }
+          : {}),
+        lastKnownCloudUpdatedAtMs: prev.lastKnownCloudUpdatedAtMs,
+      };
+    });
     setHasCompletedOnboarding(restoredData.hasCompletedOnboarding);
     await persistData({ ...restoredData, user: latestPersonalRef.current.user });
     return true;
@@ -1775,10 +1804,23 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       );
       const resolvedOnboarded = Boolean(backup.hasCompletedOnboarding ?? true);
       const baseMergedSettings = mergeSettingsWithDefaults(backup.settings);
+      const reconciledTheme = reconcileThemeSettings(
+        prevSettings,
+        baseMergedSettings,
+        readStoredThemePreference()
+      );
+      if (reconciledTheme.adoptedIncoming) {
+        writeStoredThemePreference(reconciledTheme.theme, reconciledTheme.themeUpdatedAt);
+        applyThemeToDocument(reconciledTheme.theme);
+      }
       // Preserve local device App Lock PIN (PIN hashes are strictly local and stripped from cloud backups)
       const hasLocalAppPin = Boolean(prevSettings.isAppLockEnabled && prevSettings.appPin);
       const mergedSettings: AppSettings = {
         ...baseMergedSettings,
+        theme: reconciledTheme.theme,
+        ...(reconciledTheme.themeUpdatedAt > 0
+          ? { themeUpdatedAt: reconciledTheme.themeUpdatedAt }
+          : {}),
         ...(hasLocalAppPin
           ? {
               isAppLockEnabled: prevSettings.isAppLockEnabled,
@@ -2010,7 +2052,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     });
   }, []);
 
-  // Sync HTML dir, lang, document.title, and dark class
+  // Sync HTML dir, lang, and document.title
   useEffect(() => {
     const isRtl = settings.language === 'ar';
     document.documentElement.dir = isRtl ? 'rtl' : 'ltr';
@@ -2018,12 +2060,33 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     document.title = isRtl
       ? 'رَصِيدِي - متتبع المصاريف'
       : 'Raseedi - Expense Tracker';
-    if (settings.theme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
+  }, [settings.language]);
+
+  // Sync .dark class and ONLY listen to prefers-color-scheme when theme === 'system'
+  useEffect(() => {
+    const activeTheme = normalizeThemePreference(settings.theme) ?? 'light';
+    applyThemeToDocument(activeTheme);
+
+    if (
+      activeTheme !== 'system' ||
+      typeof window === 'undefined' ||
+      typeof window.matchMedia !== 'function'
+    ) {
+      return;
     }
-  }, [settings.language, settings.theme]);
+
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleSystemThemeChange = () => {
+      applyThemeToDocument('system');
+    };
+
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', handleSystemThemeChange);
+      return () => mediaQuery.removeEventListener('change', handleSystemThemeChange);
+    }
+    mediaQuery.addListener(handleSystemThemeChange);
+    return () => mediaQuery.removeListener(handleSystemThemeChange);
+  }, [settings.theme]);
 
   // Recurring transactions processor (preserves loadedData.user!)
   const processRecurringTransactions = useCallback(
@@ -2169,7 +2232,27 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setPersonalBudgets(data.budgets || []);
       setPersonalDebts(data.debts || []);
       setPersonalGoals(data.goals || []);
-      const resolvedSettings = mergeSettingsWithDefaults(data.settings);
+      const baseLoadedSettings = mergeSettingsWithDefaults(data.settings);
+      const storedThemePref = readStoredThemePreference();
+      const reconciledStartupTheme = reconcileThemeSettings(
+        latestPersonalRef.current.settings,
+        baseLoadedSettings,
+        storedThemePref
+      );
+      if (!storedThemePref && reconciledStartupTheme.theme !== DEFAULT_SETTINGS.theme) {
+        writeStoredThemePreference(
+          reconciledStartupTheme.theme,
+          reconciledStartupTheme.themeUpdatedAt
+        );
+      }
+      const resolvedSettings: AppSettings = {
+        ...baseLoadedSettings,
+        theme: reconciledStartupTheme.theme,
+        ...(reconciledStartupTheme.themeUpdatedAt > 0
+          ? { themeUpdatedAt: reconciledStartupTheme.themeUpdatedAt }
+          : {}),
+      };
+      applyThemeToDocument(resolvedSettings.theme);
       setPersonalTemplates(data.templates || []);
       setPersonalMoneyCircles(data.moneyCircles || []);
       setSettings(resolvedSettings);
@@ -3569,7 +3652,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setOrgActionError(null);
         setActiveWorkspace('personal');
 
-        setSettings(DEFAULT_SETTINGS);
+        const preservedSignOutTheme = readStoredThemePreference();
+        setSettings(
+          preservedSignOutTheme
+            ? {
+                ...DEFAULT_SETTINGS,
+                theme: preservedSignOutTheme.theme,
+                ...(preservedSignOutTheme.updatedAt > 0
+                  ? { themeUpdatedAt: preservedSignOutTheme.updatedAt }
+                  : {}),
+              }
+            : DEFAULT_SETTINGS
+        );
         setUser(null);
         setFirebaseAuthUser(null);
         setVerifiedPro(null);
@@ -4159,7 +4253,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setIsOrgMigrationModalOpen(false);
         setOrgActionError(null);
         setActiveWorkspace('personal');
-        setSettings(DEFAULT_SETTINGS);
+        const preservedDeleteTheme = readStoredThemePreference();
+        setSettings(
+          preservedDeleteTheme
+            ? {
+                ...DEFAULT_SETTINGS,
+                theme: preservedDeleteTheme.theme,
+                ...(preservedDeleteTheme.updatedAt > 0
+                  ? { themeUpdatedAt: preservedDeleteTheme.updatedAt }
+                  : {}),
+              }
+            : DEFAULT_SETTINGS
+        );
         setUser(null);
         setVerifiedPro(null);
         setDevProTierPreview(null);
@@ -4416,13 +4521,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (result.valid) {
         setIsAppLocked(false);
         if (result.needsUpgrade && result.newHash && result.newSalt) {
-          const updatedSettings = {
-            ...settings,
-            appPin: result.newHash,
-            appPinSalt: result.newSalt,
-          };
-          setSettings(updatedSettings);
-          savePersonalState({ settings: updatedSettings });
+          setSettings((prev) => {
+            const updatedSettings: AppSettings = {
+              ...prev,
+              appPin: result.newHash,
+              appPinSalt: result.newSalt,
+            };
+            savePersonalState({ settings: updatedSettings });
+            return updatedSettings;
+          });
         }
         return true;
       }
@@ -5903,11 +6010,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       };
 
       const nextSettings: AppSettings = {
-        ...settings,
+        ...latestPersonalRef.current.settings,
         lastUsedTransactionType: newTx.type,
-        ...(settings.useLastUsedWallet ? { lastUsedWalletId: newTx.walletId } : {}),
+        ...(latestPersonalRef.current.settings.useLastUsedWallet
+          ? { lastUsedWalletId: newTx.walletId }
+          : {}),
       };
-      setSettings(nextSettings);
+      setSettings((prev) => ({
+        ...prev,
+        lastUsedTransactionType: newTx.type,
+        ...(prev.useLastUsedWallet ? { lastUsedWalletId: newTx.walletId } : {}),
+      }));
 
       if (isOrgWorkspace && activeOrganization) {
         if (isUsingLocalOrgMode) {
@@ -8644,22 +8757,47 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Settings & Onboarding
   const updateSettings = useCallback(
     (partial: Partial<AppSettings>) => {
+      let effectivePartial: Partial<AppSettings> = partial;
+      const isThemeUpdate = partial.theme !== undefined;
+
+      if (isThemeUpdate) {
+        const nextTheme = normalizeThemePreference(partial.theme) ?? DEFAULT_SETTINGS.theme;
+        const prevThemeTs = Number(latestPersonalRef.current.settings.themeUpdatedAt || 0);
+        const storedThemeTs = Number(readStoredThemePreference()?.updatedAt || 0);
+        const themeTs = Math.max(Date.now(), prevThemeTs + 1, storedThemeTs + 1);
+        // Immediately persist theme to dedicated localStorage & apply .dark on <html> before React/cloud sync
+        writeStoredThemePreference(nextTheme, themeTs);
+        applyThemeToDocument(nextTheme);
+        effectivePartial = {
+          ...partial,
+          theme: nextTheme,
+          themeUpdatedAt: themeTs,
+        };
+      }
+
       const mergedNext = mergeSettingsWithDefaults({
         ...latestPersonalRef.current.settings,
-        ...partial,
-        socialLinks: partial.socialLinks
-          ? { ...(latestPersonalRef.current.settings.socialLinks || {}), ...partial.socialLinks }
+        ...effectivePartial,
+        socialLinks: effectivePartial.socialLinks
+          ? {
+              ...(latestPersonalRef.current.settings.socialLinks || {}),
+              ...effectivePartial.socialLinks,
+            }
           : latestPersonalRef.current.settings.socialLinks,
       });
+      latestPersonalRef.current = {
+        ...latestPersonalRef.current,
+        settings: mergedNext,
+      };
       setSettings((prev) => {
         const next = mergeSettingsWithDefaults({
           ...prev,
-          ...partial,
-          socialLinks: partial.socialLinks
-            ? { ...(prev.socialLinks || {}), ...partial.socialLinks }
+          ...effectivePartial,
+          socialLinks: effectivePartial.socialLinks
+            ? { ...(prev.socialLinks || {}), ...effectivePartial.socialLinks }
             : prev.socialLinks,
         });
-        savePersonalState({ settings: next });
+        savePersonalState({ settings: next }, isThemeUpdate ? { immediate: true } : undefined);
         return next;
       });
       if (
@@ -8703,9 +8841,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         order: 1,
       };
 
-      const updatedSettings: AppSettings = { ...settings, mainCurrency };
+      const updatedSettings: AppSettings = {
+        ...latestPersonalRef.current.settings,
+        mainCurrency,
+      };
       setPersonalWallets([firstWallet]);
-      setSettings(updatedSettings);
+      setSettings((prev) => ({ ...prev, mainCurrency }));
       setHasCompletedOnboarding(true);
       setActiveWorkspace('personal');
       saveActiveWorkspacePref('personal');
@@ -8761,6 +8902,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const resetAllData = useCallback(() => {
     const cleanWallets = [createCleanDefaultWallet('EGP', settings.language)];
+    const preservedResetTheme = readStoredThemePreference();
+    const resetSettings: AppSettings = preservedResetTheme
+      ? {
+          ...DEFAULT_SETTINGS,
+          theme: preservedResetTheme.theme,
+          ...(preservedResetTheme.updatedAt > 0
+            ? { themeUpdatedAt: preservedResetTheme.updatedAt }
+            : {}),
+        }
+      : DEFAULT_SETTINGS;
     const freshData: AppDatabaseData = {
       transactions: [],
       wallets: cleanWallets,
@@ -8770,7 +8921,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       goals: [],
       templates: [],
       moneyCircles: [],
-      settings: DEFAULT_SETTINGS,
+      settings: resetSettings,
       user: latestPersonalRef.current.user,
       hasCompletedOnboarding: false,
     };
@@ -8785,7 +8936,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setPersonalMoneyCircles([]);
     setActiveWorkspace('personal');
     saveActiveWorkspacePref('personal');
-    setSettings(DEFAULT_SETTINGS);
+    setSettings(resetSettings);
     setHasCompletedOnboarding(false);
 
     persistDataDebounced(freshData, handleLocalPersistError);

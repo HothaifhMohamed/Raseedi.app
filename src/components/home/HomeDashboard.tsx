@@ -290,12 +290,12 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
       {settings.showCurrentBalance && (
         <section
           data-testid="smart-dashboard-hero"
-          className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-[#0E5A43] via-[#0B4936] to-[#073024] text-white p-5 sm:p-6 shadow-[0_16px_36px_-12px_rgba(14,90,67,0.45)] border border-[#E2B954]/25 transition-all duration-300"
+          className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-[var(--color-hero-from)] via-[var(--color-hero-via)] to-[var(--color-hero-to)] text-[#FFFDF8] p-5 sm:p-6 shadow-[0_16px_36px_-12px_rgba(10,75,71,0.42)] border border-[var(--color-gold)]/30 transition-all duration-300"
         >
           {/* Subtle Gold Ambient Glow */}
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute -top-16 -end-16 w-48 h-48 rounded-full bg-[#E2B954]/18 blur-2xl"
+            className="pointer-events-none absolute -top-16 -end-16 w-48 h-48 rounded-full bg-[var(--color-gold)]/20 blur-2xl"
           />
 
           <div className="relative space-y-5">

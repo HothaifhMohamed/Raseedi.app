@@ -12,16 +12,25 @@ import {
   isActiveWorkspaceTransaction,
   isFirestoreServerFetchOfflineError,
   isTransactionInWorkspace,
+  mergeSettingsPreservingTheme,
+  normalizeThemePreference,
   normalizeWorkspaceId,
+  parseStoredThemePreference,
+  readStoredThemePreference,
+  reconcileThemeSettings,
   reconcileWorkspaceTransactions,
+  resolveEffectiveDarkMode,
   resolveWorkspaceSyncPriority,
   shouldBlockEmptyCloudOverwrite,
   shouldBlockEmptyLocalOverwriteFromCloud,
   stripUndefinedDeep,
   tagTransactionsWithWorkspace,
   tagWalletsWithWorkspace,
+  THEME_PREF_STORAGE_KEY,
+  writeStoredThemePreference,
 } from './workspaceSync';
 import { Wallet } from '../types';
+import { DEFAULT_SETTINGS } from './db';
 
 function makeTx(overrides: Partial<Transaction> = {}): Transaction {
   return {
@@ -395,4 +404,108 @@ describe('workspaceSync unified path and workspace isolation', () => {
     assert.strictEqual(cleaned.ts, ts);
     assert.strictEqual(cleaned.dt, dt);
   });
+
+  it('normalizes, stores, reads, and resolves dark/light/system theme preferences accurately', () => {
+    assert.equal(normalizeThemePreference('dark'), 'dark');
+    assert.equal(normalizeThemePreference(' LIGHT '), 'light');
+    assert.equal(normalizeThemePreference('system'), 'system');
+    assert.equal(normalizeThemePreference('auto'), null);
+    assert.equal(normalizeThemePreference(null), null);
+
+    // Explicit dark/light must NEVER depend on system prefers-color-scheme
+    assert.equal(resolveEffectiveDarkMode('dark', false), true);
+    assert.equal(resolveEffectiveDarkMode('dark', true), true);
+    assert.equal(resolveEffectiveDarkMode('light', true), false);
+    assert.equal(resolveEffectiveDarkMode('light', false), false);
+    // Only system mode follows system prefers-color-scheme
+    assert.equal(resolveEffectiveDarkMode('system', true), true);
+    assert.equal(resolveEffectiveDarkMode('system', false), false);
+
+    // Mock localStorage round-trip
+    const mem = new Map<string, string>();
+    const storage = {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        mem.set(k, v);
+      },
+    };
+
+    const written = writeStoredThemePreference('dark', 1_760_000_000_000, storage);
+    assert.deepEqual(written, { theme: 'dark', updatedAt: 1_760_000_000_000 });
+    assert.deepEqual(readStoredThemePreference(storage), {
+      theme: 'dark',
+      updatedAt: 1_760_000_000_000,
+    });
+
+    // Plain string legacy value parses safely
+    assert.deepEqual(parseStoredThemePreference('system'), {
+      theme: 'system',
+      updatedAt: 0,
+    });
+    assert.equal(parseStoredThemePreference('{bad json'), null);
+  });
+
+  it('reconcileThemeSettings prevents stale or untimestamped cloud light theme from overwriting local dark mode', () => {
+    // Case 1: User enabled Dark Mode locally; legacy cloud snapshot arrives with theme: 'light' (no themeUpdatedAt)
+    const r1 = reconcileThemeSettings(
+      { theme: 'dark', themeUpdatedAt: 2000 },
+      { theme: 'light' },
+      { theme: 'dark', updatedAt: 2000 }
+    );
+    assert.equal(r1.theme, 'dark');
+    assert.equal(r1.themeUpdatedAt, 2000);
+    assert.equal(r1.adoptedIncoming, false);
+
+    // Case 2: Older cloud snapshot (ts 1000) must NOT overwrite newer local Dark Mode (ts 3000)
+    const r2 = reconcileThemeSettings(
+      { theme: 'dark', themeUpdatedAt: 3000 },
+      { theme: 'light', themeUpdatedAt: 1000 },
+      { theme: 'dark', updatedAt: 3000 }
+    );
+    assert.equal(r2.theme, 'dark');
+    assert.equal(r2.adoptedIncoming, false);
+
+    // Case 3: Dedicated localStorage dark pref wins even if in-memory/IndexedDB had stale light
+    const r3 = reconcileThemeSettings(
+      { theme: 'light', themeUpdatedAt: 1000 },
+      { theme: 'light', themeUpdatedAt: 1500 },
+      { theme: 'dark', updatedAt: 4000 }
+    );
+    assert.equal(r3.theme, 'dark');
+    assert.equal(r3.themeUpdatedAt, 4000);
+    assert.equal(r3.adoptedIncoming, false);
+
+    // Case 4: Strictly newer change from another device (ts 5000 > local 3000) IS adopted cleanly
+    const r4 = reconcileThemeSettings(
+      { theme: 'dark', themeUpdatedAt: 3000 },
+      { theme: 'system', themeUpdatedAt: 5000 },
+      { theme: 'dark', updatedAt: 3000 }
+    );
+    assert.equal(r4.theme, 'system');
+    assert.equal(r4.themeUpdatedAt, 5000);
+    assert.equal(r4.adoptedIncoming, true);
+
+    // Case 5: Brand-new device with no explicit local choice adopts cloud Dark Mode
+    const r5 = reconcileThemeSettings(
+      { theme: 'light', themeUpdatedAt: 0 },
+      { theme: 'dark', themeUpdatedAt: 2500 },
+      null
+    );
+    assert.equal(r5.theme, 'dark');
+    assert.equal(r5.adoptedIncoming, true);
+
+    // Case 6: mergeSettingsPreservingTheme keeps other cloud fields while protecting newer local theme
+    const merged = mergeSettingsPreservingTheme(
+      { ...DEFAULT_SETTINGS, theme: 'dark', themeUpdatedAt: 9000, language: 'ar' },
+      { ...DEFAULT_SETTINGS, theme: 'light', themeUpdatedAt: 1000, language: 'en' },
+      true,
+      { theme: 'dark', updatedAt: 9000 }
+    );
+    assert.equal(merged.settings.language, 'en');
+    assert.equal(merged.settings.theme, 'dark');
+    assert.equal(merged.settings.themeUpdatedAt, 9000);
+    assert.equal(merged.adoptedIncomingTheme, false);
+    assert.equal(THEME_PREF_STORAGE_KEY, 'raseedi_theme_pref_v1');
+  });
 });
+

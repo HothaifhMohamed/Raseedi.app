@@ -2,41 +2,53 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  --color-bg: #F4F7F4;
-  --color-surface: #FFFFFF;
-  --color-surface-subtle: #EBF1ED;
-  --color-ink: #11221B;
-  --color-muted: #5A6B62;
-  --color-line: #DFE6E0;
-  --color-accent: #0E5A43;
-  --color-accent-strong: #083D2D;
-  --color-on-accent: #FFFFFF;
-  --color-gold: #C99A2E;
-  --color-gold-soft: #FBF4DF;
-  --color-gold-text: #8A6110;
-  --color-income: #147D4E;
-  --color-expense: #B94435;
-  --color-warning: #D4A12A;
-  --color-warning-text: #8A6110;
+  /* Raseedi Brand Identity — Light Mode (Warm Ivory Wallet + Deep Petrol + Coin Gold) */
+  --color-bg: #F5EFE3;
+  --color-surface: #FFFDF8;
+  --color-surface-subtle: #EDE5D4;
+  --color-ink: #0F2625;
+  --color-muted: #4E6361;
+  --color-line: #DDD3BF;
+  --color-accent: #0E5E58;
+  --color-accent-strong: #08423E;
+  --color-on-accent: #FFFDF8;
+  --color-gold: #C98E1F;
+  --color-gold-soft: #FBF1D6;
+  --color-gold-text: #7E5308;
+  --color-income: #117A54;
+  --color-expense: #BA3F33;
+  --color-warning: #C98E1F;
+  --color-warning-text: #7E5308;
+  --color-hero-from: #0E5E58;
+  --color-hero-via: #0A4B47;
+  --color-hero-to: #063130;
+  --color-fab-from: #0E5E58;
+  --color-fab-to: #13766E;
 }
 
 .dark {
-  --color-bg: #0F1714;
-  --color-surface: #17231E;
-  --color-surface-subtle: #1E2E27;
-  --color-ink: #EEF4EF;
-  --color-muted: #97AAA0;
-  --color-line: #273730;
-  --color-accent: #34B383;
-  --color-accent-strong: #176A4B;
-  --color-on-accent: #081A13;
-  --color-gold: #E2B954;
-  --color-gold-soft: #2B2415;
-  --color-gold-text: #EBC86D;
-  --color-income: #57C489;
-  --color-expense: #E27B6A;
-  --color-warning: #E2B954;
-  --color-warning-text: #EBC86D;
+  /* Raseedi Brand Identity — Dark Mode (Graded Deep Petrol-Charcoal + Warm Ivory Ink + Coin Gold) */
+  --color-bg: #0B1516;
+  --color-surface: #122122;
+  --color-surface-subtle: #1A2E2F;
+  --color-ink: #F5F0E6;
+  --color-muted: #94ADA9;
+  --color-line: #253E40;
+  --color-accent: #2CB8A6;
+  --color-accent-strong: #147269;
+  --color-on-accent: #061E1C;
+  --color-gold: #E7BA4F;
+  --color-gold-soft: #2A2212;
+  --color-gold-text: #F3CF74;
+  --color-income: #45C792;
+  --color-expense: #EB7C6C;
+  --color-warning: #E7BA4F;
+  --color-warning-text: #F3CF74;
+  --color-hero-from: #104C49;
+  --color-hero-via: #0B3A39;
+  --color-hero-to: #072627;
+  --color-fab-from: #2CB8A6;
+  --color-fab-to: #178B7E;
 }
 
 @layer base {

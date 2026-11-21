@@ -1,4 +1,4 @@
-import { Transaction, TransactionType, Wallet } from '../types';
+import { AppSettings, ThemePreference, Transaction, TransactionType, Wallet } from '../types';
 import { fromMinor, toMinor } from './currency';
 import { sortTransactionsDescending } from './orgTransactionQuery';
 
@@ -683,5 +683,289 @@ export async function runResilientBatchCommits<T>(
     retries,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Theme Persistence, System Resolution & Timestamp-Aware Sync Reconciliation
+// ---------------------------------------------------------------------------
+
+export const THEME_PREF_STORAGE_KEY = 'raseedi_theme_pref_v1';
+const LEGACY_SETTINGS_STORAGE_KEY = 'raseedi_settings_v1';
+
+export interface StoredThemePreference {
+  theme: ThemePreference;
+  updatedAt: number;
+}
+
+export function normalizeThemePreference(raw: unknown): ThemePreference | null {
+  if (typeof raw !== 'string') return null;
+  const clean = raw.trim().toLowerCase();
+  if (clean === 'dark' || clean === 'light' || clean === 'system') {
+    return clean;
+  }
+  return null;
+}
+
+function normalizeTimestampMs(raw: unknown): number {
+  const num = Number(raw);
+  return Number.isFinite(num) && num > 0 ? Math.floor(num) : 0;
+}
+
+export function parseStoredThemePreference(
+  raw: string | null | undefined
+): StoredThemePreference | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const direct = normalizeThemePreference(raw);
+  if (direct) {
+    return { theme: direct, updatedAt: 0 };
+  }
+  try {
+    const parsed = JSON.parse(raw) as { theme?: unknown; updatedAt?: unknown } | null;
+    if (!parsed || typeof parsed !== 'object') return null;
+    const theme = normalizeThemePreference(parsed.theme);
+    if (!theme) return null;
+    return {
+      theme,
+      updatedAt: normalizeTimestampMs(parsed.updatedAt),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function readStoredThemePreference(
+  storage?: Pick<Storage, 'getItem'> | null
+): StoredThemePreference | null {
+  const store =
+    storage !== undefined
+      ? storage
+      : typeof window !== 'undefined' && window.localStorage
+      ? window.localStorage
+      : null;
+  if (!store) return null;
+
+  try {
+    const dedicatedRaw = store.getItem(THEME_PREF_STORAGE_KEY);
+    const dedicated = parseStoredThemePreference(dedicatedRaw);
+    if (dedicated) return dedicated;
+
+    // Seamless migration fallback for existing users who saved theme in raseedi_settings_v1
+    const legacyRaw = store.getItem(LEGACY_SETTINGS_STORAGE_KEY);
+    if (legacyRaw) {
+      const parsedLegacy = JSON.parse(legacyRaw) as {
+        theme?: unknown;
+        themeUpdatedAt?: unknown;
+      } | null;
+      const legacyTheme = normalizeThemePreference(parsedLegacy?.theme);
+      if (legacyTheme) {
+        return {
+          theme: legacyTheme,
+          updatedAt: normalizeTimestampMs(parsedLegacy?.themeUpdatedAt),
+        };
+      }
+    }
+  } catch {
+    // Ignore storage read errors
+  }
+  return null;
+}
+
+export function writeStoredThemePreference(
+  theme: ThemePreference,
+  updatedAt?: number,
+  storage?: Pick<Storage, 'setItem'> | null
+): StoredThemePreference {
+  const normalizedTheme = normalizeThemePreference(theme) ?? 'light';
+  const ts =
+    updatedAt !== undefined ? normalizeTimestampMs(updatedAt) : Date.now();
+  const record: StoredThemePreference = {
+    theme: normalizedTheme,
+    updatedAt: ts,
+  };
+  const store =
+    storage !== undefined
+      ? storage
+      : typeof window !== 'undefined' && window.localStorage
+      ? window.localStorage
+      : null;
+  if (store) {
+    try {
+      store.setItem(THEME_PREF_STORAGE_KEY, JSON.stringify(record));
+    } catch {
+      // Ignore storage quota/private-mode errors
+    }
+  }
+  return record;
+}
+
+export function resolveEffectiveDarkMode(
+  theme: ThemePreference,
+  systemPrefersDark: boolean
+): boolean {
+  if (theme === 'dark') return true;
+  if (theme === 'light') return false;
+  return Boolean(systemPrefersDark);
+}
+
+export function getSystemPrefersDark(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return false;
+  }
+  try {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Applies the .dark class and color-scheme immediately on document.documentElement.
+ * Only inspects prefers-color-scheme when theme === 'system'.
+ */
+export function applyThemeToDocument(theme: ThemePreference): boolean {
+  const safeTheme = normalizeThemePreference(theme) ?? 'light';
+  const isDark =
+    safeTheme === 'system'
+      ? resolveEffectiveDarkMode('system', getSystemPrefersDark())
+      : resolveEffectiveDarkMode(safeTheme, false);
+
+  if (typeof document !== 'undefined' && document.documentElement) {
+    const root = document.documentElement;
+    root.classList.toggle('dark', isDark);
+    root.style.colorScheme = isDark ? 'dark' : 'light';
+    root.dataset.theme = safeTheme;
+
+    const themeMeta = document.querySelector('meta#raseedi-theme-color');
+    if (themeMeta) {
+      themeMeta.setAttribute('content', isDark ? '#0B1516' : '#F5EFE3');
+    }
+  }
+
+  return isDark;
+}
+
+export interface ReconciledThemeResult {
+  theme: ThemePreference;
+  themeUpdatedAt: number;
+  adoptedIncoming: boolean;
+}
+
+/**
+ * Timestamp-aware theme conflict resolution between local state / dedicated localStorage
+ * and incoming cloud / backup / snapshot settings.
+ *
+ * Guarantees:
+ * - An explicit local user preference is NEVER overwritten by an older or un-timestamped
+ *   cloud/backup snapshot.
+ * - A strictly newer cloud change from another device (`incomingUpdatedAt > localUpdatedAt`)
+ *   is cleanly adopted.
+ * - On a brand-new device with no explicit local preference yet, a cloud theme is adopted.
+ */
+export function reconcileThemeSettings(
+  localSettings: Partial<Pick<AppSettings, 'theme' | 'themeUpdatedAt'>> | null | undefined,
+  incomingSettings: Partial<Pick<AppSettings, 'theme' | 'themeUpdatedAt'>> | null | undefined,
+  storedLocalPref?: StoredThemePreference | null
+): ReconciledThemeResult {
+  const localStateTheme = normalizeThemePreference(localSettings?.theme);
+  const localStateTs = normalizeTimestampMs(localSettings?.themeUpdatedAt);
+
+  const storedTheme = normalizeThemePreference(storedLocalPref?.theme);
+  const storedTs = normalizeTimestampMs(storedLocalPref?.updatedAt);
+
+  // Pick the most authoritative local choice between dedicated localStorage and in-memory state
+  let effectiveLocalTheme: ThemePreference | null = null;
+  let effectiveLocalTs = 0;
+  let hasExplicitLocalChoice = false;
+
+  if (storedTheme && (!localStateTheme || storedTs >= localStateTs)) {
+    effectiveLocalTheme = storedTheme;
+    effectiveLocalTs = storedTs;
+    hasExplicitLocalChoice = true;
+  } else if (localStateTheme) {
+    effectiveLocalTheme = localStateTheme;
+    effectiveLocalTs = localStateTs;
+    hasExplicitLocalChoice = localStateTs > 0 || Boolean(storedTheme);
+  }
+
+  const incomingTheme = normalizeThemePreference(incomingSettings?.theme);
+  const incomingTs = normalizeTimestampMs(incomingSettings?.themeUpdatedAt);
+
+  if (!incomingTheme) {
+    return {
+      theme: effectiveLocalTheme ?? 'light',
+      themeUpdatedAt: effectiveLocalTs,
+      adoptedIncoming: false,
+    };
+  }
+
+  if (!effectiveLocalTheme) {
+    return {
+      theme: incomingTheme,
+      themeUpdatedAt: incomingTs,
+      adoptedIncoming: true,
+    };
+  }
+
+  if (incomingTheme === effectiveLocalTheme) {
+    return {
+      theme: effectiveLocalTheme,
+      themeUpdatedAt: Math.max(effectiveLocalTs, incomingTs),
+      adoptedIncoming: false,
+    };
+  }
+
+  if (hasExplicitLocalChoice) {
+    // Only adopt incoming cloud theme if it is strictly newer than the local preference
+    if (incomingTs > effectiveLocalTs) {
+      return {
+        theme: incomingTheme,
+        themeUpdatedAt: incomingTs,
+        adoptedIncoming: true,
+      };
+    }
+    return {
+      theme: effectiveLocalTheme,
+      themeUpdatedAt: effectiveLocalTs,
+      adoptedIncoming: false,
+    };
+  }
+
+  // Fresh device with no explicit local preference yet: adopt incoming cloud theme
+  return {
+    theme: incomingTheme,
+    themeUpdatedAt: incomingTs,
+    adoptedIncoming: true,
+  };
+}
+
+/**
+ * Merges local and incoming AppSettings while always resolving `theme` and `themeUpdatedAt`
+ * through `reconcileThemeSettings` so cloud/backup merges never clobber a newer local theme.
+ */
+export function mergeSettingsPreservingTheme(
+  localSettings: AppSettings,
+  incomingSettings?: Partial<AppSettings> | null,
+  preferIncoming = false,
+  storedLocalPref?: StoredThemePreference | null
+): { settings: AppSettings; adoptedIncomingTheme: boolean } {
+  const baseMerged: AppSettings = preferIncoming
+    ? { ...localSettings, ...(incomingSettings || {}) }
+    : { ...(incomingSettings || {}), ...localSettings };
+
+  const reconciled = reconcileThemeSettings(localSettings, incomingSettings, storedLocalPref);
+
+  return {
+    settings: {
+      ...baseMerged,
+      theme: reconciled.theme,
+      ...(reconciled.themeUpdatedAt > 0
+        ? { themeUpdatedAt: reconciled.themeUpdatedAt }
+        : baseMerged.themeUpdatedAt
+        ? { themeUpdatedAt: baseMerged.themeUpdatedAt }
+        : {}),
+    },
+    adoptedIncomingTheme: reconciled.adoptedIncoming,
+  };
+}
+
 
 

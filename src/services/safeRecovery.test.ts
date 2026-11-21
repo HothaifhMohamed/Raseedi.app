@@ -137,3 +137,39 @@ test('formatFirestoreErrorForDisplay produces clear diagnostic messages for inde
   );
   assert.match(offlineMsg, /unavailable/);
 });
+
+test('mergeCloudAndLocalState never lets stale cloud light theme overwrite newer local dark mode', () => {
+  const merged = mergeCloudAndLocalState({
+    preferCloud: true,
+    localData: {
+      transactions: [],
+      wallets: [],
+      categories: DEFAULT_CATEGORIES,
+      budgets: [],
+      debts: [],
+      goals: [],
+      templates: [],
+      moneyCircles: [],
+      settings: {
+        ...DEFAULT_SETTINGS,
+        theme: 'dark',
+        themeUpdatedAt: 1_760_000_050_000,
+      },
+      hasCompletedOnboarding: true,
+    },
+    cloudData: {
+      transactions: [],
+      settings: {
+        ...DEFAULT_SETTINGS,
+        theme: 'light',
+        themeUpdatedAt: 1_760_000_010_000,
+        mainCurrency: 'USD',
+      },
+    },
+  });
+
+  assert.equal(merged.settings.mainCurrency, 'USD');
+  assert.equal(merged.settings.theme, 'dark');
+  assert.equal(merged.settings.themeUpdatedAt, 1_760_000_050_000);
+});
+

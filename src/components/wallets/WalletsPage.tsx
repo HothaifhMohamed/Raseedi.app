@@ -34,7 +34,7 @@ import { WalletQuickActionsSheet } from './WalletQuickActionsSheet';
 import { WalletCard } from './WalletCard';
 
 const SOLID_MUTED_PALETTE = [
-  { id: 'emerald', label: 'أخضر زمردي', hex: '#0E5A43' },
+  { id: 'emerald', label: 'بترولي زمردي', hex: '#0E5E58' },
   { id: 'teal', label: 'أخضر غابات', hex: '#1B4D3E' },
   { id: 'navy', label: 'كحلي ليلي', hex: '#1E3A4C' },
   { id: 'bronze', label: 'ذهبي برونزي', hex: '#7A5B2B' },
