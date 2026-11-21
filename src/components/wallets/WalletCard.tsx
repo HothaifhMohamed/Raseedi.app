@@ -1,5 +1,5 @@
 import React, { useCallback } from 'react';
-import { ArrowDown, ArrowUp, EyeOff, Lock } from 'lucide-react';
+import { ArrowDown, ArrowUp, EyeOff, GripVertical, Lock } from 'lucide-react';
 import { Wallet } from '../../types';
 import { convertCurrency } from '../../services/currency';
 import { IconRenderer } from '../common/IconRenderer';
@@ -10,6 +10,7 @@ interface WalletCardProps {
   index: number;
   totalCount: number;
   isReorderMode: boolean;
+  isDragging?: boolean;
   isLocked: boolean;
   isHidden: boolean;
   mainCurrency: string;
@@ -18,7 +19,8 @@ interface WalletCardProps {
   custodianName?: string;
   isRTL: boolean;
   onSelect: (wallet: Wallet) => void;
-  onMove: (index: number, direction: 'up' | 'down') => void;
+  onMove: (walletId: string, direction: 'up' | 'down') => void;
+  onDragHandlePointerDown?: (walletId: string, e: React.PointerEvent<HTMLButtonElement>) => void;
 }
 
 const WalletCardComponent: React.FC<WalletCardProps> = ({
@@ -26,6 +28,7 @@ const WalletCardComponent: React.FC<WalletCardProps> = ({
   index,
   totalCount,
   isReorderMode,
+  isDragging = false,
   isLocked,
   isHidden,
   mainCurrency,
@@ -35,6 +38,7 @@ const WalletCardComponent: React.FC<WalletCardProps> = ({
   isRTL,
   onSelect,
   onMove,
+  onDragHandlePointerDown,
 }) => {
   const cardColor = w.color?.startsWith('#') ? w.color : '#0E5E58';
   const isExcluded = Boolean(w.excludeFromTotal);
@@ -77,20 +81,28 @@ const WalletCardComponent: React.FC<WalletCardProps> = ({
   return (
     <div
       data-wallet-id={w.id}
+      data-wallet-index={index}
       data-excluded={isExcluded ? 'true' : 'false'}
+      data-dragging={isDragging ? 'true' : 'false'}
       role={isReorderMode ? undefined : 'button'}
       tabIndex={isReorderMode ? undefined : 0}
       onClick={handleCardClick}
       onKeyDown={handleCardKeyDown}
       className={`relative overflow-hidden rounded-2xl p-5 min-h-[154px] flex flex-col justify-between text-white select-none shadow-md transform-gpu will-change-transform transition-transform duration-200 ${
         isReorderMode
-          ? 'cursor-default ring-2 ring-[var(--color-accent)]/50'
+          ? isDragging
+            ? 'cursor-grabbing scale-[1.015] shadow-xl ring-2 ring-[var(--color-gold)] z-10'
+            : 'cursor-default ring-2 ring-[var(--color-accent)]/50'
           : 'cursor-pointer hover:-translate-y-0.5 active:scale-[0.985]'
       } ${statusClasses}`}
       style={{
         background: `linear-gradient(135deg, ${cardColor} 0%, color-mix(in srgb, ${cardColor} 74%, #061A14) 100%)`,
-        contentVisibility: 'auto',
-        containIntrinsicSize: 'auto 154px',
+        ...(isReorderMode
+          ? {}
+          : {
+              contentVisibility: 'auto',
+              containIntrinsicSize: 'auto 154px',
+            }),
       }}
     >
       {/* Subtle Gold Shimmer & Card Surface Accent (zero heavy filter/backdrop-blur) */}
@@ -103,7 +115,74 @@ const WalletCardComponent: React.FC<WalletCardProps> = ({
         className="pointer-events-none absolute inset-0 pattern-wallet-lines opacity-65"
       />
 
-      {/* Top Row: Wallet Icon + Name + Excluded Badge + Currency (or Reorder Controls) */}
+      {/* Reorder Mode Top Control Bar (keeps wallet name fully readable on mobile) */}
+      {isReorderMode && (
+        <div
+          className="relative flex items-center justify-between gap-2 pb-3 mb-2 border-b border-white/15 select-none"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-mono font-bold px-2.5 py-1 rounded-lg bg-black/25 text-white/95 num-tabular">
+              #{index + 1}
+            </span>
+            {onDragHandlePointerDown && (
+              <button
+                type="button"
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  onDragHandlePointerDown(w.id, e);
+                }}
+                onClick={(e) => e.stopPropagation()}
+                aria-label={isRTL ? `سحب ${w.name} لإعادة الترتيب` : `Drag ${w.name} to reorder`}
+                data-testid={`wallet-drag-handle-${w.id}`}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-black/30 hover:bg-black/45 active:scale-95 text-white text-xs font-medium min-h-[38px] transition-colors duration-200 touch-none cursor-grab active:cursor-grabbing select-none"
+              >
+                <GripVertical className="w-4 h-4 shrink-0" />
+                <span>{isRTL ? 'اسحب' : 'Drag'}</span>
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onMove(w.id, 'up');
+              }}
+              disabled={index === 0}
+              aria-label={isRTL ? `نقل ${w.name} لأعلى` : `Move ${w.name} up`}
+              className={`p-2 rounded-xl bg-black/30 min-h-[38px] min-w-[38px] flex items-center justify-center transition-colors duration-200 touch-manipulation select-none ${
+                index === 0
+                  ? 'opacity-35 cursor-not-allowed'
+                  : 'hover:bg-black/45 active:scale-95 text-white'
+              }`}
+            >
+              <ArrowUp className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onMove(w.id, 'down');
+              }}
+              disabled={index === totalCount - 1}
+              aria-label={isRTL ? `نقل ${w.name} لأسفل` : `Move ${w.name} down`}
+              className={`p-2 rounded-xl bg-black/30 min-h-[38px] min-w-[38px] flex items-center justify-center transition-colors duration-200 touch-manipulation select-none ${
+                index === totalCount - 1
+                  ? 'opacity-35 cursor-not-allowed'
+                  : 'hover:bg-black/45 active:scale-95 text-white'
+              }`}
+            >
+              <ArrowDown className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Top Row: Wallet Icon + Name + Excluded Badge + Currency */}
       <div className="relative flex items-start justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
           <div className="w-10 h-10 rounded-xl bg-white/15 border border-white/20 flex items-center justify-center shrink-0">
@@ -130,46 +209,12 @@ const WalletCardComponent: React.FC<WalletCardProps> = ({
           </div>
         </div>
 
-        {isReorderMode ? (
-          <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
-            <span className="text-[11px] font-mono font-bold px-2 py-1 rounded-lg bg-black/25 text-white/95 num-tabular">
-              #{index + 1}
-            </span>
-            <button
-              type="button"
-              onClick={() => onMove(index, 'up')}
-              disabled={index === 0}
-              aria-label={isRTL ? `نقل ${w.name} لأعلى` : `Move ${w.name} up`}
-              className={`p-2 rounded-xl bg-black/30 min-h-[40px] min-w-[40px] flex items-center justify-center transition-colors duration-200 ${
-                index === 0
-                  ? 'opacity-35 cursor-not-allowed'
-                  : 'hover:bg-black/45 active:scale-95 text-white'
-              }`}
-            >
-              <ArrowUp className="w-4 h-4" />
-            </button>
-            <button
-              type="button"
-              onClick={() => onMove(index, 'down')}
-              disabled={index === totalCount - 1}
-              aria-label={isRTL ? `نقل ${w.name} لأسفل` : `Move ${w.name} down`}
-              className={`p-2 rounded-xl bg-black/30 min-h-[40px] min-w-[40px] flex items-center justify-center transition-colors duration-200 ${
-                index === totalCount - 1
-                  ? 'opacity-35 cursor-not-allowed'
-                  : 'hover:bg-black/45 active:scale-95 text-white'
-              }`}
-            >
-              <ArrowDown className="w-4 h-4" />
-            </button>
-          </div>
-        ) : (
-          <span
-            className="font-mono text-xs font-bold tracking-wider text-[#F4E3B2] shrink-0 pt-0.5"
-            dir="ltr"
-          >
-            {w.currency}
-          </span>
-        )}
+        <span
+          className="font-mono text-xs font-bold tracking-wider text-[#F4E3B2] shrink-0 pt-0.5"
+          dir="ltr"
+        >
+          {w.currency}
+        </span>
       </div>
 
       {/* Bottom Row: Prominent Balance & Subtle Contactless Smart Chip */}

@@ -115,8 +115,23 @@ describe('navigation routing helpers', () => {
       activeWalletId: 'w-99',
     });
 
-    // Missing both defaults cleanly to home
-    assert.deepEqual(resolveInitialRoute('', null), DEFAULT_ROUTE_STATE);
+    // Empty hash & empty sessionStorage falls back cleanly to localStorage
+    assert.deepEqual(resolveInitialRoute('', null, storedWallets), {
+      activeNav: 'wallets',
+      homeTab: 'statistics',
+      activeWalletId: 'w-99',
+    });
+    assert.deepEqual(
+      resolveInitialRoute('', serializeRouteForStorage({ activeNav: 'more', homeTab: 'transactions', activeWalletId: null }), storedWallets),
+      {
+        activeNav: 'more',
+        homeTab: 'transactions',
+        activeWalletId: null,
+      }
+    );
+
+    // Missing all three defaults cleanly to home
+    assert.deepEqual(resolveInitialRoute('', null, null), DEFAULT_ROUTE_STATE);
     assert.equal(parseStoredRoute('not-json'), null);
   });
 

@@ -1,10 +1,11 @@
-import React, { useState, useMemo, useCallback, useRef } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import {
   Plus,
   EyeOff,
   Lock,
   Trash2,
   Check,
+  X,
   Crown,
   Sparkles,
   AlertTriangle,
@@ -15,7 +16,14 @@ import { useApp } from '../../context/AppContext';
 import { Wallet, WalletType } from '../../types';
 import { IconRenderer } from '../common/IconRenderer';
 import { formatCurrencyAmount, calculateTotalBalance } from '../../services/calculations';
-import { reorderWalletsBySwap, sortWalletsByOrder } from '../../services/walletOrder';
+import {
+  applyWalletOrderIds,
+  areWalletOrderIdsEqual,
+  moveWalletById,
+  moveWalletIdByIndex,
+  reconcileDraftOrderIds,
+  sortWalletsByOrder,
+} from '../../services/walletOrder';
 import {
   buildWalletActionPreset,
   canToggleWalletArchive,
@@ -71,6 +79,7 @@ export const WalletsPage: React.FC = () => {
   } = useApp();
 
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const { handleScroll, saveScrollNow } = useScrollRestoration(
     containerRef,
     WALLETS_SCROLL_STORAGE_KEY,
@@ -79,6 +88,13 @@ export const WalletsPage: React.FC = () => {
 
   const [hiddenBalances, setHiddenBalances] = useState<Record<string, boolean>>({});
   const [isReorderMode, setIsReorderMode] = useState(false);
+  const [draftOrderIds, setDraftOrderIds] = useState<string[] | null>(null);
+  const [pendingCommittedOrderIds, setPendingCommittedOrderIds] = useState<string[] | null>(null);
+  const [draggingWalletId, setDraggingWalletId] = useState<string | null>(null);
+  const draftOrderIdsRef = useRef<string[] | null>(null);
+  const latestWalletsRef = useRef<Wallet[]>(wallets);
+  latestWalletsRef.current = wallets;
+  const activeDragCleanupRef = useRef<(() => void) | null>(null);
   const [quickActionWalletId, setQuickActionWalletId] = useState<string | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingWallet, setEditingWallet] = useState<Wallet | null>(null);
@@ -113,30 +129,220 @@ export const WalletsPage: React.FC = () => {
   const [custodianMemberUid, setCustodianMemberUid] = useState('');
   const [excludeFromTotal, setExcludeFromTotal] = useState(false);
 
-  const sortedWallets = useMemo(() => sortWalletsByOrder(wallets), [wallets]);
+  const externalSortedWallets = useMemo(() => sortWalletsByOrder(wallets), [wallets]);
 
-  React.useEffect(() => {
-    if (sortedWallets.length <= 1 && isReorderMode) {
+  // Keep live draft completely isolated from external `wallets` array reference changes
+  // during reorder mode, and hold committed order briefly until external state confirms it.
+  const displayedWallets = useMemo(() => {
+    if (isReorderMode && draftOrderIds !== null) {
+      return applyWalletOrderIds(wallets, draftOrderIds);
+    }
+    if (pendingCommittedOrderIds !== null) {
+      return applyWalletOrderIds(wallets, pendingCommittedOrderIds);
+    }
+    return externalSortedWallets;
+  }, [isReorderMode, draftOrderIds, pendingCommittedOrderIds, wallets, externalSortedWallets]);
+
+  useEffect(() => {
+    if (wallets.length <= 1 && isReorderMode) {
+      activeDragCleanupRef.current?.();
+      activeDragCleanupRef.current = null;
+      draftOrderIdsRef.current = null;
+      setDraftOrderIds(null);
+      setDraggingWalletId(null);
       setIsReorderMode(false);
     }
-  }, [sortedWallets.length, isReorderMode]);
+  }, [wallets.length, isReorderMode]);
 
-  const handleMoveWallet = useCallback(
-    (index: number, direction: 'up' | 'down') => {
-      const nextOrdered = reorderWalletsBySwap(sortedWallets, index, direction);
-      reorderWallets(nextOrdered);
+  useEffect(() => {
+    if (isReorderMode || pendingCommittedOrderIds === null) return;
+    if (areWalletOrderIdsEqual(externalSortedWallets, pendingCommittedOrderIds)) {
+      setPendingCommittedOrderIds(null);
+      return;
+    }
+    const fallbackTimer = window.setTimeout(() => {
+      setPendingCommittedOrderIds(null);
+    }, 4_000);
+    return () => window.clearTimeout(fallbackTimer);
+  }, [isReorderMode, pendingCommittedOrderIds, externalSortedWallets]);
+
+  useEffect(() => {
+    return () => {
+      activeDragCleanupRef.current?.();
+      activeDragCleanupRef.current = null;
+    };
+  }, []);
+
+  const handleStartReorder = useCallback(() => {
+    const initialIds = (pendingCommittedOrderIds
+      ? applyWalletOrderIds(latestWalletsRef.current, pendingCommittedOrderIds)
+      : sortWalletsByOrder(latestWalletsRef.current)
+    ).map((w) => w.id);
+    if (initialIds.length <= 1) return;
+    draftOrderIdsRef.current = initialIds;
+    setDraftOrderIds(initialIds);
+    setPendingCommittedOrderIds(null);
+    setDraggingWalletId(null);
+    setIsReorderMode(true);
+  }, [pendingCommittedOrderIds]);
+
+  const handleCancelReorder = useCallback(() => {
+    activeDragCleanupRef.current?.();
+    activeDragCleanupRef.current = null;
+    draftOrderIdsRef.current = null;
+    setDraftOrderIds(null);
+    setDraggingWalletId(null);
+    setIsReorderMode(false);
+  }, []);
+
+  const handleCommitReorder = useCallback(() => {
+    activeDragCleanupRef.current?.();
+    activeDragCleanupRef.current = null;
+    const finalDraftIds = draftOrderIdsRef.current;
+    const finalOrdered = finalDraftIds
+      ? applyWalletOrderIds(latestWalletsRef.current, finalDraftIds)
+      : sortWalletsByOrder(latestWalletsRef.current);
+    const committedIds = finalOrdered.map((w) => w.id);
+
+    setPendingCommittedOrderIds(committedIds);
+    draftOrderIdsRef.current = null;
+    setDraftOrderIds(null);
+    setDraggingWalletId(null);
+    setIsReorderMode(false);
+
+    if (finalOrdered.length > 1) {
+      reorderWallets(finalOrdered);
+    }
+  }, [reorderWallets]);
+
+  const handleMoveWallet = useCallback((walletId: string, direction: 'up' | 'down') => {
+    setDraftOrderIds((prev) => {
+      const base =
+        prev ??
+        draftOrderIdsRef.current ??
+        sortWalletsByOrder(latestWalletsRef.current).map((w) => w.id);
+      const reconciled = reconcileDraftOrderIds(base, latestWalletsRef.current);
+      const next = moveWalletById(reconciled, walletId, direction);
+      draftOrderIdsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const handleDragHandlePointerDown = useCallback(
+    (activeWalletId: string, e: React.PointerEvent<HTMLButtonElement>) => {
+      if (e.button !== 0 && e.pointerType === 'mouse') return;
+      if (!activeWalletId) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+      activeDragCleanupRef.current?.();
+
+      const pointerId = e.pointerId;
+      const startX = e.clientX;
+      const startY = e.clientY;
+      let dragEngaged = false;
+      let lastSwappedTargetId: string | null = null;
+      let lastSwapAt = 0;
+
+      try {
+        e.currentTarget.setPointerCapture(pointerId);
+      } catch {
+        // Ignore if pointer capture is unsupported in synthetic test events
+      }
+
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        if (moveEvent.pointerId !== pointerId) return;
+        const dx = moveEvent.clientX - startX;
+        const dy = moveEvent.clientY - startY;
+        if (!dragEngaged) {
+          if (Math.hypot(dx, dy) < 6) return;
+          dragEngaged = true;
+          setDraggingWalletId(activeWalletId);
+        }
+
+        // Smooth edge auto-scroll if dragging near top/bottom of scroll container
+        const scroller = containerRef.current;
+        if (scroller) {
+          const scrollerRect = scroller.getBoundingClientRect();
+          const edgeThreshold = 64;
+          if (moveEvent.clientY < scrollerRect.top + edgeThreshold) {
+            scroller.scrollTop -= 10;
+          } else if (moveEvent.clientY > scrollerRect.bottom - edgeThreshold) {
+            scroller.scrollTop += 10;
+          }
+        }
+
+        const listEl = listRef.current;
+        if (!listEl) return;
+
+        const cards = listEl.querySelectorAll<HTMLElement>('[data-wallet-id]');
+        let hoveredWalletId: string | null = null;
+        for (let i = 0; i < cards.length; i += 1) {
+          const card = cards[i];
+          const rect = card.getBoundingClientRect();
+          if (
+            moveEvent.clientX >= rect.left &&
+            moveEvent.clientX <= rect.right &&
+            moveEvent.clientY >= rect.top &&
+            moveEvent.clientY <= rect.bottom
+          ) {
+            hoveredWalletId = card.dataset.walletId || null;
+            break;
+          }
+        }
+
+        if (!hoveredWalletId || hoveredWalletId === activeWalletId) return;
+        const now = Date.now();
+        if (hoveredWalletId === lastSwappedTargetId && now - lastSwapAt < 140) {
+          return;
+        }
+
+        setDraftOrderIds((prev) => {
+          const base =
+            prev ??
+            draftOrderIdsRef.current ??
+            sortWalletsByOrder(latestWalletsRef.current).map((w) => w.id);
+          const reconciled = reconcileDraftOrderIds(base, latestWalletsRef.current);
+          const fromIdx = reconciled.indexOf(activeWalletId);
+          const toIdx = reconciled.indexOf(hoveredWalletId as string);
+          if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return prev;
+          const next = moveWalletIdByIndex(reconciled, fromIdx, toIdx);
+          draftOrderIdsRef.current = next;
+          lastSwappedTargetId = hoveredWalletId;
+          lastSwapAt = now;
+          return next;
+        });
+      };
+
+      const cleanup = () => {
+        window.removeEventListener('pointermove', handlePointerMove);
+        window.removeEventListener('pointerup', handlePointerEnd);
+        window.removeEventListener('pointercancel', handlePointerEnd);
+        setDraggingWalletId(null);
+        activeDragCleanupRef.current = null;
+      };
+
+      const handlePointerEnd = (endEvent: PointerEvent) => {
+        if (endEvent.pointerId !== pointerId) return;
+        cleanup();
+      };
+
+      activeDragCleanupRef.current = cleanup;
+      window.addEventListener('pointermove', handlePointerMove, { passive: true });
+      window.addEventListener('pointerup', handlePointerEnd);
+      window.addEventListener('pointercancel', handlePointerEnd);
     },
-    [sortedWallets, reorderWallets]
+    []
   );
 
   // Total balance across all wallets
   const totalBalance = useMemo(() => {
-    return calculateTotalBalance(sortedWallets, settings.mainCurrency, settings.customExchangeRates, {
+    return calculateTotalBalance(displayedWallets, settings.mainCurrency, settings.customExchangeRates, {
       excludeDebts: settings.excludeDebtsFromBalance,
       debts,
     });
   }, [
-    sortedWallets,
+    displayedWallets,
     settings.mainCurrency,
     settings.customExchangeRates,
     settings.ratesUpdatedAtMs,
@@ -357,40 +563,53 @@ export const WalletsPage: React.FC = () => {
         <span className="text-xs font-semibold text-[var(--color-muted)]">
           {isReorderMode
             ? isRTL
-              ? 'استخدم الأسهم لإعادة ترتيب المحافظ'
-              : 'Tap arrows to reorder wallets'
-            : `${isRTL ? 'المحافظ' : 'Wallets'} (${sortedWallets.length})`}
+              ? 'اسحب المقبض أو استخدم الأسهم ثم اضغط تم الترتيب'
+              : 'Drag handle or tap arrows, then tap Done'
+            : `${isRTL ? 'المحافظ' : 'Wallets'} (${displayedWallets.length})`}
         </span>
 
-        {sortedWallets.length > 1 && (
-          <button
-            type="button"
-            onClick={() => setIsReorderMode((prev) => !prev)}
-            aria-pressed={isReorderMode}
-            data-testid="toggle-reorder-wallets"
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all duration-300 min-h-[40px] ${
-              isReorderMode
-                ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)] shadow-xs'
-                : 'bg-[var(--color-surface)] text-[var(--color-ink)] border-[var(--color-line)] hover:border-[var(--color-accent)]/50'
-            }`}
-          >
-            {isReorderMode ? (
-              <>
-                <Check className="w-3.5 h-3.5" />
-                <span>{isRTL ? 'تم الترتيب' : 'Done'}</span>
-              </>
-            ) : (
-              <>
-                <ArrowUpDown className="w-3.5 h-3.5 text-[var(--color-accent)]" />
-                <span>{isRTL ? 'تعديل الترتيب' : 'Reorder'}</span>
-              </>
+        {displayedWallets.length > 1 && (
+          <div className="flex items-center gap-1.5 shrink-0">
+            {isReorderMode && (
+              <button
+                type="button"
+                onClick={handleCancelReorder}
+                data-testid="cancel-reorder-wallets"
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold border bg-[var(--color-surface)] text-[var(--color-muted)] border-[var(--color-line)] hover:text-[var(--color-ink)] transition-colors duration-200 min-h-[40px]"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>{isRTL ? 'إلغاء' : 'Cancel'}</span>
+              </button>
             )}
-          </button>
+            <button
+              type="button"
+              onClick={isReorderMode ? handleCommitReorder : handleStartReorder}
+              aria-pressed={isReorderMode}
+              data-testid="toggle-reorder-wallets"
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all duration-300 min-h-[40px] ${
+                isReorderMode
+                  ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] border-[var(--color-accent)] shadow-xs'
+                  : 'bg-[var(--color-surface)] text-[var(--color-ink)] border-[var(--color-line)] hover:border-[var(--color-accent)]/50'
+              }`}
+            >
+              {isReorderMode ? (
+                <>
+                  <Check className="w-3.5 h-3.5" />
+                  <span>{isRTL ? 'تم الترتيب' : 'Done'}</span>
+                </>
+              ) : (
+                <>
+                  <ArrowUpDown className="w-3.5 h-3.5 text-[var(--color-accent)]" />
+                  <span>{isRTL ? 'تعديل الترتيب' : 'Reorder'}</span>
+                </>
+              )}
+            </button>
+          </div>
         )}
       </div>
 
       {/* Wallets Cards List (Clean Credit Card Style) */}
-      {sortedWallets.length === 0 ? (
+      {displayedWallets.length === 0 ? (
         <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-2xl">
           <HairlineEmptyState
             figure="vault"
@@ -414,10 +633,11 @@ export const WalletsPage: React.FC = () => {
         </div>
       ) : (
       <div
+        ref={listRef}
         className="grid grid-cols-1 md:grid-cols-2 gap-3.5"
         data-testid="wallets-card-list"
       >
-        {sortedWallets.map((w, index) => {
+        {displayedWallets.map((w, index) => {
           const isHidden = Boolean(hiddenBalances[w.id]);
           const isLocked = Boolean(w.isLocked && lockedWalletIds.includes(w.id));
           const custodianName =
@@ -430,8 +650,9 @@ export const WalletsPage: React.FC = () => {
               key={w.id}
               wallet={w}
               index={index}
-              totalCount={sortedWallets.length}
+              totalCount={displayedWallets.length}
               isReorderMode={isReorderMode}
+              isDragging={draggingWalletId === w.id}
               isLocked={isLocked}
               isHidden={isHidden}
               mainCurrency={settings.mainCurrency}
@@ -441,6 +662,7 @@ export const WalletsPage: React.FC = () => {
               isRTL={isRTL}
               onSelect={handleCardClick}
               onMove={handleMoveWallet}
+              onDragHandlePointerDown={handleDragHandlePointerDown}
             />
           );
         })}

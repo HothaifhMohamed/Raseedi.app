@@ -15,6 +15,8 @@ import {
   UserAccount,
   VerifiedProEntitlement,
   OrgWorkspaceData,
+  Organization,
+  OrgRef,
   MoneyCircle,
   OrganizationIndustry,
   CostCenter,
@@ -27,6 +29,9 @@ const DB_NAME = 'raseedi_expense_tracker_db';
 const DB_VERSION = 1;
 const SETTINGS_LS_KEY = 'raseedi_settings_v1';
 const LEGACY_LS_KEY = 'raseedi_data_v1';
+const PRE_RESTORE_TS_LS_KEY = 'raseedi_pre_restore_ts_v1';
+const ORG_REFS_CACHE_LS_KEY = 'raseedi_org_refs_cache_v1';
+const ACTIVE_ORG_SNAPSHOT_LS_KEY = 'raseedi_active_org_snapshot_v1';
 
 export const DEFAULT_SETTINGS: AppSettings = {
   firstDayOfMonth: 1,
@@ -182,6 +187,55 @@ function normalizeLoadedState(raw: Partial<AppDatabaseData>): AppDatabaseData {
     user: raw.user || null,
     hasCompletedOnboarding,
   };
+}
+
+/**
+ * Synchronous Frame-0 bootstrap reader from the lightweight localStorage cache.
+ * Allows returning users (signed-in or guest) to paint their exact workspace, settings,
+ * and recent data immediately on refresh without flashing SplashScreen, AuthGate, or defaults.
+ */
+export function loadSyncBootstrapData(): AppDatabaseData | null {
+  if (memoryCache) return memoryCache;
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return null;
+
+  try {
+    const rawLocal = localStorage.getItem(LEGACY_LS_KEY);
+    if (!rawLocal) return null;
+    const parsed = JSON.parse(rawLocal) as Partial<AppDatabaseData>;
+    if (!parsed || typeof parsed !== 'object') return null;
+
+    // Merge latest settings cache if present (e.g. instant theme/language toggle)
+    try {
+      const rawSettings = localStorage.getItem(SETTINGS_LS_KEY);
+      if (rawSettings) {
+        const parsedSettings = JSON.parse(rawSettings) as Partial<AppSettings>;
+        if (parsedSettings && typeof parsedSettings === 'object') {
+          parsed.settings = {
+            ...(parsed.settings || {}),
+            ...parsedSettings,
+          } as AppSettings;
+        }
+      }
+    } catch {
+      // Ignore malformed settings cache
+    }
+
+    return normalizeLoadedState(parsed);
+  } catch {
+    return null;
+  }
+}
+
+export function loadPreRestoreSnapshotTimestampSync(): number | null {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(PRE_RESTORE_TS_LS_KEY);
+    if (!raw) return null;
+    const num = Number(raw);
+    return Number.isFinite(num) && num > 0 ? num : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -376,6 +430,14 @@ export function persistDataDebounced(
 }
 
 export async function savePreRestoreSnapshot(data: AppDatabaseData): Promise<void> {
+  const now = Date.now();
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(PRE_RESTORE_TS_LS_KEY, String(now));
+    }
+  } catch {
+    // Ignore storage quota errors
+  }
   const db = await openDB();
   if (!db) return;
   return new Promise((resolve) => {
@@ -384,7 +446,7 @@ export async function savePreRestoreSnapshot(data: AppDatabaseData): Promise<voi
       tx.objectStore('app_data').put({
         key: 'pre_restore_snapshot',
         data: { ...data, settings: { ...data.settings, isPro: false } },
-        updatedAt: Date.now(),
+        updatedAt: now,
       });
       tx.oncomplete = () => resolve();
       tx.onerror = () => resolve();
@@ -638,6 +700,75 @@ export function saveActiveWorkspacePref(workspaceId: string): void {
     localStorage.setItem('raseedi_active_workspace_v1', workspaceId || 'personal');
   } catch {
     // ignore
+  }
+}
+
+export function loadCachedOrgRefs(): OrgRef[] {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(ORG_REFS_CACHE_LS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (r): r is OrgRef => Boolean(r && typeof r === 'object' && typeof r.orgId === 'string' && r.orgId.trim().length > 0)
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function saveCachedOrgRefs(refs: OrgRef[]): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+  try {
+    if (!refs || refs.length === 0) {
+      localStorage.removeItem(ORG_REFS_CACHE_LS_KEY);
+      return;
+    }
+    localStorage.setItem(ORG_REFS_CACHE_LS_KEY, JSON.stringify(refs));
+  } catch {
+    // Ignore quota errors
+  }
+}
+
+export interface CachedActiveOrgSnapshot {
+  orgId: string;
+  organization: Organization | null;
+  wallets: Wallet[];
+  categories: Category[];
+  updatedAt: number;
+}
+
+export function loadCachedActiveOrgSnapshot(orgId: string): CachedActiveOrgSnapshot | null {
+  if (!orgId || orgId === 'personal') return null;
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(ACTIVE_ORG_SNAPSHOT_LS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<CachedActiveOrgSnapshot>;
+    if (!parsed || typeof parsed !== 'object' || parsed.orgId !== orgId) return null;
+    return {
+      orgId,
+      organization: parsed.organization && typeof parsed.organization === 'object' ? (parsed.organization as Organization) : null,
+      wallets: Array.isArray(parsed.wallets) ? (parsed.wallets as Wallet[]) : [],
+      categories: Array.isArray(parsed.categories) ? (parsed.categories as Category[]) : [],
+      updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function saveCachedActiveOrgSnapshot(snapshot: CachedActiveOrgSnapshot | null): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+  try {
+    if (!snapshot || !snapshot.orgId || snapshot.orgId === 'personal') {
+      localStorage.removeItem(ACTIVE_ORG_SNAPSHOT_LS_KEY);
+      return;
+    }
+    localStorage.setItem(ACTIVE_ORG_SNAPSHOT_LS_KEY, JSON.stringify(snapshot));
+  } catch {
+    // Ignore quota errors
   }
 }
 

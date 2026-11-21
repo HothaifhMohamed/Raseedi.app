@@ -14,6 +14,10 @@ import {
   TRANSACTIONS_LIMIT_STORAGE_KEY,
   TRANSACTIONS_SCROLL_STORAGE_KEY,
 } from './services/scrollRestoration';
+import {
+  safeReadFullLedgerPref,
+  safeWriteFullLedgerPref,
+} from './services/navigation';
 import { Navbar } from './components/Navbar';
 import { BottomNav } from './components/BottomNav';
 import { SplashScreen } from './components/SplashScreen';
@@ -129,15 +133,31 @@ const MainLayout: React.FC = () => {
   } = useApp();
 
   const [hasConsentForAds, setHasConsentForAds] = React.useState<boolean>(() => hasAdSenseConsent());
-  const [showFullLedger, setShowFullLedger] = React.useState(false);
+  const [showFullLedger, setShowFullLedgerState] = React.useState<boolean>(() =>
+    activeNav === 'home' && homeTab === 'transactions' ? safeReadFullLedgerPref() : false
+  );
+
+  const setShowFullLedger = React.useCallback((next: boolean) => {
+    setShowFullLedgerState(next);
+    safeWriteFullLedgerPref(next);
+  }, []);
 
   React.useEffect(() => {
     if (activeNav !== 'home' || homeTab !== 'transactions') {
-      setShowFullLedger(false);
+      if (showFullLedger) {
+        setShowFullLedgerState(false);
+        safeWriteFullLedgerPref(false);
+      }
     }
-  }, [activeNav, homeTab]);
+  }, [activeNav, homeTab, showFullLedger]);
 
+  const prevRouteKeyRef = React.useRef<string>(
+    `${activeNav}|${homeTab}|${showFullLedger ? '1' : '0'}|${activeWalletId || ''}`
+  );
   React.useLayoutEffect(() => {
+    const nextKey = `${activeNav}|${homeTab}|${showFullLedger ? '1' : '0'}|${activeWalletId || ''}`;
+    if (prevRouteKeyRef.current === nextKey) return;
+    prevRouteKeyRef.current = nextKey;
     resetScrollToTop();
   }, [activeNav, homeTab, showFullLedger, activeWalletId]);
 

@@ -34,6 +34,12 @@ import {
 } from '../types';
 import {
   loadInitialData,
+  loadSyncBootstrapData,
+  loadPreRestoreSnapshotTimestampSync,
+  loadCachedOrgRefs,
+  saveCachedOrgRefs,
+  loadCachedActiveOrgSnapshot,
+  saveCachedActiveOrgSnapshot,
   persistData,
   persistDataDebounced,
   generateDemoSeedData,
@@ -219,6 +225,7 @@ import {
   importOrgTransactionsBatchCloud,
   recalculateOrgBalancesFromApproved,
   upsertOrgWalletCloud,
+  reorderOrgWalletsCloud,
   deleteOrgWalletCloud,
   upsertOrgCategoryCloud,
   deleteOrgCategoryCloud,
@@ -257,7 +264,8 @@ import {
   safeWriteSessionNav,
 } from '../services/navigation';
 import {
-  assignSequentialWalletOrder,
+  applyWalletOrderIds,
+  areWalletOrderIdsEqual,
   getNextWalletOrder,
   sortWalletsByOrder,
 } from '../services/walletOrder';
@@ -692,29 +700,83 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | null>(null);
 
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [isLoading, setIsLoading] = useState(true);
+  // Synchronous Frame-0 bootstrap from lightweight localStorage cache eliminates Splash/Auth/Personal flashes on refresh
+  const syncBootstrapRef = React.useRef<{
+    data: AppDatabaseData | null;
+    initialWorkspace: string;
+    initialGuestMode: boolean;
+    initialOrgSnapshot: ReturnType<typeof loadCachedActiveOrgSnapshot>;
+    canRenderImmediately: boolean;
+  } | null>(null);
+  if (syncBootstrapRef.current === null) {
+    const bootData = loadSyncBootstrapData();
+    const initialWorkspace = loadActiveWorkspacePref();
+    const initialGuestMode = loadGuestModePref();
+    const initialOrgSnapshot =
+      initialWorkspace !== 'personal' ? loadCachedActiveOrgSnapshot(initialWorkspace) : null;
+    const canRenderImmediately = Boolean(
+      bootData && (Boolean(bootData.user?.isLoggedIn) || initialGuestMode)
+    );
+    syncBootstrapRef.current = {
+      data: bootData,
+      initialWorkspace,
+      initialGuestMode,
+      initialOrgSnapshot,
+      canRenderImmediately,
+    };
+  }
+  const boot = syncBootstrapRef.current;
+
+  const [isLoading, setIsLoading] = useState<boolean>(() => !boot.canRenderImmediately);
 
   // Personal Workspace State (source for Personal IndexedDB root_state)
-  const [personalTransactions, setPersonalTransactions] = useState<Transaction[]>([]);
-  const [personalWallets, setPersonalWallets] = useState<Wallet[]>(DEFAULT_WALLETS);
-  const [personalCategories, setPersonalCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
-  const [personalBudgets, setPersonalBudgets] = useState<Budget[]>([]);
-  const [personalDebts, setPersonalDebts] = useState<Debt[]>([]);
-  const [personalGoals, setPersonalGoals] = useState<SavingsGoal[]>([]);
-  const [personalTemplates, setPersonalTemplates] = useState<Template[]>([]);
-  const [personalMoneyCircles, setPersonalMoneyCircles] = useState<MoneyCircle[]>([]);
+  const [personalTransactions, setPersonalTransactions] = useState<Transaction[]>(
+    () => boot.data?.transactions || []
+  );
+  const [personalWallets, setPersonalWallets] = useState<Wallet[]>(() =>
+    boot.data
+      ? sortWalletsByOrder(
+          boot.data.wallets?.length
+            ? boot.data.wallets
+            : boot.data.hasCompletedOnboarding
+            ? []
+            : DEFAULT_WALLETS
+        )
+      : DEFAULT_WALLETS
+  );
+  const [personalCategories, setPersonalCategories] = useState<Category[]>(() =>
+    boot.data
+      ? boot.data.categories?.length
+        ? boot.data.categories
+        : boot.data.hasCompletedOnboarding
+        ? []
+        : DEFAULT_CATEGORIES
+      : DEFAULT_CATEGORIES
+  );
+  const [personalBudgets, setPersonalBudgets] = useState<Budget[]>(() => boot.data?.budgets || []);
+  const [personalDebts, setPersonalDebts] = useState<Debt[]>(() => boot.data?.debts || []);
+  const [personalGoals, setPersonalGoals] = useState<SavingsGoal[]>(() => boot.data?.goals || []);
+  const [personalTemplates, setPersonalTemplates] = useState<Template[]>(() => boot.data?.templates || []);
+  const [personalMoneyCircles, setPersonalMoneyCircles] = useState<MoneyCircle[]>(
+    () => boot.data?.moneyCircles || []
+  );
   const [settings, setSettings] = useState<AppSettings>(() => {
+    const baseSettings = boot.data?.settings
+      ? mergeSettingsWithDefaults(boot.data.settings)
+      : DEFAULT_SETTINGS;
     const storedTheme = readStoredThemePreference();
-    if (!storedTheme) return DEFAULT_SETTINGS;
+    if (!storedTheme) return baseSettings;
     return {
-      ...DEFAULT_SETTINGS,
+      ...baseSettings,
       theme: storedTheme.theme,
       ...(storedTheme.updatedAt > 0 ? { themeUpdatedAt: storedTheme.updatedAt } : {}),
     };
   });
-  const [user, setUser] = useState<UserAccount | null>(null);
-  const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState(false);
-  const [isGuestMode, setIsGuestMode] = useState<boolean>(() => loadGuestModePref());
+  const [user, setUser] = useState<UserAccount | null>(() => boot.data?.user || null);
+  const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState<boolean>(() =>
+    Boolean(boot.data?.hasCompletedOnboarding)
+  );
+  const [isGuestMode, setIsGuestMode] = useState<boolean>(() => boot.initialGuestMode);
   const isGuestModeRef = React.useRef<boolean>(isGuestMode);
   isGuestModeRef.current = isGuestMode;
   const [hasUnsyncedLocalChanges, setHasUnsyncedLocalChanges] = useState<boolean>(() =>
@@ -737,17 +799,34 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return outcome === 'accepted';
   }, []);
 
-  // Dual Workspace / Cloud Enterprise State
-  const [activeWorkspace, setActiveWorkspace] = useState<string>('personal');
-  const [orgRefs, setOrgRefs] = useState<OrgRef[]>([]);
+  // Dual Workspace / Cloud Enterprise State (initialized immediately from localStorage cache)
+  const [activeWorkspace, setActiveWorkspace] = useState<string>(() => boot.initialWorkspace);
+  const [orgRefs, setOrgRefs] = useState<OrgRef[]>(() => loadCachedOrgRefs());
   const [orgRefsLoaded, setOrgRefsLoaded] = useState(false);
-  const [isOrgLoading, setIsOrgLoading] = useState(false);
+  const [localOrgWorkspacesLoaded, setLocalOrgWorkspacesLoaded] = useState(false);
+  const hasLoadedLocalOrgWorkspacesRef = React.useRef(false);
+  const [isOrgLoading, setIsOrgLoading] = useState<boolean>(
+    () => boot.initialWorkspace !== 'personal' && !boot.initialOrgSnapshot
+  );
   const [orgSyncPendingWrites, setOrgSyncPendingWrites] = useState(false);
   const [orgActionError, setOrgActionError] = useState<string | null>(null);
-  const [activeCloudOrg, setActiveCloudOrg] = useState<Organization | null>(null);
+  const [activeCloudOrg, setActiveCloudOrg] = useState<Organization | null>(
+    () => boot.initialOrgSnapshot?.organization || null
+  );
   const [activeCloudMembers, setActiveCloudMembers] = useState<OrganizationMember[]>([]);
-  const [activeCloudWallets, setActiveCloudWallets] = useState<Wallet[]>([]);
-  const [activeCloudCategories, setActiveCloudCategories] = useState<Category[]>([]);
+  const [activeCloudWallets, setActiveCloudWallets] = useState<Wallet[]>(
+    () => (boot.initialOrgSnapshot?.wallets ? sortWalletsByOrder(boot.initialOrgSnapshot.wallets) : [])
+  );
+  const activeCloudWalletsRef = React.useRef<Wallet[]>([]);
+  activeCloudWalletsRef.current = activeCloudWallets;
+  const pendingCloudWalletOrderRef = React.useRef<{
+    orgId: string;
+    orderIds: string[];
+    expiresAt: number;
+  } | null>(null);
+  const [activeCloudCategories, setActiveCloudCategories] = useState<Category[]>(
+    () => boot.initialOrgSnapshot?.categories || []
+  );
   const [activeCloudBudgets, setActiveCloudBudgets] = useState<Budget[]>([]);
   const [activeCloudCostCenters, setActiveCloudCostCenters] = useState<CostCenter[]>([]);
   const [activeCloudParties, setActiveCloudParties] = useState<BusinessParty[]>([]);
@@ -762,7 +841,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Local-first Organization Workspaces + Legacy Migration State
   const [localOrgWorkspaces, setLocalOrgWorkspaces] = useState<Record<string, OrgWorkspaceData>>({});
   const latestLocalOrgWorkspacesRef = React.useRef<Record<string, OrgWorkspaceData>>({});
-  const activeWorkspaceRef = React.useRef<string>('personal');
+  const activeWorkspaceRef = React.useRef<string>(boot.initialWorkspace);
   activeWorkspaceRef.current = activeWorkspace;
   const [legacyLocalOrgs, setLegacyLocalOrgs] = useState<OrgWorkspaceData[]>([]);
   const [isOrgMigrationModalOpen, setIsOrgMigrationModalOpen] = useState(false);
@@ -805,7 +884,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     createdTransactions: Transaction[];
   } | null>(null);
   const backgroundImportDismissTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [preRestoreSnapshotDate, setPreRestoreSnapshotDate] = useState<number | null>(null);
+  const [preRestoreSnapshotDate, setPreRestoreSnapshotDate] = useState<number | null>(() =>
+    loadPreRestoreSnapshotTimestampSync()
+  );
   const skipNextAutoSyncRef = React.useRef(false);
   const hasCompletedInitialCloudSyncRef = React.useRef(false);
   const isCloudLoadedRef = React.useRef(false);
@@ -994,7 +1075,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // Multi-Select & Undo
   const [selectedTransactionIds, setSelectedTransactionIds] = useState<string[]>([]);
-  const [isAppLocked, setIsAppLocked] = useState(false);
+  const [isAppLocked, setIsAppLocked] = useState<boolean>(() =>
+    Boolean(boot.data?.settings?.isAppLockEnabled && boot.data?.settings?.appPin)
+  );
   const [lockedWalletIds, setLockedWalletIds] = useState<string[]>([]);
   const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
   const [toastMessage, setToastMessage] = useState<ToastMessage | null>(null);
@@ -1182,7 +1265,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const isCloudActiveOrg = Boolean(user?.isLoggedIn && activeOrgRef);
   const isUsingLocalOrgMode = activeWorkspace !== 'personal' && !isCloudActiveOrg && Boolean(activeLocalOrgWs);
-  const isOrgWorkspace = activeWorkspace !== 'personal' && (isCloudActiveOrg || Boolean(activeLocalOrgWs));
+  const isPendingOrgRestore =
+    activeWorkspace !== 'personal' &&
+    !isCloudActiveOrg &&
+    !activeLocalOrgWs &&
+    (!orgRefsLoaded || !localOrgWorkspacesLoaded);
+  const isOrgWorkspace =
+    activeWorkspace !== 'personal' &&
+    (isCloudActiveOrg || Boolean(activeLocalOrgWs) || isPendingOrgRestore);
 
   const activeOrganization: Organization | null = useMemo(() => {
     if (!isOrgWorkspace) return null;
@@ -2225,15 +2315,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     [syncWorkspaceTxsBatchImmediately, handleLocalPersistError]
   );
 
-  // Load from database on startup
+  // Load full dataset from IndexedDB on startup without blocking initial paint or adding artificial delays
   useEffect(() => {
+    let cancelled = false;
+    let deferredTimerId: ReturnType<typeof setTimeout> | null = null;
+    let deferredIdleId: number | null = null;
+
     async function init() {
-      const [data, cachedPro, preSnap, orgData] = await Promise.all([
+      const [data, cachedPro, orgData] = await Promise.all([
         loadInitialData(),
         loadVerifiedProCache(),
-        loadPreRestoreSnapshot(),
         loadOrgWorkspaces(),
       ]);
+      if (cancelled) return;
 
       const onboarded = Boolean(data.hasCompletedOnboarding);
       const resolvedWallets = sortWalletsByOrder(
@@ -2249,12 +2343,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         ? []
         : DEFAULT_CATEGORIES;
 
-      setPersonalTransactions(data.transactions || []);
-      setPersonalWallets(resolvedWallets);
-      setPersonalCategories(resolvedCategories);
-      setPersonalBudgets(data.budgets || []);
-      setPersonalDebts(data.debts || []);
-      setPersonalGoals(data.goals || []);
       const baseLoadedSettings = mergeSettingsWithDefaults(data.settings);
       const storedThemePref = readStoredThemePreference();
       const reconciledStartupTheme = reconcileThemeSettings(
@@ -2276,19 +2364,29 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           : {}),
       };
       applyThemeToDocument(resolvedSettings.theme);
-      setPersonalTemplates(data.templates || []);
-      setPersonalMoneyCircles(data.moneyCircles || []);
-      setSettings(resolvedSettings);
-      setUser(data.user || null);
-      setHasCompletedOnboarding(onboarded);
 
       const loadedOrgMap = orgData.workspaces || {};
       latestLocalOrgWorkspacesRef.current = loadedOrgMap;
-      setLocalOrgWorkspaces(loadedOrgMap);
+      hasLoadedLocalOrgWorkspacesRef.current = true;
 
-      const savedWsPref = loadActiveWorkspacePref() || orgData.activeWorkspace;
-      if (savedWsPref && savedWsPref !== 'personal') {
-        setActiveWorkspace(savedWsPref);
+      setPersonalTransactions(data.transactions || []);
+      setPersonalWallets(resolvedWallets);
+      setPersonalCategories(resolvedCategories);
+      setPersonalBudgets(data.budgets || []);
+      setPersonalDebts(data.debts || []);
+      setPersonalGoals(data.goals || []);
+      setPersonalTemplates(data.templates || []);
+      setPersonalMoneyCircles(data.moneyCircles || []);
+      setSettings(resolvedSettings);
+      setUser((prev) => (prev?.isLoggedIn && !data.user ? prev : data.user || null));
+      setHasCompletedOnboarding(onboarded);
+      setLocalOrgWorkspaces(loadedOrgMap);
+      setLocalOrgWorkspacesLoaded(true);
+
+      const savedWsPref = loadActiveWorkspacePref();
+      const resolvedSavedWs = savedWsPref !== 'personal' ? savedWsPref : orgData.activeWorkspace;
+      if (resolvedSavedWs && resolvedSavedWs !== 'personal' && resolvedSavedWs !== activeWorkspaceRef.current) {
+        setActiveWorkspace(resolvedSavedWs);
       }
 
       const legacyList = Object.values(loadedOrgMap).filter(
@@ -2305,10 +2403,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (legacyList.length > 0) {
         setLegacyLocalOrgs(legacyList);
         setIsOrgMigrationModalOpen(true);
-      }
-
-      if (preSnap) {
-        setPreRestoreSnapshotDate(preSnap.updatedAt);
       }
 
       if (
@@ -2339,21 +2433,55 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setIsAppLocked(true);
       }
 
-      processRecurringTransactions(
-        {
-          ...data,
-          wallets: resolvedWallets,
-          categories: resolvedCategories,
-          settings: resolvedSettings,
-        },
-        resolvedWallets
-      );
+      // Release splash screen immediately once local data is hydrated (zero artificial 400ms wait)
+      setIsLoading(false);
 
-      setTimeout(() => {
-        setIsLoading(false);
-      }, 400);
+      // Defer non-critical background housekeeping off the critical first-paint main thread
+      const runDeferredStartupWork = () => {
+        if (cancelled) return;
+        processRecurringTransactions(
+          {
+            ...data,
+            wallets: resolvedWallets,
+            categories: resolvedCategories,
+            settings: resolvedSettings,
+          },
+          resolvedWallets
+        );
+        if (loadPreRestoreSnapshotTimestampSync() === null) {
+          void loadPreRestoreSnapshot().then((preSnap) => {
+            if (!cancelled && preSnap) {
+              setPreRestoreSnapshotDate(preSnap.updatedAt);
+            }
+          });
+        }
+      };
+
+      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+        deferredIdleId = (
+          window as unknown as {
+            requestIdleCallback: (cb: () => void, opts?: { timeout: number }) => number;
+          }
+        ).requestIdleCallback(runDeferredStartupWork, { timeout: 1200 });
+      } else {
+        deferredTimerId = setTimeout(runDeferredStartupWork, 120);
+      }
     }
     void init();
+
+    return () => {
+      cancelled = true;
+      if (deferredTimerId !== null) clearTimeout(deferredTimerId);
+      if (
+        deferredIdleId !== null &&
+        typeof window !== 'undefined' &&
+        'cancelIdleCallback' in window
+      ) {
+        (
+          window as unknown as { cancelIdleCallback: (id: number) => void }
+        ).cancelIdleCallback(deferredIdleId);
+      }
+    };
   }, [processRecurringTransactions]);
 
   // Browser History API (popstate + hashchange) listener with full cleanup
@@ -2551,7 +2679,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setOrgRefs([]);
         setOrgRefsLoaded(false);
         const currentWs = activeWorkspaceRef.current;
-        if (currentWs !== 'personal' && !latestLocalOrgWorkspacesRef.current[currentWs]) {
+        if (
+          hasLoadedLocalOrgWorkspacesRef.current &&
+          currentWs !== 'personal' &&
+          !latestLocalOrgWorkspacesRef.current[currentWs]
+        ) {
           setActiveWorkspace('personal');
           saveActiveWorkspacePref('personal');
         }
@@ -2605,7 +2737,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setCloudSyncError(null);
 
         const active = isEntitlementActive(profile);
-        const cachedEntitlement = await loadVerifiedProCache();
+        const cachedEntitlement = latestVerifiedProRef.current ?? (await loadVerifiedProCache());
         if (reqId !== syncRequestIdRef.current) return;
         const hasValidLocalCode =
           !active &&
@@ -2832,10 +2964,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             setHasCompletedOnboarding(true);
           }
           setCloudConflict(null);
-          savePersonalState(
-            { user: nextUser, hasCompletedOnboarding: shouldMarkOnboarded },
-            { skipDirty: true }
-          );
+          const userChanged =
+            snap.user?.id !== nextUser.id ||
+            snap.user?.email !== nextUser.email ||
+            snap.user?.name !== nextUser.name ||
+            snap.user?.isLoggedIn !== nextUser.isLoggedIn;
+          if (userChanged || Boolean(snap.hasCompletedOnboarding) !== shouldMarkOnboarded) {
+            savePersonalState(
+              { user: nextUser, hasCompletedOnboarding: shouldMarkOnboarded },
+              { skipDirty: true }
+            );
+          }
         }
 
         if (isOnline && reqId === syncRequestIdRef.current) {
@@ -3247,6 +3386,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       user.id,
       (refs) => {
         setOrgRefs(refs);
+        saveCachedOrgRefs(refs);
         setOrgRefsLoaded(true);
       },
       (err) => {
@@ -3258,12 +3398,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [user?.isLoggedIn, user?.id]);
 
   // Validate activeWorkspace against server-managed orgRefs OR local-first orgWorkspaces
+  // Wait for BOTH orgRefsLoaded AND localOrgWorkspacesLoaded so refreshes never prematurely boot to 'personal'
   useEffect(() => {
-    if (!orgRefsLoaded || activeWorkspace === 'personal') return;
+    if (!orgRefsLoaded || !localOrgWorkspacesLoaded || activeWorkspace === 'personal') return;
     const match = orgRefs.find((r) => r.orgId === activeWorkspace);
     if (match?.status === 'suspended') {
       setActiveWorkspace('personal');
       saveActiveWorkspacePref('personal');
+      saveCachedActiveOrgSnapshot(null);
       setOrgActionError(
         settings.language === 'en'
           ? 'Your membership in this organization is suspended.'
@@ -3274,8 +3416,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (!match && !localOrgWorkspaces[activeWorkspace]) {
       setActiveWorkspace('personal');
       saveActiveWorkspacePref('personal');
+      saveCachedActiveOrgSnapshot(null);
     }
-  }, [orgRefsLoaded, orgRefs, localOrgWorkspaces, activeWorkspace, settings.language]);
+  }, [orgRefsLoaded, localOrgWorkspacesLoaded, orgRefs, localOrgWorkspaces, activeWorkspace, settings.language]);
+
+  // Keep lightweight active org snapshot cached for instant Frame-0 render on refresh
+  useEffect(() => {
+    if (!isCloudActiveOrg || activeWorkspace === 'personal') return;
+    if (!activeCloudOrg && activeCloudWallets.length === 0) return;
+    saveCachedActiveOrgSnapshot({
+      orgId: activeWorkspace,
+      organization: activeCloudOrg,
+      wallets: activeCloudWallets,
+      categories: activeCloudCategories,
+      updatedAt: Date.now(),
+    });
+  }, [isCloudActiveOrg, activeWorkspace, activeCloudOrg, activeCloudWallets, activeCloudCategories]);
 
   // Subscribe cleanly ONLY to the active cloud organization
   const activeOrgRefRoleForSub = useMemo<OrganizationRole>(() => {
@@ -3285,6 +3441,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   useEffect(() => {
     if (!user?.isLoggedIn || activeWorkspace === 'personal' || !activeOrgRef || activeOrgRef.status === 'suspended') {
+      const shouldPreserveHydratingCache =
+        activeWorkspace !== 'personal' &&
+        Boolean(user?.isLoggedIn) &&
+        !orgRefsLoaded;
+      if (shouldPreserveHydratingCache) {
+        return;
+      }
       setIsOrgLoading(false);
       setActiveCloudOrg(null);
       setActiveCloudMembers([]);
@@ -3304,7 +3467,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return;
     }
 
-    setIsOrgLoading(true);
+    const hasCachedOrgPreview =
+      Boolean(activeCloudOrg && activeCloudOrg.id === activeWorkspace) ||
+      activeCloudWalletsRef.current.length > 0;
+    if (!hasCachedOrgPreview) {
+      setIsOrgLoading(true);
+    }
     setExtraOrgTransactions([]);
     setExtraOrgTrashTransactions([]);
     setOrgTxLastCursor(null);
@@ -3318,7 +3486,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setIsOrgLoading(false);
         },
         onMembers: (members) => setActiveCloudMembers(members),
-        onWallets: (w) => setActiveCloudWallets(w),
+        onWallets: (w) => {
+          const pending = pendingCloudWalletOrderRef.current;
+          if (pending && pending.orgId === activeWorkspace && Date.now() < pending.expiresAt) {
+            if (areWalletOrderIdsEqual(w, pending.orderIds)) {
+              pendingCloudWalletOrderRef.current = null;
+              setActiveCloudWallets(w);
+            } else {
+              setActiveCloudWallets(applyWalletOrderIds(w, pending.orderIds));
+            }
+            return;
+          }
+          if (pending && (pending.orgId !== activeWorkspace || Date.now() >= pending.expiresAt)) {
+            pendingCloudWalletOrderRef.current = null;
+          }
+          setActiveCloudWallets(w);
+        },
         onCategories: (c) => setActiveCloudCategories(c),
         onBudgets: (b) => setActiveCloudBudgets(b),
         onCostCenters: (cc) => setActiveCloudCostCenters(cc),
@@ -4621,12 +4804,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (workspaceId === 'personal') {
         setActiveWorkspace('personal');
         saveActiveWorkspacePref('personal');
+        saveCachedActiveOrgSnapshot(null);
         return;
       }
       if (
         orgRefs.some((r) => r.orgId === workspaceId) ||
         Boolean(latestLocalOrgWorkspacesRef.current[workspaceId])
       ) {
+        const cached = loadCachedActiveOrgSnapshot(workspaceId);
+        if (cached) {
+          if (cached.organization) setActiveCloudOrg(cached.organization);
+          if (cached.wallets.length > 0) setActiveCloudWallets(sortWalletsByOrder(cached.wallets));
+          if (cached.categories.length > 0) setActiveCloudCategories(cached.categories);
+        }
         setActiveWorkspace(workspaceId);
         saveActiveWorkspacePref(workspaceId);
       }
@@ -7805,10 +7995,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const reorderWallets = useCallback(
     (orderedWallets: Wallet[]) => {
-      const normalized = assignSequentialWalletOrder(orderedWallets).map((w) => ({
-        ...w,
-        updatedAt: Date.now(),
-      }));
+      const orderIds = orderedWallets.map((w) => w.id);
+      if (orderIds.length <= 1) return;
+      const now = Date.now();
 
       if (isOrgWorkspace && activeOrganization) {
         if (!canOrgWrite) return;
@@ -7816,7 +8005,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           const actor = getOrgActor();
           mutateLocalOrgWorkspace(activeOrganization.id, (ws) => ({
             ...ws,
-            wallets: normalized,
+            wallets: applyWalletOrderIds(ws.wallets || [], orderIds, now),
             auditLogs: appendLocalOrgAuditLog(
               ws,
               'update',
@@ -7829,20 +8018,41 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           return;
         }
 
-        const prevOrderById = new Map(activeCloudWallets.map((w) => [w.id, w.order]));
-        setActiveCloudWallets(normalized);
-        normalized.forEach((w) => {
-          if (prevOrderById.get(w.id) !== w.order) {
-            void upsertOrgWalletCloud(activeOrganization.id, w, false, getOrgActor()).catch((err) =>
-              setOrgActionError(err instanceof Error ? err.message : 'Wallet reorder failed')
-            );
-          }
-        });
+        const currentCloudWallets = activeCloudWalletsRef.current;
+        const prevOrderById = new Map(currentCloudWallets.map((w) => [w.id, w.order]));
+        const nextCloudWallets = applyWalletOrderIds(currentCloudWallets, orderIds, now);
+        const committedIds = nextCloudWallets.map((w) => w.id);
+        pendingCloudWalletOrderRef.current = {
+          orgId: activeOrganization.id,
+          orderIds: committedIds,
+          expiresAt: now + 8_000,
+        };
+        activeCloudWalletsRef.current = nextCloudWallets;
+        setActiveCloudWallets((prev) => applyWalletOrderIds(prev, committedIds, now));
+
+        const changedWallets = nextCloudWallets.filter(
+          (w) => prevOrderById.get(w.id) !== w.order
+        );
+        if (changedWallets.length > 0) {
+          void reorderOrgWalletsCloud(
+            activeOrganization.id,
+            changedWallets,
+            getOrgActor()
+          ).catch((err) => {
+            pendingCloudWalletOrderRef.current = null;
+            setOrgActionError(err instanceof Error ? err.message : 'Wallet reorder failed');
+          });
+        }
         return;
       }
 
-      setPersonalWallets(normalized);
-      savePersonalState({ wallets: normalized });
+      const nextPersonalWallets = applyWalletOrderIds(
+        latestPersonalRef.current.wallets,
+        orderIds,
+        now
+      );
+      setPersonalWallets((prev) => applyWalletOrderIds(prev, orderIds, now));
+      savePersonalState({ wallets: nextPersonalWallets }, { immediate: true });
     },
     [
       isOrgWorkspace,
@@ -7851,7 +8061,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       isUsingLocalOrgMode,
       getOrgActor,
       mutateLocalOrgWorkspace,
-      activeCloudWallets,
       savePersonalState,
     ]
   );

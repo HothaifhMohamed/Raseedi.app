@@ -20,6 +20,7 @@ export function useScrollRestoration(
 ) {
   const { restoreOnMount = true, throttleMs = 90 } = options;
   const lastScrollTopRef = useRef<number>(0);
+  const hasInteractedScrollRef = useRef<boolean>(false);
 
   const throttlerRef = useRef<ReturnType<typeof createThrottledScrollSaver> | null>(null);
   if (!throttlerRef.current) {
@@ -37,6 +38,7 @@ export function useScrollRestoration(
           ? containerRef.current.scrollTop
           : lastScrollTopRef.current;
       lastScrollTopRef.current = Math.max(0, Math.round(current));
+      hasInteractedScrollRef.current = true;
       throttlerRef.current?.cancel();
       return saveScrollPositionToStorage(
         getBrowserSessionStorage(),
@@ -60,6 +62,7 @@ export function useScrollRestoration(
 
   const clearSavedScroll = useCallback(() => {
     lastScrollTopRef.current = 0;
+    hasInteractedScrollRef.current = false;
     throttlerRef.current?.cancel();
     clearScrollPositionInStorage(getBrowserSessionStorage(), storageKey);
   }, [storageKey]);
@@ -67,6 +70,7 @@ export function useScrollRestoration(
   const handleScroll = useCallback((e: UIEvent<HTMLElement>) => {
     const top = e.currentTarget.scrollTop;
     lastScrollTopRef.current = top;
+    hasInteractedScrollRef.current = true;
     throttlerRef.current?.save(top);
   }, []);
 
@@ -76,7 +80,7 @@ export function useScrollRestoration(
     restoreScrollNow();
   }, [restoreOnMount, restoreScrollNow]);
 
-  // Follow-up post-mount restoration (requested in useEffect + rAF for async/grid height layout)
+  // Follow-up post-mount restoration (rAF for async/grid height layout)
   useEffect(() => {
     let rafId: number | null = null;
     if (restoreOnMount) {
@@ -97,12 +101,15 @@ export function useScrollRestoration(
         window.cancelAnimationFrame(rafId);
       }
       throttlerRef.current?.cancel();
-      // Persist latest tracked scroll position when leaving/unmounting
-      saveScrollPositionToStorage(
-        getBrowserSessionStorage(),
-        storageKey,
-        lastScrollTopRef.current
-      );
+      // Only persist scroll position on unmount if user actually scrolled or a non-zero offset was restored,
+      // preventing hydration unmounts from clobbering saved scroll positions with 0.
+      if (hasInteractedScrollRef.current || lastScrollTopRef.current > 0) {
+        saveScrollPositionToStorage(
+          getBrowserSessionStorage(),
+          storageKey,
+          lastScrollTopRef.current
+        );
+      }
     };
   }, [restoreOnMount, restoreScrollNow, storageKey]);
 

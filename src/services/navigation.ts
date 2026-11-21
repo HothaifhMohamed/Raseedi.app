@@ -14,6 +14,7 @@ export interface RaseediHistoryState {
 }
 
 export const NAV_STORAGE_KEY = 'raseedi_nav_state_v1';
+export const FULL_LEDGER_STORAGE_KEY = 'raseedi_full_ledger_v1';
 
 export const DEFAULT_ROUTE_STATE: RouteState = {
   activeNav: 'home',
@@ -141,9 +142,13 @@ export function parseStoredRoute(raw: string | null | undefined): RouteState | n
   }
 }
 
-export function resolveInitialRoute(hash: string | null | undefined, storedRaw?: string | null): RouteState {
+export function resolveInitialRoute(
+  hash: string | null | undefined,
+  storedRaw?: string | null,
+  localStoredRaw?: string | null
+): RouteState {
   const fromHash = parseHashRoute(hash);
-  const fromStorage = parseStoredRoute(storedRaw);
+  const fromStorage = parseStoredRoute(storedRaw) ?? parseStoredRoute(localStoredRaw);
 
   if (fromHash) {
     return normalizeRouteState({
@@ -166,20 +171,77 @@ export function buildUrlWithHash(pathname: string, search: string, route: RouteS
   return `${cleanPath}${cleanSearch}${buildHashRoute(route)}`;
 }
 
+/**
+ * Reads persisted route state from sessionStorage first, falling back to localStorage
+ * so full browser refreshes, PWA relaunches, and standalone webviews restore the exact tab.
+ */
 export function safeReadSessionNav(): string | null {
   if (typeof window === 'undefined') return null;
   try {
-    return window.sessionStorage.getItem(NAV_STORAGE_KEY);
+    const fromSession = window.sessionStorage.getItem(NAV_STORAGE_KEY);
+    if (fromSession) return fromSession;
+  } catch {
+    // Ignore sessionStorage access errors
+  }
+  try {
+    return window.localStorage.getItem(NAV_STORAGE_KEY);
   } catch {
     return null;
   }
 }
 
+/**
+ * Persists route state to both sessionStorage and localStorage for instant restoration on reload.
+ */
 export function safeWriteSessionNav(route: RouteState): void {
   if (typeof window === 'undefined') return;
+  const serialized = serializeRouteForStorage(route);
   try {
-    window.sessionStorage.setItem(NAV_STORAGE_KEY, serializeRouteForStorage(route));
+    window.sessionStorage.setItem(NAV_STORAGE_KEY, serialized);
   } catch {
     // Ignore storage quota or private browsing errors
+  }
+  try {
+    window.localStorage.setItem(NAV_STORAGE_KEY, serialized);
+  } catch {
+    // Ignore storage quota or private browsing errors
+  }
+}
+
+export function safeReadFullLedgerPref(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const fromSession = window.sessionStorage.getItem(FULL_LEDGER_STORAGE_KEY);
+    if (fromSession !== null) return fromSession === '1';
+  } catch {
+    // Ignore
+  }
+  try {
+    return window.localStorage.getItem(FULL_LEDGER_STORAGE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function safeWriteFullLedgerPref(isOpen: boolean): void {
+  if (typeof window === 'undefined') return;
+  const val = isOpen ? '1' : '0';
+  try {
+    if (isOpen) {
+      window.sessionStorage.setItem(FULL_LEDGER_STORAGE_KEY, val);
+    } else {
+      window.sessionStorage.removeItem(FULL_LEDGER_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore
+  }
+  try {
+    if (isOpen) {
+      window.localStorage.setItem(FULL_LEDGER_STORAGE_KEY, val);
+    } else {
+      window.localStorage.removeItem(FULL_LEDGER_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore
   }
 }

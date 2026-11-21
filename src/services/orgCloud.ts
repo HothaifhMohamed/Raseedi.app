@@ -52,6 +52,7 @@ import { getEffectiveTransactionAmount } from './calculations';
 import { createStarterCostCentersForIndustry, createStarterOrgCategories } from './db';
 import { normalizeApprovalStatus } from './entitlements';
 import { stripSensitivePinFromWallet } from './security';
+import { sortWalletsByOrder } from './walletOrder';
 import {
   invalidateUserLookupCache,
   userDirectoryLookupCache,
@@ -456,10 +457,11 @@ export function subscribeActiveOrganization(
     onSnapshot(
       collection(db, 'organizations', orgId, 'wallets'),
       (snap) => {
-        const list = snap.docs
-          .map((d) => parseWalletDoc(d.data() as Record<string, unknown>))
-          .filter((w): w is Wallet => w !== null)
-          .sort((a, b) => (a.order || 0) - (b.order || 0));
+        const list = sortWalletsByOrder(
+          snap.docs
+            .map((d) => parseWalletDoc(d.data() as Record<string, unknown>))
+            .filter((w): w is Wallet => w !== null)
+        );
         callbacks.onWallets(list);
       },
       (err) => callbacks.onError?.('wallets', err as Error)
@@ -1379,6 +1381,40 @@ export async function upsertOrgWalletCloud(
   );
   batch.set(doc(db, 'organizations', orgId, 'auditLogs', audit.id), audit.data);
   await batch.commit();
+}
+
+export async function reorderOrgWalletsCloud(
+  orgId: string,
+  wallets: Wallet[],
+  actor: OrgActorInfo
+): Promise<void> {
+  if (wallets.length === 0) return;
+  const CHUNK_SIZE = 450;
+  for (let i = 0; i < wallets.length; i += CHUNK_SIZE) {
+    const chunk = wallets.slice(i, i + CHUNK_SIZE);
+    const batch = writeBatch(db);
+    for (const wallet of chunk) {
+      const cloudDoc = buildOrgWalletPayloadForCloud(orgId, wallet);
+      const ref = doc(db, 'organizations', orgId, 'wallets', wallet.id);
+      batch.update(ref, {
+        balanceMinor: cloudDoc.balanceMinor,
+        payload: cloudDoc.payload,
+        updatedAt: serverTimestamp(),
+      });
+    }
+    if (i === 0) {
+      const audit = makeAuditDocPayload(
+        orgId,
+        'update',
+        'wallet',
+        orgId,
+        actor,
+        'إعادة ترتيب المحافظ والخزائن'
+      );
+      batch.set(doc(db, 'organizations', orgId, 'auditLogs', audit.id), audit.data);
+    }
+    await batch.commit();
+  }
 }
 
 export async function deleteOrgWalletCloud(
