@@ -1567,7 +1567,7 @@ Return JSON matching the schema with:
       }
 
       const validation = validateNewAdminPin(req.body?.newPin);
-      if (!validation.ok) {
+      if (validation.ok === false) {
         res.status(400).json({ error: validation.error, message: validation.message });
         return;
       }
@@ -1684,7 +1684,7 @@ Return JSON matching the schema with:
       }
 
       const validation = validateNewAdminPin(req.body?.newPin);
-      if (!validation.ok) {
+      if (validation.ok === false) {
         res.status(400).json({ error: validation.error, message: validation.message });
         return;
       }

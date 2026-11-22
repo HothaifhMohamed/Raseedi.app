@@ -687,7 +687,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
         },
       });
 
-      if (!result.ok) {
+      if (result.ok === false) {
         resetImportPreviewState();
         setImportProgress(null);
         setMessage({

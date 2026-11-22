@@ -381,7 +381,7 @@ export function parseImportFileBuffer(params: {
 }): ParseImportFileResult {
   const { bytes, fileName, mimeType, sheetName } = params;
   const check = validateImportFile({ fileName, mimeType, bytes });
-  if (!check.ok) {
+  if (check.ok === false) {
     return check;
   }
 
@@ -668,7 +668,7 @@ export async function parseImportFileBufferAsync(params: {
 }): Promise<ParseImportFileResult> {
   const { bytes, fileName, mimeType, sheetName, chunkSize = 200, onProgress, shouldAbort } = params;
   const check = validateImportFile({ fileName, mimeType, bytes });
-  if (!check.ok) {
+  if (check.ok === false) {
     return check;
   }
 

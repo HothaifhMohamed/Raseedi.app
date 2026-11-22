@@ -896,13 +896,14 @@ export function subscribeUserProfile(
   return onSnapshot(
     doc(db, 'users', uid),
     (snap) => {
+      const fromCache = snap.metadata.fromCache;
       if (!snap.exists()) {
-        onProfile(null, snap.metadata.fromCache);
+        onProfile(null, fromCache);
         return;
       }
       onProfile(
         mapCloudUserProfile(snap.id, snap.data() as Record<string, unknown>),
-        snap.metadata.fromCache
+        fromCache
       );
     },
     (error) => {
