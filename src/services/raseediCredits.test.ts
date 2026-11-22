@@ -7,20 +7,24 @@ import {
   CREDITS_24H_MS,
   CREDITS_AD_COOLDOWN_MS,
   CREDITS_AD_COUNTDOWN_MS,
+  CREDITS_AD_MAX_TICK_DELTA_MS,
   CREDITS_AD_REWARD,
   CREDITS_DAILY_AD_LIMIT,
   CREDITS_STREAK_3_REWARD,
   CREDITS_STREAK_7_REWARD,
   CREDITS_WELCOME_BONUS,
+  advanceRewardedAdSession,
   claimRewardedAdReward,
   consumeBonusReceiptScan,
   consumeExportPass,
   createInitialCreditsState,
   evaluateDailyStreak,
   getRewardedAdAvailability,
+  getRewardedAdRemainingMs,
   isAdFreePassActive,
   isProPassActive,
   mergeRaseediCreditsStates,
+  recordRewardedAdOpenAttempt,
   redeemCredits,
   shouldShowRaseediCreditsUi,
   startRewardedAdSession,
@@ -51,20 +55,36 @@ test('Rewarded ad requires 10s countdown, awards +10, enforces 60s cooldown, 5/d
   let now = BASE_DAY_1;
 
   // Start ad #1
-  const s1 = startRewardedAdSession(state, now);
+  const s1 = startRewardedAdSession(state, now, { isOnline: true, openAttempted: true });
   assert.equal(s1.ok, true);
   if (!s1.ok) return;
 
-  // Trying to claim after 5 seconds MUST fail
-  const earlyClaim = claimRewardedAdReward(state, s1.session, now + 5000);
+  // Advance only 5 active seconds -> trying to claim MUST fail
+  let activeS1 = s1.session;
+  for (let sec = 0; sec < 5; sec++) {
+    activeS1 = advanceRewardedAdSession(activeS1, {
+      deltaMs: 1000,
+      isVisibleAndFocused: true,
+      isOnline: true,
+    });
+  }
+  const earlyClaim = claimRewardedAdReward(state, activeS1, now + 5000, { isOnline: true });
   assert.equal(earlyClaim.ok, false);
   if (!earlyClaim.ok) {
     assert.equal(earlyClaim.reason, 'countdown_incomplete');
+    assert.equal(earlyClaim.remainingCountdownMs, 5000);
   }
 
-  // Claiming after full 10 seconds succeeds (+10 -> 25)
+  // Advance remaining 5 active seconds -> claiming succeeds (+10 -> 25)
+  for (let sec = 0; sec < 5; sec++) {
+    activeS1 = advanceRewardedAdSession(activeS1, {
+      deltaMs: 1000,
+      isVisibleAndFocused: true,
+      isOnline: true,
+    });
+  }
   now += CREDITS_AD_COUNTDOWN_MS;
-  const claim1 = claimRewardedAdReward(state, s1.session, now);
+  const claim1 = claimRewardedAdReward(state, activeS1, now, { isOnline: true });
   assert.equal(claim1.ok, true);
   if (!claim1.ok) return;
   state = claim1.state;
@@ -74,11 +94,16 @@ test('Rewarded ad requires 10s countdown, awards +10, enforces 60s cooldown, 5/d
   assert.equal(state.ledger[0].type, 'ad_reward');
 
   // Re-claiming same session (rapid double-click) MUST fail once marked claimed
-  const dupClaim = claimRewardedAdReward(state, { ...s1.session, claimed: true }, now + 100);
+  const dupClaim = claimRewardedAdReward(
+    state,
+    { ...activeS1, claimed: true },
+    now + 100,
+    { isOnline: true }
+  );
   assert.equal(dupClaim.ok, false);
 
   // Cooldown (60s) blocks immediate second watch
-  const duringCooldown = startRewardedAdSession(state, now + 30_000);
+  const duringCooldown = startRewardedAdSession(state, now + 30_000, { isOnline: true });
   assert.equal(duringCooldown.ok, false);
   if (!duringCooldown.ok) {
     assert.equal(duringCooldown.reason, 'cooldown');
@@ -86,7 +111,7 @@ test('Rewarded ad requires 10s countdown, awards +10, enforces 60s cooldown, 5/d
   }
 
   // Backward clock tampering MUST NOT bypass cooldown!
-  const clockRolledBack = startRewardedAdSession(state, now - 120_000);
+  const clockRolledBack = startRewardedAdSession(state, now - 120_000, { isOnline: true });
   assert.equal(clockRolledBack.ok, false);
   if (!clockRolledBack.ok) {
     assert.equal(clockRolledBack.reason, 'cooldown');
@@ -95,11 +120,19 @@ test('Rewarded ad requires 10s countdown, awards +10, enforces 60s cooldown, 5/d
   // Complete remaining 4 ads today (total 5)
   for (let i = 2; i <= CREDITS_DAILY_AD_LIMIT; i++) {
     now += CREDITS_AD_COOLDOWN_MS + 1000;
-    const started = startRewardedAdSession(state, now);
+    const started = startRewardedAdSession(state, now, { isOnline: true, openAttempted: true });
     assert.equal(started.ok, true, `Ad #${i} should be allowed after cooldown`);
     if (!started.ok) return;
+    let sess = started.session;
+    for (let sec = 0; sec < 10; sec++) {
+      sess = advanceRewardedAdSession(sess, {
+        deltaMs: 1000,
+        isVisibleAndFocused: true,
+        isOnline: true,
+      });
+    }
     now += CREDITS_AD_COUNTDOWN_MS;
-    const claimed = claimRewardedAdReward(state, started.session, now);
+    const claimed = claimRewardedAdReward(state, sess, now, { isOnline: true });
     assert.equal(claimed.ok, true);
     if (!claimed.ok) return;
     state = claimed.state;
@@ -110,7 +143,7 @@ test('Rewarded ad requires 10s countdown, awards +10, enforces 60s cooldown, 5/d
 
   // 6th ad on the same local day MUST be blocked even after cooldown
   now += CREDITS_AD_COOLDOWN_MS * 2;
-  const blocked6 = startRewardedAdSession(state, now);
+  const blocked6 = startRewardedAdSession(state, now, { isOnline: true });
   assert.equal(blocked6.ok, false);
   if (!blocked6.ok) {
     assert.equal(blocked6.reason, 'daily_limit');
@@ -128,6 +161,107 @@ test('Rewarded ad requires 10s countdown, awards +10, enforces 60s cooldown, 5/d
   assert.equal(tomorrowAvail.canWatch, true);
   assert.equal(tomorrowAvail.watchedToday, 0);
   assert.equal(tomorrowAvail.remainingToday, 5);
+});
+
+test('Rewarded ad countdown pauses on background/blur, clamps large tick bursts, blocks when offline, and requires verified Smartlink open attempt', () => {
+  const state = createInitialCreditsState(BASE_DAY_1);
+
+  // 1. Offline start is strictly blocked
+  const offlineStart = startRewardedAdSession(state, BASE_DAY_1, { isOnline: false });
+  assert.equal(offlineStart.ok, false);
+  if (!offlineStart.ok) {
+    assert.equal(offlineStart.reason, 'offline');
+  }
+
+  // 2. Starting with unverified open attempt prevents progress & claiming until openAttempted=true
+  const unverifiedStart = startRewardedAdSession(state, BASE_DAY_1, {
+    isOnline: true,
+    openAttempted: false,
+  });
+  assert.equal(unverifiedStart.ok, true);
+  if (!unverifiedStart.ok) return;
+
+  let sess = unverifiedStart.session;
+  assert.equal(sess.pauseReason, 'open_blocked');
+  sess = advanceRewardedAdSession(sess, {
+    deltaMs: 1000,
+    isVisibleAndFocused: true,
+    isOnline: true,
+  });
+  assert.equal(sess.activeElapsedMs, 0);
+
+  const blockedClaim = claimRewardedAdReward(state, sess, BASE_DAY_1 + 15_000, { isOnline: true });
+  assert.equal(blockedClaim.ok, false);
+  if (!blockedClaim.ok) {
+    assert.equal(blockedClaim.reason, 'open_not_verified');
+  }
+
+  // Reopening link while online verifies open attempt
+  sess = recordRewardedAdOpenAttempt(sess, { succeeded: true, isOnline: true });
+  assert.equal(sess.openAttempted, true);
+  assert.equal(sess.pauseReason, 'none');
+
+  // 3. Background / blur pauses countdown and adds 0ms
+  sess = advanceRewardedAdSession(sess, {
+    deltaMs: 1000,
+    isVisibleAndFocused: true,
+    isOnline: true,
+  });
+  assert.equal(sess.activeElapsedMs, 1000);
+
+  sess = advanceRewardedAdSession(sess, {
+    deltaMs: 5000,
+    isVisibleAndFocused: false,
+    isOnline: true,
+  });
+  assert.equal(sess.pauseReason, 'background');
+  assert.equal(sess.activeElapsedMs, 1000);
+
+  // 4. Returning with a huge throttled deltaMs (e.g. 30s) is clamped to CREDITS_AD_MAX_TICK_DELTA_MS (1000ms)
+  sess = advanceRewardedAdSession(sess, {
+    deltaMs: 30_000,
+    isVisibleAndFocused: true,
+    isOnline: true,
+  });
+  assert.equal(sess.pauseReason, 'none');
+  assert.equal(sess.activeElapsedMs, 1000 + CREDITS_AD_MAX_TICK_DELTA_MS);
+
+  // 5. Going offline during countdown pauses and adds 0ms
+  sess = advanceRewardedAdSession(sess, {
+    deltaMs: 1000,
+    isVisibleAndFocused: true,
+    isOnline: false,
+  });
+  assert.equal(sess.pauseReason, 'offline');
+  assert.equal(sess.activeElapsedMs, 2000);
+
+  // Finish remaining 8 active seconds while online & focused
+  for (let i = 0; i < 8; i++) {
+    sess = advanceRewardedAdSession(sess, {
+      deltaMs: 1000,
+      isVisibleAndFocused: true,
+      isOnline: true,
+    });
+  }
+  assert.equal(getRewardedAdRemainingMs(sess), 0);
+
+  // 6. Trying to claim while offline is strictly rejected even after 10s elapsed!
+  const offlineClaim = claimRewardedAdReward(state, sess, BASE_DAY_1 + 20_000, {
+    isOnline: false,
+  });
+  assert.equal(offlineClaim.ok, false);
+  if (!offlineClaim.ok) {
+    assert.equal(offlineClaim.reason, 'offline');
+  }
+
+  // 7. Claiming online with verified open attempt + 10s active countdown succeeds
+  const onlineClaim = claimRewardedAdReward(state, sess, BASE_DAY_1 + 21_000, {
+    isOnline: true,
+  });
+  assert.equal(onlineClaim.ok, true);
+  if (onlineClaim.ok) {
+    assert.equal(onlineClaim.state.balance, 25);
+  }
 });
 
 test('Daily consecutive login streak awards +5 on Day 3 and +15 on Day 7 without double-claiming, and resets on missed day', () => {

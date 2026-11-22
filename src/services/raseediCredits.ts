@@ -9,6 +9,7 @@ export const CREDITS_WELCOME_BONUS = 15;
 export const CREDITS_AD_REWARD = 10;
 export const CREDITS_AD_COUNTDOWN_SECONDS = 10;
 export const CREDITS_AD_COUNTDOWN_MS = CREDITS_AD_COUNTDOWN_SECONDS * 1000;
+export const CREDITS_AD_MAX_TICK_DELTA_MS = 1000;
 export const CREDITS_DAILY_AD_LIMIT = 5;
 export const CREDITS_AD_COOLDOWN_MS = 60 * 1000;
 export const CREDITS_STREAK_3_DAYS = 3;
@@ -524,19 +525,46 @@ export function getRewardedAdAvailability(
   };
 }
 
+export type RewardedAdPauseReason = 'none' | 'background' | 'offline' | 'open_blocked';
+
 export interface RewardedAdSession {
   sessionId: string;
   startedAtMs: number;
   readyAtMs: number;
+  activeElapsedMs: number;
+  openAttempted: boolean;
+  openAttempts: number;
+  pauseReason: RewardedAdPauseReason;
   claimed: boolean;
+}
+
+export interface StartRewardedAdOptions {
+  isOnline?: boolean;
+  openAttempted?: boolean;
 }
 
 export function startRewardedAdSession(
   state: RaseediCreditsState,
-  nowMs: number = Date.now()
-): { ok: true; session: RewardedAdSession } | { ok: false; reason: 'daily_limit' | 'cooldown'; availability: RewardedAdAvailability } {
+  nowMs: number = Date.now(),
+  options?: StartRewardedAdOptions
+):
+  | { ok: true; session: RewardedAdSession }
+  | {
+      ok: false;
+      reason: 'daily_limit' | 'cooldown' | 'offline';
+      availability: RewardedAdAvailability;
+    } {
   const effectiveNowMs = resolveSafeNowMs(state, nowMs);
   const availability = getRewardedAdAvailability(state, effectiveNowMs);
+
+  if (options?.isOnline === false) {
+    return {
+      ok: false,
+      reason: 'offline',
+      availability,
+    };
+  }
+
   if (!availability.canWatch) {
     return {
       ok: false,
@@ -544,36 +572,152 @@ export function startRewardedAdSession(
       availability,
     };
   }
+
+  const openAttempted = options?.openAttempted !== false;
   return {
     ok: true,
     session: {
       sessionId: `ad_${effectiveNowMs}_${Math.random().toString(36).slice(2, 9)}`,
       startedAtMs: effectiveNowMs,
       readyAtMs: effectiveNowMs + CREDITS_AD_COUNTDOWN_MS,
+      activeElapsedMs: 0,
+      openAttempted,
+      openAttempts: openAttempted ? 1 : 0,
+      pauseReason: openAttempted ? 'none' : 'open_blocked',
       claimed: false,
     },
   };
+}
+
+export function recordRewardedAdOpenAttempt(
+  session: RewardedAdSession,
+  options: { succeeded: boolean; isOnline?: boolean }
+): RewardedAdSession {
+  if (session.claimed) return session;
+  if (options.isOnline === false) {
+    return {
+      ...session,
+      pauseReason: 'offline',
+    };
+  }
+  const nextAttempts = session.openAttempts + 1;
+  if (options.succeeded) {
+    return {
+      ...session,
+      openAttempted: true,
+      openAttempts: nextAttempts,
+      pauseReason: session.pauseReason === 'open_blocked' ? 'none' : session.pauseReason,
+    };
+  }
+  return {
+    ...session,
+    openAttempts: nextAttempts,
+    pauseReason: 'open_blocked',
+  };
+}
+
+export interface AdvanceRewardedAdTick {
+  deltaMs: number;
+  isVisibleAndFocused: boolean;
+  isOnline: boolean;
+}
+
+/**
+ * Advances active foreground countdown time ONLY when:
+ * 1) internet connection is online,
+ * 2) Smartlink open attempt has been verified,
+ * 3) app tab is visible AND focused.
+ * Caps each tick to CREDITS_AD_MAX_TICK_DELTA_MS (1000ms) so background
+ * timer throttling bursts cannot skip the 10-second verification window.
+ */
+export function advanceRewardedAdSession(
+  session: RewardedAdSession,
+  tick: AdvanceRewardedAdTick
+): RewardedAdSession {
+  if (session.claimed) return session;
+
+  if (!tick.isOnline) {
+    return session.pauseReason === 'offline'
+      ? session
+      : { ...session, pauseReason: 'offline' };
+  }
+
+  if (!session.openAttempted) {
+    return session.pauseReason === 'open_blocked'
+      ? session
+      : { ...session, pauseReason: 'open_blocked' };
+  }
+
+  if (!tick.isVisibleAndFocused) {
+    return session.pauseReason === 'background'
+      ? session
+      : { ...session, pauseReason: 'background' };
+  }
+
+  const rawDelta = Number.isFinite(tick.deltaMs) ? Math.floor(tick.deltaMs) : 0;
+  const safeDelta = Math.max(0, Math.min(CREDITS_AD_MAX_TICK_DELTA_MS, rawDelta));
+  const nextElapsed = Math.min(
+    CREDITS_AD_COUNTDOWN_MS,
+    Math.max(0, session.activeElapsedMs) + safeDelta
+  );
+
+  if (nextElapsed === session.activeElapsedMs && session.pauseReason === 'none') {
+    return session;
+  }
+
+  return {
+    ...session,
+    activeElapsedMs: nextElapsed,
+    pauseReason: 'none',
+  };
+}
+
+export function getRewardedAdRemainingMs(session: RewardedAdSession | null): number {
+  if (!session) return 0;
+  const elapsed = Number.isFinite(session.activeElapsedMs)
+    ? Math.max(0, session.activeElapsedMs)
+    : 0;
+  return Math.max(0, CREDITS_AD_COUNTDOWN_MS - elapsed);
 }
 
 export type ClaimRewardedAdResult =
   | { ok: true; state: RaseediCreditsState; awarded: number }
   | {
       ok: false;
-      reason: 'already_claimed' | 'countdown_incomplete' | 'daily_limit' | 'cooldown';
+      reason:
+        | 'already_claimed'
+        | 'offline'
+        | 'open_not_verified'
+        | 'countdown_incomplete'
+        | 'daily_limit'
+        | 'cooldown';
       remainingCountdownMs?: number;
     };
+
+export interface ClaimRewardedAdOptions {
+  isOnline?: boolean;
+}
 
 export function claimRewardedAdReward(
   state: RaseediCreditsState,
   session: RewardedAdSession | null,
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  options?: ClaimRewardedAdOptions
 ): ClaimRewardedAdResult {
   if (!session || session.claimed) {
     return { ok: false, reason: 'already_claimed' };
   }
 
+  if (options?.isOnline === false) {
+    return { ok: false, reason: 'offline' };
+  }
+
+  if (!session.openAttempted) {
+    return { ok: false, reason: 'open_not_verified' };
+  }
+
   const effectiveNowMs = resolveSafeNowMs(state, nowMs);
-  const remainingCountdownMs = Math.max(0, session.readyAtMs - effectiveNowMs);
+  const remainingCountdownMs = getRewardedAdRemainingMs(session);
   if (remainingCountdownMs > 0) {
     return {
       ok: false,

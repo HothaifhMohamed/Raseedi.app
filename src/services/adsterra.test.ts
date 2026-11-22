@@ -15,6 +15,13 @@ import {
 } from './adsterra';
 import { shouldShowAds, computeUserSubscriptionSummary } from './subscriptionHelpers';
 import { buildCspDirectives } from './serverSecurity';
+import {
+  getAdConsentChoice,
+  hasAdConsent,
+  hasAdSenseConsent,
+  resetAdConsentChoice,
+  saveAdConsentChoice,
+} from './adConsent';
 
 interface MockElement {
   tagName: string;
@@ -274,3 +281,45 @@ test('CSP directives in serverSecurity.ts and vercel.json allow Adsterra https:/
   assert.ok(cspHeader.value.includes('frame-src') && cspHeader.value.includes('https://bauval.org'));
   assert.equal(cspHeader.value.includes(' ws:'), false);
 });
+
+test('Ad consent defaults to enabled (granted) without a blocking popup while honoring explicit opt-out and one-tap re-enable', () => {
+  const store = new Map<string, string>();
+  const mockStorage = {
+    getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+    setItem: (key: string, value: string) => {
+      store.set(key, value);
+    },
+    removeItem: (key: string) => {
+      store.delete(key);
+    },
+  };
+
+  // Fresh install / empty storage -> default granted
+  assert.equal(getAdConsentChoice(mockStorage), 'granted');
+  assert.equal(hasAdConsent(mockStorage), true);
+  assert.equal(hasAdSenseConsent(mockStorage), true);
+
+  // Explicit opt-out from Settings -> denied & invokes teardown callback
+  let tornDown = false;
+  saveAdConsentChoice('denied', {
+    storage: mockStorage,
+    dispatchEvent: false,
+    onDenied: () => {
+      tornDown = true;
+    },
+  });
+  assert.equal(tornDown, true);
+  assert.equal(getAdConsentChoice(mockStorage), 'denied');
+  assert.equal(hasAdConsent(mockStorage), false);
+
+  // One-tap re-enable restores granted
+  saveAdConsentChoice('granted', { storage: mockStorage, dispatchEvent: false });
+  assert.equal(getAdConsentChoice(mockStorage), 'granted');
+  assert.equal(hasAdConsent(mockStorage), true);
+
+  // Reset removes key and keeps default-enabled behavior
+  saveAdConsentChoice('denied', { storage: mockStorage, dispatchEvent: false });
+  resetAdConsentChoice({ storage: mockStorage, dispatchEvent: false });
+  assert.equal(getAdConsentChoice(mockStorage), 'granted');
+});
+

@@ -9,11 +9,19 @@ import {
   Share2,
   ExternalLink,
   Headphones,
+  Crown,
   X,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useOrg } from '../../context/OrgContext';
+import { shouldShowRaseediCreditsUi } from '../../services/raseediCredits';
 import { SUPPORT_CONFIG } from '../../constants/support';
-import { resetAdConsentChoice } from '../common/AdConsentBanner';
+import {
+  getAdConsentChoice,
+  saveAdConsentChoice,
+  subscribeAdConsentChanges,
+  type AdConsentChoice,
+} from '../common/AdConsentBanner';
 import { BrandLogo } from '../common/BrandLogo';
 
 export interface SupportAndLegalModalProps {
@@ -27,14 +35,31 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
   onClose,
   initialTab = 'support',
 }) => {
-  const { isRTL, isPro } = useApp();
+  const { isRTL, isPro, subscriptionSummary, setIsUpgradeModalOpen } = useApp();
+  const { activeOrgSubscriptionState } = useOrg();
   const [activeTab, setActiveTab] = useState<'support' | 'legal'>(initialTab);
+  const [adConsentChoice, setAdConsentChoice] = useState<AdConsentChoice>(() =>
+    getAdConsentChoice()
+  );
+
+  const isFreeTierUser =
+    !isPro &&
+    shouldShowRaseediCreditsUi(subscriptionSummary, {
+      activeOrgSubscriptionState,
+    });
 
   useEffect(() => {
     if (isOpen) {
       setActiveTab(initialTab);
+      setAdConsentChoice(getAdConsentChoice());
     }
   }, [isOpen, initialTab]);
+
+  useEffect(() => {
+    return subscribeAdConsentChanges(() => {
+      setAdConsentChoice(getAdConsentChoice());
+    });
+  }, []);
 
   if (!isOpen) return null;
 
@@ -307,39 +332,75 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
                 {isRTL ? (
                   <div className="space-y-1.5 text-[var(--color-muted)]">
                     <p>
-                      تعرض النسخة المجانية من التطبيق إعلانات مدمجة محدودة وهادئة لدعم استمرارية الخدمة مجاناً.
+                      تعتمد النسخة المجانية من «رصيدي» افتراضياً على إعلانات خفيفة وغير مزعجة (مثل{' '}
+                      <bdi dir="ltr">Adsterra</bdi>) لدعم استمرارية التطبيق مجاناً للجميع.
                     </p>
                     <p>
-                      نستخدم ملفات تعريف الارتباط (<bdi dir="ltr">Cookies</bdi>) لعرض إعلانات مدمجة محدودة عبر شركاء الإعلان (مثل <bdi dir="ltr">Adsterra</bdi>) فقط بعد موافقتك عبر شريط الخصوصية، دون مشاركة أي بيانات مالية من دفاترك مع المعلنين.
+                      لا نشارك أبداً بياناتك المالية أو محافظك أو معاملاتك مع أي معلن. وتبقى
+                      التفضيلات الخاصة بإعلانات النسخة المجانية متاحة للتحكم في أي وقت من الإعدادات أو من الأسفل.
                     </p>
                     <p>
-                      عند الاشتراك في باقة <bdi dir="ltr">PRO</bdi> أو <bdi dir="ltr">Business</bdi>، تُزال جميع الإعلانات وسكربتات الإعلان نهائياً. {isPro ? '(حالتك الحالية: اشتراك نشط — الإعلانات معطلة بالكامل).' : ''}
+                      عند الاشتراك في باقة <bdi dir="ltr">PRO</bdi> أو <bdi dir="ltr">Business</bdi>،
+                      تُزال جميع الإعلانات وسكربتات الإعلان نهائياً بنسبة 100%.{' '}
+                      {!isFreeTierUser
+                        ? '(حالتك الحالية: اشتراك نشط — الإعلانات معطلة بالكامل).'
+                        : ''}
                     </p>
                   </div>
                 ) : (
                   <div className="space-y-1.5 text-[var(--color-muted)]">
                     <p>
-                      The free tier of Raseedi displays limited, unobtrusive native advertisements (such as <strong>Adsterra</strong>) only after your privacy consent to help keep core features free.
+                      The free tier of Raseedi displays lightweight, unobtrusive advertisements by
+                      default (such as <strong>Adsterra</strong>) to keep core features free for
+                      everyone.
                     </p>
                     <p>
-                      Your personal or organization financial ledger data is never shared with advertisers. You can update or withdraw your consent at any time below.
+                      Your personal or organization financial ledger data is never shared with
+                      advertisers. You can adjust free-tier ad preferences anytime in Settings or
+                      below.
                     </p>
                     <p>
-                      Upgrading to <strong>Raseedi PRO</strong> or <strong>Business</strong> permanently removes all ads and ad scripts. {isPro ? '(Current status: active subscription — ads disabled.)' : ''}
+                      Upgrading to <strong>Raseedi PRO</strong> or <strong>Business</strong>{' '}
+                      permanently removes all ads and ad scripts.{' '}
+                      {!isFreeTierUser
+                        ? '(Current status: active subscription — ads completely disabled.)'
+                        : ''}
                     </p>
                   </div>
                 )}
-                {!isPro && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      resetAdConsentChoice();
-                      onClose();
-                    }}
-                    className="mt-1 inline-flex items-center px-3 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-[11px] font-semibold text-[var(--color-accent)] hover:border-[var(--color-accent)] min-h-[34px]"
-                  >
-                    {isRTL ? 'تغيير تفضيلات ملفات تعريف الارتباط' : 'Change Cookie Preferences'}
-                  </button>
+                {isFreeTierUser && (
+                  <div className="pt-1 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        setIsUpgradeModalOpen(true);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] text-[11px] font-bold hover:opacity-95 min-h-[34px]"
+                    >
+                      <Crown className="w-3.5 h-3.5 text-[var(--color-gold)] shrink-0" />
+                      <span>
+                        {isRTL ? 'ترقية إلى PRO (بدون إعلانات)' : 'Upgrade to PRO (Ad-Free)'}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        saveAdConsentChoice(
+                          adConsentChoice === 'granted' ? 'denied' : 'granted'
+                        )
+                      }
+                      className="inline-flex items-center px-3 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-[11px] font-semibold text-[var(--color-ink)] hover:border-[var(--color-accent)] min-h-[34px]"
+                    >
+                      {adConsentChoice === 'granted'
+                        ? isRTL
+                          ? 'إيقاف إعلانات النسخة المجانية'
+                          : 'Disable Free-Tier Ads'
+                        : isRTL
+                        ? 'إعادة تفعيل الإعلانات ونقاط رصيدي'
+                        : 'Re-enable Ads & Raseedi Credits'}
+                    </button>
+                  </div>
                 )}
               </section>
 

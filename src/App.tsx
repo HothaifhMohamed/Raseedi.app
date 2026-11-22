@@ -35,7 +35,6 @@ import {
   ModalOverlaySkeleton,
 } from './components/common/SkeletonLoaders';
 import {
-  AdConsentBanner,
   hasAdSenseConsent,
   subscribeAdConsentChanges,
 } from './components/common/AdConsentBanner';
@@ -433,9 +432,6 @@ const MainLayout: React.FC = () => {
             </button>
           </div>
         )}
-
-        {/* EEA/UK Cookie Consent Banner before loading AdSense */}
-        <AdConsentBanner />
 
         {/* Global Upgrade to PRO Modal */}
         {isUpgradeModalOpen && (

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   X,
   Camera,
@@ -150,7 +150,31 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
   const [showKeypad, setShowKeypad] = useState(false);
   const [showMoreDetails, setShowMoreDetails] = useState(false);
   const [currencyModalOpen, setCurrencyModalOpen] = useState(false);
-  const [errorMsg, setErrorMsg] = useState('');
+  const [errorMsg, setRawErrorMsg] = useState('');
+  const [errorSeq, setErrorSeq] = useState(0);
+  const formContainerRef = useRef<HTMLFormElement | null>(null);
+  const topErrorRef = useRef<HTMLDivElement | null>(null);
+
+  const setErrorMsg = useCallback((msg: string) => {
+    setRawErrorMsg(msg);
+    if (msg) {
+      setErrorSeq((n) => n + 1);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!errorMsg || !isOpen) return;
+    const rafId = window.requestAnimationFrame(() => {
+      if (topErrorRef.current && typeof topErrorRef.current.scrollIntoView === 'function') {
+        topErrorRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      if (formContainerRef.current && typeof formContainerRef.current.scrollTo === 'function') {
+        formContainerRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [errorMsg, errorSeq, isOpen]);
+
   const [scanSuccessMsg, setScanSuccessMsg] = useState('');
   const [isScanningReceipt, setIsScanningReceipt] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
@@ -1047,7 +1071,12 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
         </div>
 
         {/* Form Body */}
-        <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-4 space-y-4">
+        <form
+          ref={formContainerRef}
+          onSubmit={handleSubmit}
+          data-testid="tx-modal-form"
+          className="flex-1 overflow-y-auto p-4 space-y-4"
+        >
           {isOrgWorkspace && isOrgReadOnly && (
             <div className="p-2.5 rounded-lg bg-amber-500/12 border border-amber-500/35 text-amber-800 dark:text-amber-300 text-xs flex items-center justify-between gap-2">
               <span className="font-semibold">{t('orgReadOnlyBanner')}</span>
@@ -1065,7 +1094,12 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
           )}
 
           {errorMsg && (
-            <div className="p-2.5 rounded-lg bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/30 text-[var(--color-expense)] text-xs flex items-center gap-2">
+            <div
+              ref={topErrorRef}
+              role="alert"
+              data-testid="tx-top-error-alert"
+              className="p-2.5 rounded-lg bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/35 text-[var(--color-expense)] text-xs font-semibold flex items-center gap-2"
+            >
               <AlertCircle className="w-4 h-4 shrink-0" />
               <span>{errorMsg}</span>
             </div>
@@ -2273,9 +2307,20 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
           </div>
 
           {/* Bottom Action Button */}
-          <div className="pt-2">
+          <div className="pt-2 space-y-2">
+            {errorMsg && (
+              <div
+                role="alert"
+                data-testid="tx-submit-error-alert"
+                className="p-2.5 rounded-xl bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/35 text-[var(--color-expense)] text-xs font-semibold flex items-center gap-2"
+              >
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{errorMsg}</span>
+              </div>
+            )}
             <button
               type="submit"
+              data-testid="tx-submit-btn"
               disabled={isLockedDate || (isOrgWorkspace && (isOrgReadOnly || !canOrgWrite))}
               className="w-full py-3 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] font-medium text-sm hover:opacity-95 transition-opacity shadow-sm min-h-[44px] disabled:opacity-50"
             >

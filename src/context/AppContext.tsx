@@ -571,7 +571,10 @@ interface AppContextType {
   creditsToast: { id: number; text: string } | null;
   dismissCreditsToast: () => void;
   showCreditsToast: (text: string) => void;
-  claimRewardedAdCredits: (session: RewardedAdSession | null) => ClaimRewardedAdResult;
+  claimRewardedAdCredits: (
+    session: RewardedAdSession | null,
+    options?: { isOnline?: boolean }
+  ) => ClaimRewardedAdResult;
   redeemCreditOption: (redemptionId: CreditRewardRedemptionId) => RedeemCreditResult;
   consumeCreditExportPass: () => boolean;
   consumeCreditBonusReceiptScan: () => boolean;
@@ -1325,10 +1328,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [hasActiveProPass, hasActiveAdFreePass]);
 
   const claimRewardedAdCredits = useCallback(
-    (session: RewardedAdSession | null): ClaimRewardedAdResult => {
+    (
+      session: RewardedAdSession | null,
+      options?: { isOnline?: boolean }
+    ): ClaimRewardedAdResult => {
       const now = Date.now();
       setCreditsNowMs(now);
-      const result = claimRewardedAdReward(creditsState, session, now);
+      const effectiveOnline =
+        options?.isOnline ?? (typeof navigator !== 'undefined' ? navigator.onLine : true);
+      const result = claimRewardedAdReward(creditsState, session, now, {
+        isOnline: effectiveOnline,
+      });
       if (result.ok) {
         setCreditsState(result.state);
         persistCreditsState(result.state, true);

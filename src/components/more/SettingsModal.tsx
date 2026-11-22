@@ -24,8 +24,18 @@ import {
   Copy,
   Check,
   Loader2,
+  Crown,
+  Megaphone,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useOrg } from '../../context/OrgContext';
+import { shouldShowRaseediCreditsUi } from '../../services/raseediCredits';
+import {
+  getAdConsentChoice,
+  saveAdConsentChoice,
+  subscribeAdConsentChanges,
+  type AdConsentChoice,
+} from '../common/AdConsentBanner';
 import {
   formatUsernameHandle,
   normalizeUsername,
@@ -62,6 +72,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     wallets,
     user,
     isPro,
+    subscriptionSummary,
+    setIsUpgradeModalOpen,
     isAdminUser,
     openAdminPanel,
     updateSettings,
@@ -86,6 +98,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     t,
     isRTL,
   } = useApp();
+  const { activeOrgSubscriptionState } = useOrg();
+
+  const showFreeAdsDisclosure =
+    !isPro &&
+    shouldShowRaseediCreditsUi(subscriptionSummary, {
+      activeOrgSubscriptionState,
+    });
 
   const canAccessAdminPanel = canUserAccessAdminPanelUi({
     isAdminUser,
@@ -107,6 +126,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     typeof navigator === 'undefined' ? true : navigator.onLine
   );
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+  const [adConsentChoice, setAdConsentChoice] = useState<AdConsentChoice>(() =>
+    getAdConsentChoice()
+  );
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -114,9 +136,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     const handleOffline = () => setIsOnline(false);
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+    const unsubscribeAds = subscribeAdConsentChanges(() => {
+      setAdConsentChoice(getAdConsentChoice());
+    });
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      unsubscribeAds();
     };
   }, []);
 
@@ -1200,6 +1226,74 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   {isRTL
                     ? 'فتح لوحة إدارة الاشتراكات'
                     : 'Open Admin Subscriptions Panel'}
+                </span>
+              </button>
+            </div>
+          )}
+
+          {showFreeAdsDisclosure && (
+            <div
+              data-testid="settings-free-ads-section"
+              className="p-4 bg-[var(--color-bg)] border border-[var(--color-gold)]/35 rounded-xl space-y-3"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <h4 className="text-xs font-bold text-[var(--color-ink)] flex items-center gap-1.5">
+                  <Megaphone className="w-3.5 h-3.5 text-[var(--color-gold-text)] shrink-0" />
+                  <span>
+                    {isRTL
+                      ? 'الإعلانات ودعم النسخة المجانية'
+                      : 'Free-Tier Ads & Privacy'}
+                  </span>
+                </h4>
+                <span className="text-[10px] px-2 py-0.5 rounded font-semibold bg-[var(--color-gold-soft)] text-[var(--color-gold-text)]">
+                  {isRTL ? 'النسخة المجانية' : 'Free Tier'}
+                </span>
+              </div>
+
+              <p className="text-[11px] text-[var(--color-muted)] leading-relaxed">
+                {isRTL ? (
+                  <>
+                    تعتمد النسخة المجانية من «رصيدي» على إعلانات خفيفة وغير مزعجة (مثل{' '}
+                    <bdi dir="ltr">Adsterra</bdi>) للحفاظ على التطبيق مجانياً للجميع، دون مشاركة أي
+                    بيانات مالية من دفاترك أبداً. يمكنك الترقية إلى باقة{' '}
+                    <bdi dir="ltr">PRO</bdi> لتجربة خالية من الإعلانات بنسبة 100%.
+                  </>
+                ) : (
+                  'The free tier of Raseedi relies on lightweight ads (such as Adsterra) to keep the app free for everyone. Your financial ledger data is never shared with advertisers. Upgrade to PRO for a 100% ad-free experience.'
+                )}
+              </p>
+
+              <label className="flex items-center justify-between gap-3 pt-2 border-t border-[var(--color-line)] cursor-pointer">
+                <span className="text-xs text-[var(--color-ink)]">
+                  {isRTL
+                    ? 'عرض الإعلانات الخفيفة ونقاط رصيدي'
+                    : 'Enable lightweight ads & Raseedi Credits'}
+                </span>
+                <input
+                  type="checkbox"
+                  data-testid="settings-ad-consent-toggle"
+                  checked={adConsentChoice === 'granted'}
+                  onChange={(e) =>
+                    saveAdConsentChoice(e.target.checked ? 'granted' : 'denied')
+                  }
+                  className="w-4 h-4 accent-[var(--color-accent)] rounded cursor-pointer shrink-0"
+                />
+              </label>
+
+              <button
+                type="button"
+                data-testid="settings-ads-upgrade-btn"
+                onClick={() => {
+                  onClose();
+                  setIsUpgradeModalOpen(true);
+                }}
+                className="w-full py-2.5 px-3 rounded-lg bg-[var(--color-accent)] text-[var(--color-on-accent)] hover:opacity-95 font-bold text-xs flex items-center justify-center gap-2 transition-opacity min-h-[42px]"
+              >
+                <Crown className="w-3.5 h-3.5 text-[var(--color-gold)] shrink-0" />
+                <span>
+                  {isRTL
+                    ? 'ترقية إلى PRO لتجربة بدون إعلانات'
+                    : 'Upgrade to PRO (100% Ad-Free)'}
                 </span>
               </button>
             </div>

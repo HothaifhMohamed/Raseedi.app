@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   X,
   PlayCircle,
@@ -8,6 +8,9 @@ import {
   ShieldCheck,
   Coins,
   AlertCircle,
+  WifiOff,
+  PauseCircle,
+  RotateCcw,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useOrg } from '../../context/OrgContext';
@@ -19,15 +22,30 @@ import {
 } from '../common/AdConsentBanner';
 import {
   ADSTERRA_SMARTLINK_URL,
-  CREDITS_AD_COUNTDOWN_SECONDS,
+  CREDITS_AD_COUNTDOWN_MS,
   CREDITS_AD_REWARD,
   CREDITS_DAILY_AD_LIMIT,
   RewardedAdSession,
+  advanceRewardedAdSession,
   getRewardedAdAvailability,
+  getRewardedAdRemainingMs,
+  recordRewardedAdOpenAttempt,
   shouldShowRaseediCreditsUi,
   startRewardedAdSession,
 } from '../../services/raseediCredits';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
+
+function readInitialWindowFocus(): boolean {
+  if (typeof document === 'undefined') return true;
+  const visible = !document.hidden;
+  const focused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+  return visible && focused;
+}
+
+function readIsOnline(): boolean {
+  if (typeof navigator === 'undefined') return true;
+  return navigator.onLine;
+}
 
 export const RewardedAdModal: React.FC = () => {
   const {
@@ -47,10 +65,29 @@ export const RewardedAdModal: React.FC = () => {
   const [consentChoice, setConsentChoice] = useState<AdConsentChoice>(() => getAdConsentChoice());
   const [session, setSession] = useState<RewardedAdSession | null>(null);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const [isOnline, setIsOnline] = useState<boolean>(() => readIsOnline());
+  const [isVisibleAndFocused, setIsVisibleAndFocused] = useState<boolean>(() =>
+    readInitialWindowFocus()
+  );
+  const [showReopenHint, setShowReopenHint] = useState(false);
   const [claimSuccess, setClaimSuccess] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
 
-  useModalBackHandler(isRewardedAdModalOpen, () => setIsRewardedAdModalOpen(false), 'rewarded-ad-modal');
+  const isWindowFocusedRef = useRef<boolean>(readInitialWindowFocus());
+  const lastTickAtRef = useRef<number>(Date.now());
+  const tabLeftAfterOpenRef = useRef<boolean>(false);
+  const openHintTimerRef = useRef<number | null>(null);
+
+  const readCurrentForegroundActive = () => {
+    const visible = typeof document === 'undefined' ? true : !document.hidden;
+    return visible && isWindowFocusedRef.current;
+  };
+
+  useModalBackHandler(
+    isRewardedAdModalOpen,
+    () => setIsRewardedAdModalOpen(false),
+    'rewarded-ad-modal'
+  );
 
   useEffect(() => {
     return subscribeAdConsentChanges(() => {
@@ -58,28 +95,158 @@ export const RewardedAdModal: React.FC = () => {
     });
   }, []);
 
+  // Track visibility, focus, and network connectivity in real time
+  useEffect(() => {
+    if (!isRewardedAdModalOpen) return;
+
+    const syncVisibilityChange = () => {
+      const visible = typeof document === 'undefined' ? true : !document.hidden;
+      if (!visible) {
+        tabLeftAfterOpenRef.current = true;
+        setShowReopenHint(false);
+      } else {
+        // Returning to a visible tab resumes cleanly
+        isWindowFocusedRef.current = true;
+        lastTickAtRef.current = Date.now();
+      }
+      const active = visible && isWindowFocusedRef.current;
+      setIsVisibleAndFocused(active);
+      setSession((prev) => {
+        if (!prev || prev.claimed) return prev;
+        return advanceRewardedAdSession(prev, {
+          deltaMs: 0,
+          isVisibleAndFocused: active,
+          isOnline: readIsOnline(),
+        });
+      });
+    };
+
+    const handleBlur = () => {
+      isWindowFocusedRef.current = false;
+      tabLeftAfterOpenRef.current = true;
+      setShowReopenHint(false);
+      setIsVisibleAndFocused(false);
+      setSession((prev) => {
+        if (!prev || prev.claimed) return prev;
+        return advanceRewardedAdSession(prev, {
+          deltaMs: 0,
+          isVisibleAndFocused: false,
+          isOnline: readIsOnline(),
+        });
+      });
+    };
+
+    const handleFocus = () => {
+      isWindowFocusedRef.current = true;
+      const visible = typeof document === 'undefined' ? true : !document.hidden;
+      lastTickAtRef.current = Date.now();
+      setIsVisibleAndFocused(visible);
+      setSession((prev) => {
+        if (!prev || prev.claimed) return prev;
+        return advanceRewardedAdSession(prev, {
+          deltaMs: 0,
+          isVisibleAndFocused: visible,
+          isOnline: readIsOnline(),
+        });
+      });
+    };
+
+    const handleOnline = () => {
+      lastTickAtRef.current = Date.now();
+      setIsOnline(true);
+      setStatusError((prev) => (prev ? null : prev));
+      setSession((prev) => {
+        if (!prev || prev.claimed) return prev;
+        return advanceRewardedAdSession(prev, {
+          deltaMs: 0,
+          isVisibleAndFocused: readCurrentForegroundActive(),
+          isOnline: true,
+        });
+      });
+    };
+
+    const handleOffline = () => {
+      setIsOnline(false);
+      setSession((prev) => {
+        if (!prev || prev.claimed) return prev;
+        return advanceRewardedAdSession(prev, {
+          deltaMs: 0,
+          isVisibleAndFocused: readCurrentForegroundActive(),
+          isOnline: false,
+        });
+      });
+    };
+
+    document.addEventListener('visibilitychange', syncVisibilityChange);
+    window.addEventListener('blur', handleBlur);
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      document.removeEventListener('visibilitychange', syncVisibilityChange);
+      window.removeEventListener('blur', handleBlur);
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [isRewardedAdModalOpen]);
+
   // Reset modal transient state whenever opened/closed
   useEffect(() => {
+    if (openHintTimerRef.current !== null) {
+      window.clearTimeout(openHintTimerRef.current);
+      openHintTimerRef.current = null;
+    }
     if (isRewardedAdModalOpen) {
-      setNowMs(Date.now());
+      const now = Date.now();
+      const initialActive = readInitialWindowFocus();
+      isWindowFocusedRef.current = initialActive;
+      lastTickAtRef.current = now;
+      tabLeftAfterOpenRef.current = false;
+      setNowMs(now);
       setSession(null);
       setClaimSuccess(false);
       setStatusError(null);
+      setShowReopenHint(false);
+      setIsOnline(readIsOnline());
+      setIsVisibleAndFocused(initialActive);
       setConsentChoice(getAdConsentChoice());
     }
   }, [isRewardedAdModalOpen]);
 
-  // 250ms smooth tick while countdown or cooldown is active
   const availability = getRewardedAdAvailability(creditsState, nowMs);
-  const isCountingDown = Boolean(session && !session.claimed && nowMs < session.readyAtMs);
+  const remainingCountdownMs = getRewardedAdRemainingMs(session);
+  const isCountingDown = Boolean(session && !session.claimed && remainingCountdownMs > 0);
   const isCoolingDown = !session && !availability.canWatch && availability.reason === 'cooldown';
 
+  // Active-only 250ms tick (automatically pauses while hidden, unfocused, or offline)
   useEffect(() => {
     if (!isRewardedAdModalOpen) return;
     if (!isCountingDown && !isCoolingDown) return;
+
+    lastTickAtRef.current = Date.now();
     const timer = window.setInterval(() => {
-      setNowMs(Date.now());
+      const currentNow = Date.now();
+      const deltaMs = Math.max(0, currentNow - lastTickAtRef.current);
+      lastTickAtRef.current = currentNow;
+      setNowMs(currentNow);
+
+      const onlineNow = readIsOnline();
+      const activeNow = readCurrentForegroundActive();
+      setIsOnline(onlineNow);
+      setIsVisibleAndFocused(activeNow);
+
+      setSession((prev) => {
+        if (!prev || prev.claimed) return prev;
+        return advanceRewardedAdSession(prev, {
+          deltaMs,
+          isVisibleAndFocused: activeNow,
+          isOnline: onlineNow,
+        });
+      });
     }, 250);
+
     return () => window.clearInterval(timer);
   }, [isRewardedAdModalOpen, isCountingDown, isCoolingDown]);
 
@@ -87,29 +254,79 @@ export const RewardedAdModal: React.FC = () => {
     return null;
   }
 
-  const remainingCountdownMs = session ? Math.max(0, session.readyAtMs - nowMs) : 0;
   const remainingSeconds = Math.ceil(remainingCountdownMs / 1000);
   const countdownProgress = session
     ? Math.min(
         100,
         Math.max(
           0,
-          ((CREDITS_AD_COUNTDOWN_SECONDS * 1000 - remainingCountdownMs) /
-            (CREDITS_AD_COUNTDOWN_SECONDS * 1000)) *
-            100
+          ((CREDITS_AD_COUNTDOWN_MS - remainingCountdownMs) / CREDITS_AD_COUNTDOWN_MS) * 100
         )
       )
     : 0;
-  const isReadyToClaim = Boolean(session && !session.claimed && remainingCountdownMs <= 0);
+
+  const effectivePauseReason = !isOnline
+    ? 'offline'
+    : session && !session.openAttempted
+    ? 'open_blocked'
+    : session && (!isVisibleAndFocused || session.pauseReason === 'background') && remainingCountdownMs > 0
+    ? 'background'
+    : session?.pauseReason ?? 'none';
+
+  const isReadyToClaim = Boolean(
+    session &&
+      !session.claimed &&
+      session.openAttempted &&
+      remainingCountdownMs <= 0 &&
+      isOnline
+  );
   const hasConsent = consentChoice === 'granted';
 
-  const handleStartWatch = () => {
+  const scheduleReopenFallbackHint = () => {
+    if (openHintTimerRef.current !== null) {
+      window.clearTimeout(openHintTimerRef.current);
+    }
+    tabLeftAfterOpenRef.current = false;
+    setShowReopenHint(false);
+    openHintTimerRef.current = window.setTimeout(() => {
+      if (!tabLeftAfterOpenRef.current) {
+        setShowReopenHint(true);
+      }
+      openHintTimerRef.current = null;
+    }, 1200);
+  };
+
+  const handleStartWatch = (e: React.MouseEvent<HTMLAnchorElement>) => {
     setStatusError(null);
+    const onlineNow = readIsOnline();
+    setIsOnline(onlineNow);
+
+    if (!onlineNow) {
+      e.preventDefault();
+      setStatusError(
+        isRTL
+          ? 'الاتصال بالإنترنت مطلوب لفتح رابط الإعلان وبدء التحقق واستلام النقاط.'
+          : 'An active internet connection is required to open the ad and earn credits.'
+      );
+      return;
+    }
+
     const currentNow = Date.now();
+    lastTickAtRef.current = currentNow;
     setNowMs(currentNow);
-    const started = startRewardedAdSession(creditsState, currentNow);
+    const started = startRewardedAdSession(creditsState, currentNow, {
+      isOnline: onlineNow,
+      openAttempted: true,
+    });
     if (started.ok === false) {
-      if (started.reason === 'daily_limit') {
+      e.preventDefault();
+      if (started.reason === 'offline') {
+        setStatusError(
+          isRTL
+            ? 'الاتصال بالإنترنت مطلوب لفتح رابط الإعلان واستلام النقاط.'
+            : 'An active internet connection is required to watch rewarded ads.'
+        );
+      } else if (started.reason === 'daily_limit') {
         setStatusError(
           isRTL
             ? `وصلت للحد الأقصى اليومي (${CREDITS_DAILY_AD_LIMIT} إعلانات). يعود العداد تلقائياً غداً.`
@@ -124,22 +341,59 @@ export const RewardedAdModal: React.FC = () => {
       }
       return;
     }
+
     setSession(started.session);
+    scheduleReopenFallbackHint();
+  };
+
+  const handleReopenSmartlink = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    const onlineNow = readIsOnline();
+    setIsOnline(onlineNow);
+    if (!onlineNow) {
+      e.preventDefault();
+      setStatusError(
+        isRTL
+          ? 'انقطع الاتصال بالإنترنت — يرجى الاتصال أولاً لإعادة فتح رابط الإعلان.'
+          : 'You are offline — reconnect to the internet to reopen the ad link.'
+      );
+      return;
+    }
+    setStatusError(null);
+    lastTickAtRef.current = Date.now();
+    setSession((prev) =>
+      prev ? recordRewardedAdOpenAttempt(prev, { succeeded: true, isOnline: true }) : prev
+    );
+    scheduleReopenFallbackHint();
   };
 
   const handleClaim = () => {
     if (!session || session.claimed) return;
-    const result = claimRewardedAdCredits(session);
+    const onlineNow = readIsOnline();
+    setIsOnline(onlineNow);
+
+    const result = claimRewardedAdCredits(session, { isOnline: onlineNow });
     if (result.ok === true) {
       setSession({ ...session, claimed: true });
       setClaimSuccess(true);
       setStatusError(null);
       setNowMs(Date.now());
+    } else if (result.reason === 'offline') {
+      setStatusError(
+        isRTL
+          ? 'الاتصال بالإنترنت مطلوب لاستلام النقاط. أعد الاتصال ثم اضغط استلام.'
+          : 'An internet connection is required to claim credits. Reconnect and try again.'
+      );
+    } else if (result.reason === 'open_not_verified') {
+      setStatusError(
+        isRTL
+          ? 'يرجى فتح رابط الإعلان أولاً عبر زر «إعادة فتح رابط الإعلان» ثم إكمال العدّاد.'
+          : 'Please open the ad link first using "Reopen Ad Link" before claiming.'
+      );
     } else if (result.reason === 'countdown_incomplete') {
       setStatusError(
         isRTL
-          ? 'يرجى الانتظار حتى اكتمال العدّاد (10 ثوانٍ).'
-          : 'Please wait until the 10-second countdown completes.'
+          ? 'يرجى البقاء في التطبيق حتى اكتمال العدّاد (10 ثوانٍ).'
+          : 'Please stay in the app until the 10-second countdown completes.'
       );
     } else if (result.reason === 'daily_limit') {
       setStatusError(
@@ -195,18 +449,39 @@ export const RewardedAdModal: React.FC = () => {
 
         {/* Body */}
         <div className="p-4 space-y-4">
+          {/* Global Offline Warning inside Modal */}
+          {!isOnline && !claimSuccess && (
+            <div
+              role="alert"
+              data-testid="rewarded-ad-offline-banner"
+              className="p-3 rounded-xl bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/35 text-[var(--color-expense)] text-xs flex items-start gap-2"
+            >
+              <WifiOff className="w-4 h-4 shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <p className="font-bold">
+                  {isRTL ? 'لا يوجد اتصال بالإنترنت' : 'No Internet Connection'}
+                </p>
+                <p className="text-[11px] leading-relaxed">
+                  {isRTL
+                    ? 'الاتصال بالإنترنت مطلوب لفتح الإعلان وإكمال التحقق واستلام النقاط. سيعود العدّاد للعمل تلقائياً عند عودة الاتصال.'
+                    : 'An active internet connection is required to verify the ad and claim credits. Countdown resumes automatically when online.'}
+                </p>
+              </div>
+            </div>
+          )}
+
           {!hasConsent ? (
             <div className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-gold)]/40 space-y-3">
               <div className="flex items-start gap-2.5">
                 <ShieldCheck className="w-5 h-5 text-[var(--color-accent)] shrink-0 mt-0.5" />
                 <div className="space-y-1">
                   <div className="text-xs font-bold text-[var(--color-ink)]">
-                    {isRTL ? 'موافقة الخصوصية مطلوبة أولاً' : 'Privacy Consent Required First'}
+                    {isRTL ? 'إعلانات النسخة المجانية موقفة من الإعدادات' : 'Free-Tier Ads Paused in Settings'}
                   </div>
                   <p className="text-[11px] text-[var(--color-muted)] leading-relaxed">
                     {isRTL
-                      ? 'لا نفتح رابط الإعلان أبداً دون موافقتك الصريحة على تفضيلات الإعلانات. بياناتك المالية في «رصيدي» تبقى خاصة تماماً.'
-                      : 'We never open the ad link without your explicit ad consent. Your Raseedi financial data remains strictly private.'}
+                      ? 'قمت بإيقاف إعلانات النسخة المجانية من الإعدادات. يمكنك إعادة تفعيلها بضغطة واحدة لجمع نقاط رصيدي مجاناً، وتبقى بياناتك المالية خاصة تماماً.'
+                      : 'You previously turned off free-tier ads in Settings. Re-enable them in one tap to earn Raseedi Credits — your financial ledger stays strictly private.'}
                   </p>
                 </div>
               </div>
@@ -215,7 +490,7 @@ export const RewardedAdModal: React.FC = () => {
                 onClick={() => saveAdConsentChoice('granted')}
                 className="w-full py-2.5 px-3 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold hover:opacity-95 transition-opacity min-h-[44px]"
               >
-                {isRTL ? 'الموافقة والمتابعة لمشاهدة الإعلان' : 'Accept Ad Preferences & Continue'}
+                {isRTL ? 'إعادة التفعيل والمتابعة لمشاهدة الإعلان' : 'Re-enable & Continue to Watch Ad'}
               </button>
             </div>
           ) : claimSuccess ? (
@@ -225,7 +500,9 @@ export const RewardedAdModal: React.FC = () => {
               </div>
               <div className="space-y-1">
                 <h4 className="font-title text-sm font-bold text-[var(--color-ink)]">
-                  {isRTL ? `تمت إضافة +${CREDITS_AD_REWARD} نقاط إلى رصيدك 🪙` : `+${CREDITS_AD_REWARD} Credits Added 🪙`}
+                  {isRTL
+                    ? `تمت إضافة +${CREDITS_AD_REWARD} نقاط إلى رصيدك 🪙`
+                    : `+${CREDITS_AD_REWARD} Credits Added 🪙`}
                 </h4>
                 <p className="text-xs text-[var(--color-muted)]">
                   {isRTL
@@ -242,13 +519,51 @@ export const RewardedAdModal: React.FC = () => {
               </button>
             </div>
           ) : session ? (
-            <div className="space-y-4">
+            <div className="space-y-3.5">
+              {/* Background / Blur Pause Banner */}
+              {effectivePauseReason === 'background' && remainingCountdownMs > 0 && (
+                <div
+                  role="status"
+                  data-testid="rewarded-ad-paused-banner"
+                  className="p-3 rounded-xl bg-[var(--color-gold-soft)] border border-[var(--color-gold)]/45 text-[var(--color-ink)] text-xs flex items-center gap-2.5"
+                >
+                  <PauseCircle className="w-4 h-4 text-[var(--color-gold-text)] shrink-0" />
+                  <span className="font-semibold">
+                    {isRTL
+                      ? 'العدّاد متوقف مؤقتاً — عد للتطبيق لإكمال التحقق'
+                      : 'Countdown paused — return to the app to complete verification'}
+                  </span>
+                </div>
+              )}
+
               {/* Countdown card */}
-              <div className="p-4 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] text-center space-y-3">
+              <div
+                data-testid="rewarded-ad-countdown-card"
+                data-pause-reason={effectivePauseReason}
+                className="p-4 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] text-center space-y-3"
+              >
                 <div className="flex items-center justify-center gap-2 text-xs font-bold text-[var(--color-ink)]">
-                  <Clock className="w-4 h-4 text-[var(--color-gold-text)]" />
+                  {effectivePauseReason === 'offline' ? (
+                    <WifiOff className="w-4 h-4 text-[var(--color-expense)] shrink-0" />
+                  ) : effectivePauseReason === 'background' ? (
+                    <PauseCircle className="w-4 h-4 text-[var(--color-gold-text)] shrink-0" />
+                  ) : (
+                    <Clock className="w-4 h-4 text-[var(--color-gold-text)] shrink-0" />
+                  )}
                   <span>
-                    {isReadyToClaim
+                    {effectivePauseReason === 'offline'
+                      ? isRTL
+                        ? 'العدّاد متوقف مؤقتاً — بانتظار عودة الإنترنت'
+                        : 'Paused — waiting for internet connection'
+                      : effectivePauseReason === 'background' && remainingCountdownMs > 0
+                      ? isRTL
+                        ? 'عد للتطبيق لإكمال التحقق'
+                        : 'Return to the app to complete verification'
+                      : effectivePauseReason === 'open_blocked'
+                      ? isRTL
+                        ? 'افتح رابط الإعلان أولاً لبدء التحقق'
+                        : 'Open the ad link first to start verification'
+                      : isReadyToClaim
                       ? isRTL
                         ? 'اكتمل العدّاد! يمكنك استلام مكافأتك الآن'
                         : 'Countdown complete! Claim your reward now'
@@ -261,20 +576,29 @@ export const RewardedAdModal: React.FC = () => {
                 {/* Progress bar */}
                 <div className="w-full h-2.5 rounded-full bg-[var(--color-surface-subtle)] overflow-hidden border border-[var(--color-line)]">
                   <div
-                    className="h-full rounded-full bg-gradient-to-l from-[var(--color-gold)] to-[var(--color-accent)] transition-all duration-200"
+                    className={`h-full rounded-full transition-all duration-200 ${
+                      effectivePauseReason === 'offline'
+                        ? 'bg-[var(--color-expense)]/70'
+                        : 'bg-gradient-to-l from-[var(--color-gold)] to-[var(--color-accent)]'
+                    }`}
                     style={{ width: `${countdownProgress}%` }}
                   />
                 </div>
 
                 <div className="flex items-center justify-between text-[11px] text-[var(--color-muted)]">
-                  <span>{isRTL ? 'المدة المطلوبة: 10 ثوانٍ' : 'Required: 10 seconds'}</span>
-                  <span className="font-bold num-tabular text-[var(--color-gold-text)]">
-                    {isReadyToClaim ? '0s' : `${remainingSeconds}s`}
+                  <span>
+                    {isRTL ? 'المدة المطلوبة داخل التطبيق: 10 ثوانٍ' : 'Active in-app time: 10s'}
+                  </span>
+                  <span
+                    data-testid="rewarded-ad-remaining-seconds"
+                    className="font-bold num-tabular text-[var(--color-gold-text)]"
+                  >
+                    {remainingCountdownMs <= 0 ? '0s' : `${remainingSeconds}s`}
                   </span>
                 </div>
               </div>
 
-              {/* Claim button (strictly disabled until 10s complete) */}
+              {/* Claim button (strictly disabled until 10s active countdown + openAttempted + online) */}
               <button
                 type="button"
                 disabled={!isReadyToClaim}
@@ -288,7 +612,11 @@ export const RewardedAdModal: React.FC = () => {
               >
                 <Coins className="w-4 h-4 shrink-0" />
                 <span>
-                  {isReadyToClaim
+                  {!isOnline
+                    ? isRTL
+                      ? 'الاتصال بالإنترنت مطلوب للاستلام'
+                      : 'Internet Required to Claim'
+                    : isReadyToClaim
                     ? isRTL
                       ? `استلام +${CREDITS_AD_REWARD} نقاط 🪙`
                       : `Claim +${CREDITS_AD_REWARD} Credits 🪙`
@@ -298,22 +626,49 @@ export const RewardedAdModal: React.FC = () => {
                 </span>
               </button>
 
-              {/* Re-open link fallback if popup blocked */}
-              <div className="text-center">
-                <a
-                  href={ADSTERRA_SMARTLINK_URL}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-[var(--color-accent)] hover:underline py-1"
+              {/* Smartlink Blocked / Re-open Fallback */}
+              {showReopenHint || !session.openAttempted ? (
+                <div
+                  data-testid="smartlink-reopen-box"
+                  className="p-3 rounded-xl bg-[var(--color-gold-soft)] border border-[var(--color-gold)]/40 space-y-2.5"
                 >
-                  <ExternalLink className="w-3.5 h-3.5 shrink-0" />
-                  <span>
+                  <p className="text-[11px] text-[var(--color-ink)] leading-relaxed">
                     {isRTL
-                      ? 'لم تفتح صفحة الإعلان؟ اضغط لإعادة فتحها'
-                      : "Ad tab didn't open? Tap to reopen"}
-                  </span>
-                </a>
-              </div>
+                      ? 'لم يفتح تبويب الإعلان أو تم حظره بواسطة المتصفح؟ اضغط الزر بالأسفل لإعادة فتح رابط الإعلان.'
+                      : 'Ad tab blocked or failed to open? Tap below to reopen the ad link.'}
+                  </p>
+                  <a
+                    href={ADSTERRA_SMARTLINK_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={handleReopenSmartlink}
+                    data-testid="reopen-smartlink-btn"
+                    className="w-full py-2.5 px-3 rounded-xl bg-[var(--color-surface)] border border-[var(--color-accent)] text-[var(--color-accent)] text-xs font-bold flex items-center justify-center gap-2 hover:bg-[var(--color-accent)] hover:text-[var(--color-on-accent)] transition-colors min-h-[42px]"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+                    <span>{isRTL ? 'إعادة فتح رابط الإعلان' : 'Reopen Ad Link'}</span>
+                    <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                  </a>
+                </div>
+              ) : (
+                <div className="text-center">
+                  <a
+                    href={ADSTERRA_SMARTLINK_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={handleReopenSmartlink}
+                    data-testid="reopen-smartlink-btn"
+                    className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-[var(--color-accent)] hover:underline py-1"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      {isRTL
+                        ? 'إعادة فتح رابط الإعلان'
+                        : 'Reopen Ad Link'}
+                    </span>
+                  </a>
+                </div>
+              )}
             </div>
           ) : (
             <div className="space-y-3.5">
@@ -329,8 +684,8 @@ export const RewardedAdModal: React.FC = () => {
                   </li>
                   <li>
                     {isRTL
-                      ? 'ينطلق عدّاد 10 ثوانٍ داخل «رصيدي»، وبعد انتهائه تستلم +10 نقاط فوراً.'
-                      : 'A 10-second timer runs inside Raseedi; once done, claim +10 credits instantly.'}
+                      ? 'عُد إلى «رصيدي» ليكتمل عدّاد 10 ثوانٍ بوجود اتصال بالإنترنت، ثم استلم +10 نقاط فوراً.'
+                      : 'Return to Raseedi so the 10-second online timer completes, then claim +10 credits instantly.'}
                   </li>
                   <li>
                     {isRTL
@@ -346,16 +701,29 @@ export const RewardedAdModal: React.FC = () => {
                   target="_blank"
                   rel="noopener noreferrer"
                   onClick={handleStartWatch}
+                  aria-disabled={!isOnline}
                   data-testid="start-rewarded-ad-link"
-                  className="w-full py-3 px-4 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold flex items-center justify-center gap-2 shadow-sm hover:opacity-95 transition-opacity min-h-[46px]"
+                  className={`w-full py-3 px-4 rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-sm transition-opacity min-h-[46px] ${
+                    isOnline
+                      ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] hover:opacity-95'
+                      : 'bg-[var(--color-bg)] border border-[var(--color-line)] text-[var(--color-muted)] opacity-75'
+                  }`}
                 >
-                  <PlayCircle className="w-4 h-4 shrink-0" />
+                  {isOnline ? (
+                    <PlayCircle className="w-4 h-4 shrink-0" />
+                  ) : (
+                    <WifiOff className="w-4 h-4 shrink-0" />
+                  )}
                   <span>
-                    {isRTL
+                    {!isOnline
+                      ? isRTL
+                        ? 'الاتصال بالإنترنت مطلوب للمشاهدة'
+                        : 'Internet Connection Required'
+                      : isRTL
                       ? `شاهد إعلاناً للحصول على +${CREDITS_AD_REWARD} نقاط`
                       : `Watch Ad to Earn +${CREDITS_AD_REWARD} Credits`}
                   </span>
-                  <ExternalLink className="w-3.5 h-3.5 shrink-0 opacity-85" />
+                  {isOnline && <ExternalLink className="w-3.5 h-3.5 shrink-0 opacity-85" />}
                 </a>
               ) : (
                 <div
@@ -378,7 +746,11 @@ export const RewardedAdModal: React.FC = () => {
           )}
 
           {statusError && (
-            <div className="p-2.5 rounded-xl bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/30 text-[11px] font-medium text-[var(--color-expense)]">
+            <div
+              role="alert"
+              data-testid="rewarded-ad-error-banner"
+              className="p-2.5 rounded-xl bg-[var(--color-expense)]/10 border border-[var(--color-expense)]/30 text-[11px] font-medium text-[var(--color-expense)]"
+            >
               {statusError}
             </div>
           )}
