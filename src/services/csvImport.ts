@@ -100,21 +100,7 @@ function formatUtcYmd(dt: Date): string | null {
 
 const UNSAFE_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
-/**
- * Escapes any spreadsheet/CSV cell and neutralizes formula injection payloads (=, +, -, @, \t, \r).
- */
-export function escapeCsvCell(val: unknown): string {
-  if (val === null || val === undefined) return '';
-  if (typeof val === 'number') {
-    return Number.isFinite(val) ? String(val) : '';
-  }
-  const raw = String(val);
-  const safe =
-    /^[=+\-@\t\r]/.test(raw) || /^[=+\-@\t\r]/.test(raw.trimStart())
-      ? `'${raw}`
-      : raw;
-  return `"${safe.replace(/"/g, '""')}"`;
-}
+export { escapeCsvCell } from './csvEscape';
 
 /**
  * Converts headers + rows into a normalized Array of Objects (JSON records).

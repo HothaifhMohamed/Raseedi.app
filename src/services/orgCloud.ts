@@ -29,6 +29,7 @@ import {
   removeOrgWorkspaceFromBackupMeta,
   ServerApiError,
 } from './firebase';
+import { formatLocalDate } from './calculations';
 import {
   AuditLogAction,
   AuditLogEntry,
@@ -227,7 +228,7 @@ function sanitizeOrgDateForCloud(rawDate: unknown): string {
   const s = typeof rawDate === 'string' ? rawDate.trim() : '';
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
   if (s.length > 0) return s.slice(0, 16);
-  return new Date().toISOString().slice(0, 10);
+  return formatLocalDate();
 }
 
 export function buildOrgTxPayloadForCloud(orgId: string, tx: Transaction): Record<string, unknown> {

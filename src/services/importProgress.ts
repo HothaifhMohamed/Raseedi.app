@@ -94,6 +94,29 @@ export function yieldToMainThread(): Promise<void> {
 }
 
 /**
+ * Parses potentially large JSON strings without freezing the browser UI thread.
+ * Uses the Fetch API's native off-main-thread `Response.prototype.json()` when available,
+ * surrounded by event-loop yields so loading indicators keep animating on mobile devices.
+ */
+export async function parseJsonNonBlocking<T = unknown>(text: string): Promise<T> {
+  await yieldToMainThread();
+  let parsed: T;
+  if (typeof Response === 'function' && text.length >= 64 * 1024) {
+    try {
+      parsed = (await new Response(text, {
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      }).json()) as T;
+    } catch {
+      parsed = JSON.parse(text) as T;
+    }
+  } else {
+    parsed = JSON.parse(text) as T;
+  }
+  await yieldToMainThread();
+  return parsed;
+}
+
+/**
  * Computes a smooth, monotonically increasing 0–100 percentage across the 4 import stages.
  */
 export function calculateStageProgress(

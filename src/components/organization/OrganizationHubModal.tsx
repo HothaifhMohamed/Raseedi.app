@@ -56,7 +56,7 @@ import {
 import { normalizeApprovalStatus } from '../../services/entitlements';
 import { normalizeArabicPersianNumerals, parseLocalizedNumber } from '../../services/numbers';
 import { resolveOrgAttachmentUrl } from '../../services/firebase';
-import { escapeCsvCell } from '../../services/csvImport';
+import { escapeCsvCell } from '../../services/csvEscape';
 import { indexById, paginateList } from '../../services/lookupCache';
 import {
   formatWorkspaceDeleteConfirmMessage,

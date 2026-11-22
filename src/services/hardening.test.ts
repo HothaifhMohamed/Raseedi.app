@@ -1,11 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildCspDirectives,
   isOrgReceiptScannerRole,
+  isPreviewIframeRuntime,
+  isProductionRuntime,
   isSafeWebhookId,
   isSensitiveRevocationPath,
   resolveAdminSessionSecret,
+  resolveTrustProxySetting,
+  validateClientLocalDate,
+  validateScanReceiptPayload,
 } from './serverSecurity';
+import { escapeCsvCell } from './csvEscape';
+import { parseJsonNonBlocking } from './importProgress';
 import {
   hashPin,
   MIN_PIN_PBKDF2_ITERATIONS,
@@ -233,3 +241,91 @@ test('buildLightweightLegacyCache: caps localStorage fallback to latest 200 atta
     true
   );
 });
+
+test('resolveAdminSessionSecret: throws clear error in production when missing or shorter than 32 chars', () => {
+  assert.throws(
+    () => resolveAdminSessionSecret(undefined, { isProduction: true }),
+    /ADMIN_SESSION_SECRET is required in production/
+  );
+  assert.throws(
+    () => resolveAdminSessionSecret('too-short-secret', { isProduction: true }),
+    /ADMIN_SESSION_SECRET is required in production/
+  );
+  const validSecret = 'a-very-strong-production-secret-key-2026-01';
+  assert.equal(
+    resolveAdminSessionSecret(validSecret, { isProduction: true }).toString('utf8'),
+    validSecret
+  );
+});
+
+test('resolveTrustProxySetting and runtime flags: safe defaults for Vercel, Cloud Run, localhost, and explicit env overrides', () => {
+  assert.equal(isProductionRuntime({ NODE_ENV: 'production' }), true);
+  assert.equal(isProductionRuntime({ VERCEL_ENV: 'production' }), true);
+  assert.equal(isProductionRuntime({ NODE_ENV: 'development' }), false);
+
+  assert.equal(isPreviewIframeRuntime({ NODE_ENV: 'production' }), false);
+  assert.equal(isPreviewIframeRuntime({ NODE_ENV: 'development' }), true);
+  assert.equal(
+    isPreviewIframeRuntime({ NODE_ENV: 'production', APP_URL: 'https://ais-pre-abc.run.app' }),
+    true
+  );
+
+  assert.equal(resolveTrustProxySetting({ VERCEL: '1' }), 1);
+  assert.equal(resolveTrustProxySetting({ K_SERVICE: 'raseedi-svc' }), 1);
+  assert.equal(resolveTrustProxySetting({}), 'loopback');
+  assert.equal(resolveTrustProxySetting({ TRUST_PROXY: 'false' }), false);
+  assert.equal(resolveTrustProxySetting({ TRUST_PROXY: '2' }), 2);
+  assert.equal(resolveTrustProxySetting({ TRUST_PROXY: 'loopback' }), 'loopback');
+});
+
+test('buildCspDirectives: enforces clickjacking protection and strips ws: in production while preserving Firebase and AdSense', () => {
+  const prod = buildCspDirectives({ isProduction: true, allowPreviewFraming: false });
+  assert.deepEqual(prod.frameAncestors, ["'self'"]);
+  assert.equal(prod.connectSrc.includes('ws:'), false);
+  assert.equal(prod.connectSrc.includes('wss:'), true);
+  assert.equal(prod.scriptSrc.includes('https://pagead2.googlesyndication.com'), true);
+  assert.equal(prod.connectSrc.includes('https://*.googleapis.com'), true);
+
+  const preview = buildCspDirectives({ isProduction: false, allowPreviewFraming: true });
+  assert.ok(preview.frameAncestors.includes('https://aistudio.google.com'));
+  assert.equal(preview.connectSrc.includes('ws:'), true);
+});
+
+test('validateClientLocalDate and validateScanReceiptPayload: accept valid timezone dates and reject drift or impossible dates', () => {
+  const serverNow = new Date(Date.UTC(2026, 4, 15, 22, 30, 0)); // 2026-05-15 UTC
+  assert.equal(validateClientLocalDate('2026-05-16', serverNow), '2026-05-16');
+  assert.equal(validateClientLocalDate('2026-05-14', serverNow), '2026-05-14');
+  assert.equal(validateClientLocalDate('2026-05-20', serverNow), null);
+  assert.equal(validateClientLocalDate('2026-02-30', serverNow), null);
+  assert.equal(validateClientLocalDate('not-a-date', serverNow), null);
+
+  const payloadCheck = validateScanReceiptPayload(
+    {
+      imageBase64: 'AAAA',
+      mimeType: 'image/jpeg',
+      categories: [],
+      clientLocalDate: '2026-05-16',
+    },
+    serverNow
+  );
+  assert.equal(payloadCheck.ok, true);
+  if (payloadCheck.ok) {
+    assert.equal(payloadCheck.clientLocalDate, '2026-05-16');
+  }
+});
+
+test('parseJsonNonBlocking and escapeCsvCell: parse small and large JSON payloads and neutralize CSV formulas', async () => {
+  const small = await parseJsonNonBlocking<{ ok: boolean }>('{"ok":true}');
+  assert.equal(small.ok, true);
+
+  const bigArray = Array.from({ length: 1500 }, (_, i) => ({ id: `tx-${i}`, note: 'x'.repeat(40) }));
+  const largeJson = JSON.stringify({ items: bigArray });
+  assert.ok(largeJson.length > 65_536);
+  const parsedLarge = await parseJsonNonBlocking<{ items: Array<{ id: string }> }>(largeJson);
+  assert.equal(parsedLarge.items.length, 1500);
+
+  assert.equal(escapeCsvCell('=CMD()'), `"'=CMD()"`);
+  assert.equal(escapeCsvCell('+123'), `"'+123"`);
+  assert.equal(escapeCsvCell('hello "world"'), `"hello ""world"""`);
+});
+

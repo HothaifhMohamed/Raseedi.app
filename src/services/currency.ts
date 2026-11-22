@@ -449,11 +449,12 @@ export async function fetchLiveExchangeRates(force = false): Promise<CachedLiveR
 }
 
 export function getCurrency(code: string): Currency {
-  return CURRENCY_MAP.get(code) || {
-    code,
-    nameAr: code,
-    nameEn: code,
-    symbol: code,
+  const normalized = (code || '').trim().toUpperCase();
+  return CURRENCY_MAP.get(normalized) || {
+    code: normalized || code,
+    nameAr: normalized || code,
+    nameEn: normalized || code,
+    symbol: normalized || code,
     flag: '🌐',
     rateToUSD: 1.0,
   };
@@ -463,8 +464,16 @@ export function getEffectiveCurrencyRate(
   code: string,
   customRates?: Record<string, number>
 ): number {
-  const fallback = getCurrency(code).rateToUSD;
-  return customRates?.[code] ?? activeLiveRates?.[code] ?? fallback;
+  const normalized = (code || '').trim().toUpperCase();
+  const custom = customRates?.[normalized] ?? customRates?.[code];
+  if (typeof custom === 'number' && Number.isFinite(custom) && custom > 0) {
+    return custom;
+  }
+  const live = activeLiveRates?.[normalized];
+  if (typeof live === 'number' && Number.isFinite(live) && live > 0) {
+    return live;
+  }
+  return getCurrency(normalized).rateToUSD;
 }
 
 export const THREE_DECIMAL_CURRENCIES = new Set([
@@ -494,7 +503,8 @@ export function roundCurrency(
       ? Math.max(0, Math.min(6, Math.floor(currencyCodeOrDecimals)))
       : getCurrencyDecimals(currencyCodeOrDecimals, fallbackDecimals);
   const factor = Math.pow(10, decimals);
-  const val = Math.round((amount + Number.EPSILON) * factor) / factor;
+  const sign = amount < 0 ? -1 : 1;
+  const val = (sign * Math.round((Math.abs(amount) + Number.EPSILON) * factor)) / factor;
   return Object.is(val, -0) ? 0 : val;
 }
 
@@ -536,16 +546,20 @@ export function convertCurrency(
   toCode: string,
   customRates?: Record<string, number>
 ): number {
-  if (fromCode === toCode || amount === 0) return roundCurrency(amount, toCode);
+  const normalizedFrom = (fromCode || '').trim().toUpperCase();
+  const normalizedTo = (toCode || '').trim().toUpperCase();
+  if (normalizedFrom === normalizedTo || amount === 0) {
+    return roundCurrency(amount, normalizedTo || toCode);
+  }
 
-  const fromRate = getEffectiveCurrencyRate(fromCode, customRates);
-  const toRate = getEffectiveCurrencyRate(toCode, customRates);
+  const fromRate = getEffectiveCurrencyRate(normalizedFrom, customRates);
+  const toRate = getEffectiveCurrencyRate(normalizedTo, customRates);
 
-  if (fromRate <= 0 || toRate <= 0) return roundCurrency(amount, toCode);
+  if (fromRate <= 0 || toRate <= 0) return roundCurrency(amount, normalizedTo || toCode);
 
   // Convert from currency -> USD -> to currency
   const amountInUSD = amount / fromRate;
   const converted = amountInUSD * toRate;
 
-  return roundCurrency(converted, toCode);
+  return roundCurrency(converted, normalizedTo || toCode);
 }

@@ -43,11 +43,14 @@ import {
 } from './src/services/adminAuth';
 import {
   buildAdminCustomClaims,
+  buildCspDirectives,
   deriveCrossInstanceAdminSessionKey,
   getLocalTodayDateString,
   hashAdminPinServer,
   isAllowedCorsOrigin,
   isOrgReceiptScannerRole,
+  isPreviewIframeRuntime,
+  isProductionRuntime,
   isSafeWebhookId,
   isSensitiveRevocationPath,
   isServerAdminUser,
@@ -55,6 +58,7 @@ import {
   normalizeScannedReceiptResult,
   resolveActivationPlanDetails,
   resolveAdminSessionSecret,
+  resolveTrustProxySetting,
   ServerActivationPlan,
   ServerSupportedBillingCycle,
   ServerSupportedPlanTier,
@@ -72,8 +76,17 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
+const IS_PRODUCTION = isProductionRuntime(process.env);
+const ALLOW_PREVIEW_IFRAME = isPreviewIframeRuntime(process.env);
 const GEMINI_SCAN_MODEL = process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash';
-const ADMIN_SESSION_SECRET = resolveAdminSessionSecret(process.env.ADMIN_SESSION_SECRET);
+const ADMIN_SESSION_SECRET = resolveAdminSessionSecret(process.env.ADMIN_SESSION_SECRET, {
+  isProduction: IS_PRODUCTION,
+});
+if (!IS_PRODUCTION && (process.env.ADMIN_SESSION_SECRET?.trim().length || 0) < 32) {
+  console.warn(
+    'ADMIN_SESSION_SECRET is not set (or < 32 chars); using ephemeral dev key. Set ADMIN_SESSION_SECRET in production.'
+  );
+}
 const ADMIN_SESSION_TTL_MS = 30 * 60 * 1000;
 let revocationLookupWarned = false;
 const VALID_ORG_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -707,73 +720,22 @@ async function requireFirebaseAuth(
   }
 }
 
-async function createApp() {
+export async function createExpressApp(options?: { apiOnly?: boolean }) {
   await probeAdminDbAccess();
   const app = express();
-  app.set('trust proxy', 1);
+  app.set('trust proxy', resolveTrustProxySetting(process.env));
 
   app.use(
     helmet({
       contentSecurityPolicy: {
         useDefaults: false,
-        directives: {
-          defaultSrc: ["'self'"],
-          scriptSrc: [
-            "'self'",
-            "'unsafe-inline'",
-            'https://apis.google.com',
-            'https://accounts.google.com',
-            'https://www.gstatic.com',
-            'https://www.google.com',
-            'https://*.firebaseapp.com',
-            'https://pagead2.googlesyndication.com',
-            'https://*.googlesyndication.com',
-            'https://googleads.g.doubleclick.net',
-            'https://*.adtrafficquality.google',
-            'https://adservice.google.com',
-          ],
-          styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-          fontSrc: ["'self'", 'data:', 'https://fonts.gstatic.com'],
-          imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
-          connectSrc: [
-            "'self'",
-            'https://*.googleapis.com',
-            'https://*.firebaseio.com',
-            'https://*.firebaseapp.com',
-            'https://*.firebasestorage.app',
-            'https://*.gstatic.com',
-            'https://apis.google.com',
-            'https://accounts.google.com',
-            'https://open.er-api.com',
-            'https://cdn.jsdelivr.net',
-            'https://api.frankfurter.dev',
-            'https://pagead2.googlesyndication.com',
-            'https://*.googlesyndication.com',
-            'https://googleads.g.doubleclick.net',
-            'https://*.doubleclick.net',
-            'https://*.adtrafficquality.google',
-            'wss:',
-            'ws:',
-          ],
-          frameSrc: [
-            "'self'",
-            'https://*.firebaseapp.com',
-            'https://accounts.google.com',
-            'https://www.google.com',
-            'https://googleads.g.doubleclick.net',
-            'https://tpc.googlesyndication.com',
-            'https://*.googlesyndication.com',
-            'https://*.adtrafficquality.google',
-          ],
-          workerSrc: ["'self'", 'blob:'],
-          manifestSrc: ["'self'"],
-          objectSrc: ["'none'"],
-          baseUri: ["'self'"],
-          formAction: ["'self'"],
-        },
+        directives: buildCspDirectives({
+          isProduction: IS_PRODUCTION,
+          allowPreviewFraming: ALLOW_PREVIEW_IFRAME,
+        }),
       },
       crossOriginEmbedderPolicy: false,
-      frameguard: false,
+      frameguard: ALLOW_PREVIEW_IFRAME ? false : { action: 'sameorigin' },
     })
   );
 
@@ -1104,7 +1066,12 @@ async function createApp() {
           return;
         }
 
-        const { cleanBase64, mimeType, categories: expenseCategories } = validated;
+        const {
+          cleanBase64,
+          mimeType,
+          categories: expenseCategories,
+          clientLocalDate,
+        } = validated;
 
         if (targetOrgId) {
           activeQuotaRef = adminDb
@@ -1243,7 +1210,7 @@ async function createApp() {
           ? expenseCategories.map((c) => `- "${c.id}": ${c.nameAr} (${c.nameEn})`).join('\n')
           : '- "cat-restaurants": مطاعم\n- "cat-groceries": سوبرماركت\n- "cat-cafes": كافيهات\n- "cat-bills": فواتير\n- "cat-pharmacy": صيدلية\n- "cat-other": أخرى';
 
-        const fallbackDate = getLocalTodayDateString();
+        const fallbackDate = clientLocalDate || getLocalTodayDateString();
 
         const ai = new GoogleGenAI({
           apiKey,
@@ -1331,7 +1298,14 @@ Return JSON matching the schema with:
                 { merge: true }
               );
             })
-            .catch(() => {});
+            .catch((rollbackErr) => {
+              console.error('Receipt scan quota rollback failed:', {
+                uid,
+                orgId: targetOrgId || null,
+                monthKey,
+                error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+              });
+            });
         }
         if (isFirestorePermissionDeniedError(error)) {
           adminDbReady = false;
@@ -3381,7 +3355,17 @@ Return JSON matching the schema with:
             if (isOwner) {
               await adminDb.recursiveDelete(orgRef);
             } else {
-              await orgRef.collection('members').doc(uid).delete().catch(() => {});
+              await orgRef
+                .collection('members')
+                .doc(uid)
+                .delete()
+                .catch((cleanupErr) => {
+                  console.warn('Org member cleanup warning during account deletion:', {
+                    orgId: orgRef.id,
+                    uid,
+                    error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+                  });
+                });
             }
           })
         );
@@ -3438,6 +3422,10 @@ Return JSON matching the schema with:
     }
     next(err);
   });
+
+  if (options?.apiOnly) {
+    return { app, httpServer: null };
+  }
 
   const httpServer = http.createServer(app);
 
@@ -3504,16 +3492,30 @@ Return JSON matching the schema with:
     });
   }
 
-  return httpServer;
+  return { app, httpServer };
 }
 
-createApp()
-  .then((httpServer) => {
-    httpServer.listen(PORT, '0.0.0.0', () => {
-      console.log(`Raseedi server running at http://localhost:${PORT}`);
+let serverlessAppPromise: Promise<express.Express> | null = null;
+
+export function getServerlessApp(): Promise<express.Express> {
+  if (!serverlessAppPromise) {
+    serverlessAppPromise = createExpressApp({ apiOnly: true }).then(({ app }) => app);
+  }
+  return serverlessAppPromise;
+}
+
+const IS_SERVERLESS_RUNTIME =
+  Boolean(process.env.VERCEL) || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME);
+
+if (!IS_SERVERLESS_RUNTIME) {
+  createExpressApp()
+    .then(({ httpServer }) => {
+      httpServer?.listen(PORT, '0.0.0.0', () => {
+        console.log(`Raseedi server running at http://localhost:${PORT}`);
+      });
+    })
+    .catch((err) => {
+      console.error('Failed to start server:', err);
+      process.exit(1);
     });
-  })
-  .catch((err) => {
-    console.error('Failed to start server:', err);
-    process.exit(1);
-  });
+}

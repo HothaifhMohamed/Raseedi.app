@@ -351,7 +351,9 @@ export function calculateIncomeExpenseNet(
     if (!doesTransactionAffectAccounting(t)) continue;
 
     const rateOverride =
-      useTransactionRate && t.exchangeRate ? { [t.currency]: t.exchangeRate } : customRates;
+      useTransactionRate && t.exchangeRate
+        ? { ...(customRates || {}), [t.currency]: t.exchangeRate }
+        : customRates;
     const effectiveAmount = getEffectiveTransactionAmount(t);
     const amountInMain = convertCurrency(effectiveAmount, t.currency, mainCurrency, rateOverride);
 
@@ -397,7 +399,7 @@ export function groupTransactionsByDay(
 
   return sortedDates.map((date) => {
     const list = groupsMap.get(date)!;
-    list.sort((a, b) => b.time.localeCompare(a.time) || b.createdAt - a.createdAt);
+    list.sort((a, b) => (b.time || '').localeCompare(a.time || '') || (b.createdAt || 0) - (a.createdAt || 0));
 
     let incomeTotal = 0;
     let expenseTotal = 0;

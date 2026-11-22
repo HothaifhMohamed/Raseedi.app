@@ -23,11 +23,6 @@ import { BottomNav } from './components/BottomNav';
 import { SplashScreen } from './components/SplashScreen';
 import { OnboardingModal } from './components/OnboardingModal';
 import { HomeDashboard } from './components/home/HomeDashboard';
-import { TransactionsTab } from './components/home/TransactionsTab';
-import { WalletsPage } from './components/wallets/WalletsPage';
-import { WalletDetailPage } from './components/wallets/WalletDetailPage';
-import { BudgetPage } from './components/budget/BudgetPage';
-import { MoreMenu } from './components/more/MoreMenu';
 import { UndoSnackbar } from './components/common/UndoSnackbar';
 import { ToastNotification } from './components/common/ToastNotification';
 import { PinLockModal } from './components/common/PinLockModal';
@@ -47,6 +42,21 @@ import {
 import { AuthGateScreen } from './components/auth/AuthGateScreen';
 import { LogoutConfirmationModal } from './components/more/LogoutConfirmationModal';
 
+const TransactionsTab = React.lazy(() =>
+  import('./components/home/TransactionsTab').then((m) => ({ default: m.TransactionsTab }))
+);
+const WalletsPage = React.lazy(() =>
+  import('./components/wallets/WalletsPage').then((m) => ({ default: m.WalletsPage }))
+);
+const WalletDetailPage = React.lazy(() =>
+  import('./components/wallets/WalletDetailPage').then((m) => ({ default: m.WalletDetailPage }))
+);
+const BudgetPage = React.lazy(() =>
+  import('./components/budget/BudgetPage').then((m) => ({ default: m.BudgetPage }))
+);
+const MoreMenu = React.lazy(() =>
+  import('./components/more/MoreMenu').then((m) => ({ default: m.MoreMenu }))
+);
 const StatisticsTab = React.lazy(() =>
   import('./components/home/StatisticsTab').then((m) => ({ default: m.StatisticsTab }))
 );
@@ -312,7 +322,11 @@ const MainLayout: React.FC = () => {
                     </span>
                   </div>
 
-                  {homeTab === 'transactions' && <TransactionsTab />}
+                  {homeTab === 'transactions' && (
+                    <React.Suspense fallback={<InlineSectionSkeleton />}>
+                      <TransactionsTab />
+                    </React.Suspense>
+                  )}
                   {homeTab === 'statistics' && (
                     <React.Suspense fallback={<InlineSectionSkeleton />}>
                       <StatisticsTab />
@@ -329,19 +343,29 @@ const MainLayout: React.FC = () => {
           )}
 
           {/* BUDGET VIEW */}
-          {activeNav === 'budget' && <BudgetPage />}
+          {activeNav === 'budget' && (
+            <React.Suspense fallback={<InlineSectionSkeleton />}>
+              <BudgetPage />
+            </React.Suspense>
+          )}
 
           {/* WALLETS VIEW (If a wallet is selected and unlocked, render WalletDetailPage full page) */}
           {activeNav === 'wallets' && (
-            activeWalletId && !activeWalletIsLocked ? (
-              <WalletDetailPage walletId={activeWalletId} />
-            ) : (
-              <WalletsPage />
-            )
+            <React.Suspense fallback={<InlineSectionSkeleton />}>
+              {activeWalletId && !activeWalletIsLocked ? (
+                <WalletDetailPage walletId={activeWalletId} />
+              ) : (
+                <WalletsPage />
+              )}
+            </React.Suspense>
           )}
 
           {/* MORE VIEW */}
-          {activeNav === 'more' && <MoreMenu />}
+          {activeNav === 'more' && (
+            <React.Suspense fallback={<InlineSectionSkeleton />}>
+              <MoreMenu />
+            </React.Suspense>
+          )}
         </main>
 
         {/* Global Floating Glassmorphic Bottom Navigation */}

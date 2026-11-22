@@ -40,9 +40,14 @@ service cloud.firestore {
 
     function isAdmin() {
       return isVerifiedUser()
-        && ('email' in request.auth.token)
-        && request.auth.token.email is string
-        && request.auth.token.email.trim().lower() == 'hapaypal2003@gmail.com';
+        && (
+          (('admin' in request.auth.token) && request.auth.token.admin == true)
+          || (
+            ('email' in request.auth.token)
+            && request.auth.token.email is string
+            && request.auth.token.email.trim().lower() == 'hapaypal2003@gmail.com'
+          )
+        );
     }
 
     function isValidAdminPanelConfig(data) {
@@ -56,7 +61,11 @@ service cloud.firestore {
         && data.updatedByUid == request.auth.uid
         && isValidId(data.updatedByUid)
         && data.updatedByEmail is string
-        && data.updatedByEmail.trim().lower() == 'hapaypal2003@gmail.com'
+        && data.updatedByEmail.size() > 0
+        && data.updatedByEmail.size() <= 254
+        && ('email' in request.auth.token)
+        && request.auth.token.email is string
+        && data.updatedByEmail.trim().lower() == request.auth.token.email.trim().lower()
         && data.updatedAtMs is number
         && data.updatedAtMs > 0
         && (!('createdAt' in data) || data.createdAt is timestamp)

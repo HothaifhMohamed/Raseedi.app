@@ -22,6 +22,7 @@ import {
   calculateAgingReport,
   calculateMoneyCircleSummary,
   generateNextVoucherNumber,
+  groupTransactionsByDay,
 } from './calculations';
 import { convertCurrency, roundCurrency, getCurrencyDecimals } from './currency';
 import {
@@ -788,6 +789,64 @@ test('clean onboarding defaults: DEFAULT_WALLETS contains only 1 wallet named ا
   assert.ok((demo.transactions?.length || 0) > 0);
 });
 
+test('calculateIncomeExpenseNet preserves mainCurrency customRates when useTransactionRate is enabled', () => {
+  const txs: Transaction[] = [
+    {
+      id: 'tx-eur',
+      type: 'expense',
+      amount: 100,
+      currency: 'EUR',
+      exchangeRate: 1, // 1 USD = 1 EUR override for this transaction
+      date: '2026-05-15',
+      time: '12:00',
+      categoryId: 'cat-1',
+      walletId: 'w1',
+      priority: 'essential',
+      doesNotAffectBalance: false,
+      createdAt: 1,
+      updatedAt: 1,
+    },
+  ];
+  // Main currency EGP has a custom rate of 60 EGP/USD.
+  // 100 EUR / 1 = 100 USD * 60 = 6000 EGP.
+  const result = calculateIncomeExpenseNet(txs, 'EGP', { EGP: 60 }, true);
+  assert.equal(result.expense, 6000);
+});
 
+test('groupTransactionsByDay handles missing time or createdAt without throwing', () => {
+  const txs = [
+    {
+      id: 'tx-a',
+      type: 'expense',
+      amount: 50,
+      currency: 'EGP',
+      date: '2026-05-15',
+      time: undefined as unknown as string,
+      categoryId: 'cat-1',
+      walletId: 'w1',
+      priority: 'normal',
+      doesNotAffectBalance: false,
+      createdAt: 100,
+      updatedAt: 100,
+    },
+    {
+      id: 'tx-b',
+      type: 'expense',
+      amount: 75,
+      currency: 'EGP',
+      date: '2026-05-15',
+      time: '09:30',
+      categoryId: 'cat-1',
+      walletId: 'w1',
+      priority: 'normal',
+      doesNotAffectBalance: false,
+      createdAt: 200,
+      updatedAt: 200,
+    },
+  ] as Transaction[];
 
-
+  const groups = groupTransactionsByDay(txs, 'EGP');
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].transactions[0].id, 'tx-b');
+  assert.equal(groups[0].transactions[1].id, 'tx-a');
+});

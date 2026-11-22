@@ -1,4 +1,5 @@
 import { AppSettings, ThemePreference, Transaction, TransactionType, Wallet } from '../types';
+import { formatLocalDate } from './calculations';
 import { fromMinor, toMinor } from './currency';
 import { sortTransactionsDescending } from './orgTransactionQuery';
 
@@ -283,7 +284,7 @@ export function buildWorkspaceTransactionRecord(
         : toMinor(safeAmount, safeCurrency)
     )
   );
-  const safeDate = (String(tx.date || new Date().toISOString().slice(0, 10)).trim() || '1970-01-01').slice(
+  const safeDate = (String(tx.date || formatLocalDate()).trim() || '1970-01-01').slice(
     0,
     16
   );

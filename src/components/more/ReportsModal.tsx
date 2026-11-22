@@ -7,7 +7,7 @@ import {
   getTransactionsInDateRange,
 } from '../../services/calculations';
 import { convertCurrency } from '../../services/currency';
-import { escapeCsvCell } from '../../services/csvImport';
+import { escapeCsvCell } from '../../services/csvEscape';
 import { MoneyText } from '../common/MoneyText';
 import { HairlineFigure } from '../common/HairlineVisuals';
 import { BrandLogo } from '../common/BrandLogo';

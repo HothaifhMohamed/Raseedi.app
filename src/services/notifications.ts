@@ -2,7 +2,7 @@
  * Real Notification Builder & Browser Notification API Dispatcher
  */
 import { AppNotificationItem, AppSettings, Budget, Debt, Transaction } from '../types';
-import { getActiveBudgetAlerts, getUpcomingDebtReminders } from './calculations';
+import { formatLocalDate, getActiveBudgetAlerts, getUpcomingDebtReminders } from './calculations';
 import type { OrgSubscriptionState } from './entitlements';
 import type { UserSubscriptionSummary } from './subscriptionHelpers';
 
@@ -26,7 +26,7 @@ export function dispatchBrowserNotification(title: string, body: string, tag?: s
     return false;
   }
   try {
-    const todayKey = new Date().toISOString().slice(0, 10);
+    const todayKey = formatLocalDate(new Date());
     const dedupeKey = tag ? `raseedi_notif_sent:${todayKey}:${tag}` : null;
     if (dedupeKey && typeof window.sessionStorage !== 'undefined') {
       if (window.sessionStorage.getItem(dedupeKey)) return false;
@@ -243,9 +243,7 @@ export function buildAppNotifications(params: {
 
   // 4. Daily reminder if enabled and no transactions logged today
   if (settings.notificationsEnabled) {
-    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
-      now.getDate()
-    ).padStart(2, '0')}`;
+    const todayStr = formatLocalDate(now);
     const hasTodayTx = transactions.some((t) => t.date === todayStr);
     if (!hasTodayTx) {
       items.push({

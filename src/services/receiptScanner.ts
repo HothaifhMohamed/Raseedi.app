@@ -132,6 +132,7 @@ export async function scanReceiptWithAI(
       body: JSON.stringify({
         imageBase64,
         mimeType,
+        clientLocalDate: formatLocalDate(new Date()),
         ...(orgId ? { orgId } : {}),
         categories: categories
           .filter((c) => !c.isHidden)

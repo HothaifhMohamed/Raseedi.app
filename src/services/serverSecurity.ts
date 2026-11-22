@@ -60,12 +60,52 @@ export function sanitizeScanCategories(raw: unknown): CategorySummary[] {
   return out;
 }
 
-export function validateScanReceiptPayload(body: unknown):
+export function validateClientLocalDate(
+  raw: unknown,
+  serverNow: Date = new Date()
+): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+
+  const candidateUtc = Date.UTC(year, month - 1, day);
+  const check = new Date(candidateUtc);
+  if (
+    check.getUTCFullYear() !== year ||
+    check.getUTCMonth() !== month - 1 ||
+    check.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  // Real timezones span UTC-12 to UTC+14 (<= 1 calendar day from server UTC); allow +/- 2 days tolerance.
+  const serverTodayUtc = Date.UTC(
+    serverNow.getUTCFullYear(),
+    serverNow.getUTCMonth(),
+    serverNow.getUTCDate()
+  );
+  const diffDays = Math.abs(candidateUtc - serverTodayUtc) / DAY_MS;
+  if (diffDays > 2) return null;
+
+  return trimmed;
+}
+
+export function validateScanReceiptPayload(
+  body: unknown,
+  serverNow: Date = new Date()
+):
   | {
       ok: true;
       cleanBase64: string;
       mimeType: string;
       categories: CategorySummary[];
+      clientLocalDate: string | null;
     }
   | {
       ok: false;
@@ -77,8 +117,9 @@ export function validateScanReceiptPayload(body: unknown):
     imageBase64?: unknown;
     mimeType?: unknown;
     categories?: unknown;
+    clientLocalDate?: unknown;
   };
-  const { imageBase64, mimeType, categories } = payload;
+  const { imageBase64, mimeType, categories, clientLocalDate } = payload;
 
   if (typeof mimeType !== 'string' || !ALLOWED_SCAN_MIME_TYPES.has(mimeType)) {
     return {
@@ -124,6 +165,7 @@ export function validateScanReceiptPayload(body: unknown):
     cleanBase64,
     mimeType,
     categories: sanitizeScanCategories(categories),
+    clientLocalDate: validateClientLocalDate(clientLocalDate, serverNow),
   };
 }
 
@@ -512,10 +554,148 @@ export function isSafeWebhookId(value: unknown): value is string {
   return typeof value === 'string' && SAFE_WEBHOOK_ID_REGEX.test(value);
 }
 
-export function resolveAdminSessionSecret(envSecret?: string): Buffer {
+export function isProductionRuntime(
+  env: Record<string, string | undefined> = process.env
+): boolean {
+  return env.NODE_ENV === 'production' || env.VERCEL_ENV === 'production';
+}
+
+export function isPreviewIframeRuntime(
+  env: Record<string, string | undefined> = process.env
+): boolean {
+  if (env.ALLOW_PREVIEW_IFRAME === 'true') return true;
+  if (!isProductionRuntime(env)) return true;
+  const appUrl = String(env.APP_URL || '').trim();
+  return /ais-(dev|pre)-/i.test(appUrl);
+}
+
+/**
+ * Resolves the Express `trust proxy` configuration safely per hosting platform.
+ * Prevents spoofed `X-Forwarded-For` headers when not behind a managed reverse proxy.
+ */
+export function resolveTrustProxySetting(
+  env: Record<string, string | undefined> = process.env
+): boolean | number | string {
+  const explicit = typeof env.TRUST_PROXY === 'string' ? env.TRUST_PROXY.trim() : '';
+  if (explicit) {
+    const lower = explicit.toLowerCase();
+    if (lower === 'false' || lower === '0' || lower === 'off') return false;
+    if (/^\d+$/.test(lower)) {
+      const hops = Number(lower);
+      return Math.max(1, Math.min(10, hops));
+    }
+    if (lower === 'loopback' || lower === 'linklocal' || lower === 'uniquelocal') {
+      return lower;
+    }
+    return explicit;
+  }
+
+  // Known single-hop managed reverse proxies (Vercel, Cloud Run, Render, Fly.io)
+  if (
+    env.VERCEL === '1' ||
+    Boolean(env.VERCEL_ENV) ||
+    Boolean(env.K_SERVICE) ||
+    Boolean(env.RENDER) ||
+    Boolean(env.FLY_APP_NAME)
+  ) {
+    return 1;
+  }
+
+  // Default for direct Node/localhost deployments: trust loopback only
+  return 'loopback';
+}
+
+export function buildCspDirectives(options: {
+  isProduction: boolean;
+  allowPreviewFraming: boolean;
+}): Record<string, string[]> {
+  const { isProduction, allowPreviewFraming } = options;
+
+  const connectSrc = [
+    "'self'",
+    'https://*.googleapis.com',
+    'https://*.firebaseio.com',
+    'https://*.firebaseapp.com',
+    'https://*.firebasestorage.app',
+    'https://*.gstatic.com',
+    'https://apis.google.com',
+    'https://accounts.google.com',
+    'https://open.er-api.com',
+    'https://cdn.jsdelivr.net',
+    'https://api.frankfurter.dev',
+    'https://pagead2.googlesyndication.com',
+    'https://*.googlesyndication.com',
+    'https://googleads.g.doubleclick.net',
+    'https://*.doubleclick.net',
+    'https://*.adtrafficquality.google',
+    'wss:',
+  ];
+
+  if (!isProduction) {
+    connectSrc.push('ws:');
+  }
+
+  const frameAncestors = allowPreviewFraming
+    ? [
+        "'self'",
+        'https://aistudio.google.com',
+        'https://*.google.com',
+        'https://*.googleusercontent.com',
+        'https://*.run.app',
+      ]
+    : ["'self'"];
+
+  return {
+    defaultSrc: ["'self'"],
+    scriptSrc: [
+      "'self'",
+      "'unsafe-inline'",
+      'https://apis.google.com',
+      'https://accounts.google.com',
+      'https://www.gstatic.com',
+      'https://www.google.com',
+      'https://*.firebaseapp.com',
+      'https://pagead2.googlesyndication.com',
+      'https://*.googlesyndication.com',
+      'https://googleads.g.doubleclick.net',
+      'https://*.adtrafficquality.google',
+      'https://adservice.google.com',
+    ],
+    styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+    fontSrc: ["'self'", 'data:', 'https://fonts.gstatic.com'],
+    imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
+    connectSrc,
+    frameSrc: [
+      "'self'",
+      'https://*.firebaseapp.com',
+      'https://accounts.google.com',
+      'https://www.google.com',
+      'https://googleads.g.doubleclick.net',
+      'https://tpc.googlesyndication.com',
+      'https://*.googlesyndication.com',
+      'https://*.adtrafficquality.google',
+    ],
+    frameAncestors,
+    workerSrc: ["'self'", 'blob:'],
+    manifestSrc: ["'self'"],
+    objectSrc: ["'none'"],
+    baseUri: ["'self'"],
+    formAction: ["'self'"],
+  };
+}
+
+export function resolveAdminSessionSecret(
+  envSecret?: string,
+  options?: { isProduction?: boolean }
+): Buffer {
   const trimmed = typeof envSecret === 'string' ? envSecret.trim() : '';
   if (trimmed.length >= 32) {
     return Buffer.from(trimmed, 'utf8');
+  }
+  if (options?.isProduction) {
+    throw new Error(
+      'ADMIN_SESSION_SECRET is required in production and must be at least 32 characters long. Configure ADMIN_SESSION_SECRET in your deployment environment variables.'
+    );
   }
   return crypto.randomBytes(32);
 }

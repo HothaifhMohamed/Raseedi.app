@@ -48,6 +48,7 @@ import {
   ImportProgressState,
   buildImportProgressState,
   formatImportProgressCounter,
+  parseJsonNonBlocking,
   yieldToMainThread,
 } from '../../services/importProgress';
 import { formatLocalDate } from '../../services/calculations';
@@ -408,8 +409,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
       })
     );
     try {
-      await yieldToMainThread();
-      const parsed = JSON.parse(plainText);
+      const parsed = await parseJsonNonBlocking<any>(plainText);
       const rawTransactions = Array.isArray(parsed?.transactions) ? parsed.transactions : [];
       const txTotal = rawTransactions.length;
 

@@ -32,8 +32,6 @@ import {
   Wand2,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { MerchantRulesModal } from './MerchantRulesModal';
-import { WhatsNewModal } from './WhatsNewModal';
 import { sanitizeMerchantRules } from '../../services/merchantRules';
 import { AdBanner } from '../common/AdBanner';
 import { SUPPORT_CONFIG } from '../../constants/support';
@@ -69,6 +67,12 @@ const SupportAndLegalModal = React.lazy(() =>
 );
 const MoneyCirclesModal = React.lazy(() =>
   import('./MoneyCirclesModal').then((m) => ({ default: m.MoneyCirclesModal }))
+);
+const MerchantRulesModal = React.lazy(() =>
+  import('./MerchantRulesModal').then((m) => ({ default: m.MerchantRulesModal }))
+);
+const WhatsNewModal = React.lazy(() =>
+  import('./WhatsNewModal').then((m) => ({ default: m.WhatsNewModal }))
 );
 
 export const MoreMenu: React.FC = () => {
@@ -1252,16 +1256,24 @@ export const MoreMenu: React.FC = () => {
         </div>
       )}
 
-      <MerchantRulesModal
-        isOpen={merchantRulesOpen}
-        onClose={() => setMerchantRulesOpen(false)}
-      />
+      {merchantRulesOpen && (
+        <React.Suspense fallback={<ModalOverlaySkeleton />}>
+          <MerchantRulesModal
+            isOpen={merchantRulesOpen}
+            onClose={() => setMerchantRulesOpen(false)}
+          />
+        </React.Suspense>
+      )}
 
-      <WhatsNewModal
-        isOpen={whatsNewOpen}
-        onClose={() => setWhatsNewOpen(false)}
-        isRTL={isRTL}
-      />
+      {whatsNewOpen && (
+        <React.Suspense fallback={<ModalOverlaySkeleton />}>
+          <WhatsNewModal
+            isOpen={whatsNewOpen}
+            onClose={() => setWhatsNewOpen(false)}
+            isRTL={isRTL}
+          />
+        </React.Suspense>
+      )}
     </div>
   );
 };

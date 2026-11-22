@@ -824,7 +824,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       setErrorMsg(t('validationCategoryRequired'));
       return;
     }
-    if (type === 'transfer' && walletId === toWalletId) {
+    if (type === 'transfer' && (!toWalletId || walletId === toWalletId)) {
       setErrorMsg(t('validationTransferWalletsDifferent'));
       return;
     }

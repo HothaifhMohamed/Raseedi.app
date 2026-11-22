@@ -136,13 +136,17 @@ describe('Firestore Security Rules Static Contract (users/{userId} & Admin Isola
     assert.ok(usersBlock.includes('isAdmin()'), 'admin branch preserved for subscription management');
   });
 
-  test('isAdmin remains locked exclusively to verified hapaypal2003@gmail.com and legacy code collections remain closed', () => {
+  test('isAdmin supports verified Custom Claim admin==true and bootstrap primary admin email while legacy code collections remain closed', () => {
     const adminFnMatch = rulesSource.match(/function isAdmin\(\) \{[\s\S]*?\n    \}/);
     assert.ok(adminFnMatch, 'isAdmin helper must exist');
     assert.ok(adminFnMatch[0].includes('isVerifiedUser()'), 'isAdmin requires verified email');
     assert.ok(
+      adminFnMatch[0].includes('request.auth.token.admin == true'),
+      'isAdmin supports verified Firebase Auth Custom Claim admin == true'
+    );
+    assert.ok(
       adminFnMatch[0].includes("== 'hapaypal2003@gmail.com'"),
-      'isAdmin locked to primary admin email'
+      'isAdmin retains bootstrap primary admin email fallback'
     );
     assert.ok(
       /match \/licenseCodes\/\{codeHash\}\s*\{\s*allow read, write: if false;\s*\}/.test(rulesSource),

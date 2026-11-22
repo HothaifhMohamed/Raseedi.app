@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  convertCurrency,
   fetchLiveExchangeRatesDetailed,
   getCachedExchangeRatesMeta,
   getEffectiveCurrencyRate,
@@ -9,6 +10,7 @@ import {
   parseExchangeRateApiPayload,
   parseFawazCurrencyApiPayload,
   parseFrankfurterApiPayload,
+  roundCurrency,
   saveLiveExchangeRatesCache,
   setLiveExchangeRatesRuntime,
 } from './currency';
@@ -178,3 +180,23 @@ test('fetchLiveExchangeRatesDetailed reports fallback_cached without crashing wh
   assert.equal(getLiveExchangeRatesRuntime()?.EGP, 49.6);
   assert.ok(store.has(LIVE_RATES_STORAGE_KEY));
 });
+
+test('currency normalization, invalid custom rate guard, and symmetric negative roundCurrency', () => {
+  setLiveExchangeRatesRuntime(null);
+
+  // Lowercase & padded currency codes normalize seamlessly
+  assert.equal(convertCurrency(100, ' egp ', 'EGP'), 100);
+  assert.equal(convertCurrency(10, 'usd', 'egp', { USD: 1, EGP: 50 }), 500);
+
+  // Non-positive or NaN custom rates fall back safely instead of producing NaN/Infinity
+  const safeRate = getEffectiveCurrencyRate('EGP', { EGP: 0 });
+  assert.ok(Number.isFinite(safeRate) && safeRate > 0);
+  const safeConverted = convertCurrency(100, 'USD', 'EGP', { USD: -2, EGP: Number.NaN });
+  assert.ok(Number.isFinite(safeConverted) && safeConverted > 0);
+
+  // Symmetric rounding for negative amounts
+  assert.equal(roundCurrency(1.005, 2), 1.01);
+  assert.equal(roundCurrency(-1.005, 2), -1.01);
+  assert.equal(roundCurrency(-0.0001, 2), 0);
+});
+
