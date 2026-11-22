@@ -1,8 +1,17 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Crown, Sparkles } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { hasAdSenseConsent, subscribeAdConsentChanges } from './AdConsentBanner';
+import { useOrg } from '../../context/OrgContext';
+import {
+  AdConsentChoice,
+  getAdConsentChoice,
+  subscribeAdConsentChanges,
+} from './AdConsentBanner';
 import { shouldShowAds } from '../../services/subscriptionHelpers';
+import {
+  mountAdsterraNativeBanner,
+  teardownAdsterraNativeBanner,
+} from '../../services/adsterra';
 
 export interface AdBannerProps {
   variant?: 'banner' | 'native-card';
@@ -14,15 +23,8 @@ export interface AdBannerProps {
   className?: string;
 }
 
-declare global {
-  interface Window {
-    adsbygoogle?: Array<Record<string, unknown>>;
-  }
-}
-
 export const AdBanner: React.FC<AdBannerProps> = ({
   variant = 'banner',
-  adSlot,
   fallbackTitleAr,
   fallbackTitleEn,
   fallbackBodyAr,
@@ -30,25 +32,33 @@ export const AdBanner: React.FC<AdBannerProps> = ({
   className = '',
 }) => {
   const { isPro, subscriptionSummary, setIsUpgradeModalOpen, isRTL } = useApp();
-  const showAds = shouldShowAds(subscriptionSummary) && !isPro;
-  const adRef = useRef<HTMLModElement | null>(null);
+  const { activeOrgSubscriptionState } = useOrg();
+
+  const showAds = shouldShowAds(subscriptionSummary, {
+    isProFlag: isPro,
+    activeOrgSubscriptionState,
+  });
+
+  const slotHostRef = useRef<HTMLDivElement | null>(null);
   const [isOnline, setIsOnline] = useState<boolean>(
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
   const [adLoadFailed, setAdLoadFailed] = useState(false);
-  const [hasConsent, setHasConsent] = useState<boolean>(() => hasAdSenseConsent());
+  const [consentChoice, setConsentChoice] = useState<AdConsentChoice>(() => getAdConsentChoice());
 
-  const adSenseClient = import.meta.env.VITE_ADSENSE_CLIENT_ID?.trim() || '';
-  const resolvedSlot = adSlot?.trim() || import.meta.env.VITE_ADSENSE_SLOT_ID?.trim() || '0000000000';
-  const canTryAdSense = Boolean(adSenseClient) && isOnline && !adLoadFailed && hasConsent;
+  const hasConsent = consentChoice === 'granted';
+  const canRenderAdsterra = showAds && hasConsent && isOnline && !adLoadFailed;
 
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
+    const handleOnline = () => {
+      setIsOnline(true);
+      setAdLoadFailed(false);
+    };
     const handleOffline = () => setIsOnline(false);
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
     const unsubscribeConsent = subscribeAdConsentChanges(() => {
-      setHasConsent(hasAdSenseConsent());
+      setConsentChoice(getAdConsentChoice());
     });
     return () => {
       window.removeEventListener('online', handleOnline);
@@ -57,31 +67,24 @@ export const AdBanner: React.FC<AdBannerProps> = ({
     };
   }, []);
 
+  // Ensure zero lingering ad scripts or DOM when user is PRO/Business or rejects consent
   useEffect(() => {
-    if (!showAds || !canTryAdSense) return;
-
-    const scriptId = 'raseedi-adsense-script';
-    const existingScript =
-      document.getElementById(scriptId) ||
-      document.querySelector('script[src*="pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"]');
-    if (!existingScript) {
-      const script = document.createElement('script');
-      script.id = scriptId;
-      script.async = true;
-      script.crossOrigin = 'anonymous';
-      script.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(adSenseClient)}`;
-      script.onerror = () => setAdLoadFailed(true);
-      document.head.appendChild(script);
+    if (!showAds || consentChoice === 'denied') {
+      teardownAdsterraNativeBanner();
     }
+  }, [showAds, consentChoice]);
 
-    try {
-      (window.adsbygoogle = window.adsbygoogle || []).push({});
-    } catch {
-      setAdLoadFailed(true);
-    }
-  }, [showAds, canTryAdSense, adSenseClient]);
+  // Mount singleton Adsterra Native Banner container & inject script strictly once
+  useEffect(() => {
+    if (!canRenderAdsterra || !slotHostRef.current) return;
+    return mountAdsterraNativeBanner(slotHostRef.current, {
+      onError: () => setAdLoadFailed(true),
+    });
+  }, [canRenderAdsterra]);
 
-  if (!showAds || !adSenseClient) return null;
+  if (!showAds || !hasConsent) {
+    return null;
+  }
 
   const titleText = isRTL
     ? fallbackTitleAr || 'رَصِيدِي برو — تحكم مالي أذكى بدون إعلانات'
@@ -93,14 +96,17 @@ export const AdBanner: React.FC<AdBannerProps> = ({
           افتح ماسح الفواتير <bdi dir="ltr">Gemini AI</bdi>، المرفقات غير المحدودة، وتقارير <bdi dir="ltr">PDF</bdi> الاحترافية.
         </>
       )
-    : fallbackBodyEn || 'Unlock Gemini AI receipt scanning, unlimited photo attachments, and Pro PDF reports.';
+    : fallbackBodyEn ||
+      'Unlock Gemini AI receipt scanning, unlimited photo attachments, and Pro PDF reports.';
 
   if (variant === 'native-card') {
     return (
-      <div
-        className={`bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-3 space-y-2 transition-colors max-w-full overflow-hidden ${className}`}
+      <aside
+        aria-label={isRTL ? 'إعلان' : 'Advertisement'}
+        className={`shrink-0 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-3 space-y-2 transition-colors max-w-full overflow-hidden ${className}`}
         dir={isRTL ? 'rtl' : 'ltr'}
         data-ad-variant="native-card"
+        data-ad-network="adsterra"
       >
         <div className="flex items-center justify-between gap-2">
           <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[var(--color-bg)] border border-[var(--color-line)] text-[var(--color-muted)]">
@@ -111,30 +117,23 @@ export const AdBanner: React.FC<AdBannerProps> = ({
             onClick={() => setIsUpgradeModalOpen(true)}
             className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 transition-colors min-h-[32px]"
           >
-            <Crown className="w-3 h-3 shrink-0" />
+            <Crown className="w-3 h-3 shrink-0 text-[var(--color-gold)]" />
             <span>{isRTL ? 'إزالة الإعلانات' : 'Remove Ads'}</span>
           </button>
         </div>
 
-        {canTryAdSense ? (
-          <div className="overflow-hidden max-w-full rounded-lg min-h-[64px]">
-            <ins
-              ref={adRef}
-              className="adsbygoogle"
-              style={{ display: 'block', maxWidth: '100%', overflow: 'hidden' }}
-              data-ad-client={adSenseClient}
-              data-ad-slot={resolvedSlot}
-              data-ad-format="fluid"
-              data-full-width-responsive="true"
-            />
-          </div>
+        {canRenderAdsterra ? (
+          <div
+            ref={slotHostRef}
+            className="overflow-hidden max-w-full rounded-lg min-h-[72px] bg-[var(--color-surface-subtle)]/50"
+          />
         ) : (
           <button
             type="button"
             onClick={() => setIsUpgradeModalOpen(true)}
             className="w-full text-start flex items-start gap-2.5 group"
           >
-            <Sparkles className="w-4 h-4 text-[var(--color-accent)] shrink-0 mt-0.5" />
+            <Sparkles className="w-4 h-4 text-[var(--color-gold)] shrink-0 mt-0.5" />
             <div className="min-w-0 flex-1 space-y-0.5">
               <div className="text-xs font-bold text-[var(--color-ink)] group-hover:text-[var(--color-accent)] transition-colors">
                 {titleText}
@@ -145,17 +144,19 @@ export const AdBanner: React.FC<AdBannerProps> = ({
             </div>
           </button>
         )}
-      </div>
+      </aside>
     );
   }
 
   return (
-    <div
-      className={`bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl px-3 py-2.5 transition-colors max-w-full overflow-hidden ${className}`}
+    <aside
+      aria-label={isRTL ? 'إعلان' : 'Advertisement'}
+      className={`shrink-0 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl px-3 py-2.5 transition-colors max-w-full overflow-hidden ${className}`}
       dir={isRTL ? 'rtl' : 'ltr'}
       data-ad-variant="banner"
+      data-ad-network="adsterra"
     >
-      {canTryAdSense ? (
+      {canRenderAdsterra ? (
         <div className="space-y-1.5 max-w-full overflow-hidden">
           <div className="flex items-center justify-between gap-2">
             <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[var(--color-bg)] border border-[var(--color-line)] text-[var(--color-muted)]">
@@ -164,23 +165,16 @@ export const AdBanner: React.FC<AdBannerProps> = ({
             <button
               type="button"
               onClick={() => setIsUpgradeModalOpen(true)}
-              className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--color-accent)] hover:underline"
+              className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--color-accent)] hover:underline min-h-[28px]"
             >
-              <Crown className="w-3 h-3" />
+              <Crown className="w-3 h-3 shrink-0 text-[var(--color-gold)]" />
               <span>{isRTL ? 'إزالة الإعلانات' : 'Remove Ads'}</span>
             </button>
           </div>
-          <div className="overflow-hidden max-w-full">
-            <ins
-              ref={adRef}
-              className="adsbygoogle"
-              style={{ display: 'block', maxWidth: '100%', overflow: 'hidden' }}
-              data-ad-client={adSenseClient}
-              data-ad-slot={resolvedSlot}
-              data-ad-format="horizontal"
-              data-full-width-responsive="true"
-            />
-          </div>
+          <div
+            ref={slotHostRef}
+            className="overflow-hidden max-w-full rounded-lg min-h-[64px] bg-[var(--color-surface-subtle)]/50"
+          />
         </div>
       ) : (
         <div className="flex items-center justify-between gap-2.5">
@@ -204,11 +198,12 @@ export const AdBanner: React.FC<AdBannerProps> = ({
             onClick={() => setIsUpgradeModalOpen(true)}
             className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[var(--color-bg)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-[11px] font-semibold text-[var(--color-accent)] transition-colors min-h-[34px]"
           >
-            <Crown className="w-3 h-3 shrink-0" />
+            <Crown className="w-3 h-3 shrink-0 text-[var(--color-gold)]" />
             <span>{isRTL ? 'إزالة الإعلانات' : 'Remove Ads'}</span>
           </button>
         </div>
       )}
-    </div>
+    </aside>
   );
 };
+

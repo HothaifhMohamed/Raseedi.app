@@ -20,6 +20,10 @@
         {
           "key": "Referrer-Policy",
           "value": "strict-origin-when-cross-origin"
+        },
+        {
+          "key": "Content-Security-Policy",
+          "value": "default-src 'self'; script-src 'self' 'unsafe-inline' https://apis.google.com https://accounts.google.com https://www.gstatic.com https://www.google.com https://*.firebaseapp.com https://pagead2.googlesyndication.com https://*.googlesyndication.com https://googleads.g.doubleclick.net https://*.adtrafficquality.google https://adservice.google.com https://bauval.org https://*.bauval.org https://*.effectivegatecpm.com https://*.highperformanceformat.com https://*.adsterratools.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https://bauval.org https:; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://*.firebaseapp.com https://*.firebasestorage.app https://*.gstatic.com https://apis.google.com https://accounts.google.com https://open.er-api.com https://cdn.jsdelivr.net https://api.frankfurter.dev https://pagead2.googlesyndication.com https://*.googlesyndication.com https://googleads.g.doubleclick.net https://*.doubleclick.net https://*.adtrafficquality.google https://bauval.org https://*.bauval.org https://*.effectivegatecpm.com https://*.highperformanceformat.com https://*.adsterratools.com wss:; frame-src 'self' https://*.firebaseapp.com https://accounts.google.com https://www.google.com https://googleads.g.doubleclick.net https://tpc.googlesyndication.com https://*.googlesyndication.com https://*.adtrafficquality.google https://bauval.org https://*.bauval.org https://*.effectivegatecpm.com https://*.highperformanceformat.com https://*.adsterratools.com; frame-ancestors 'self'; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
         }
       ]
     }

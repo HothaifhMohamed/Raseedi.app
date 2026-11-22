@@ -299,41 +299,37 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
                 <div className="flex items-center gap-2">
                   <Cookie className="w-4 h-4 text-[var(--color-accent)] shrink-0" />
                   <h3 className="font-bold text-[var(--color-ink)] text-xs">
-                    {isRTL ? (
-                      <>
-                        2. ملفات تعريف الارتباط وإعلانات <bdi dir="ltr">Google AdSense</bdi>
-                      </>
-                    ) : (
-                      '2. Cookies & Google AdSense Advertising'
-                    )}
+                    {isRTL
+                      ? '2. ملفات تعريف الارتباط وإعلانات النسخة المجانية'
+                      : '2. Cookies & Free-Tier Advertising'}
                   </h3>
                 </div>
                 {isRTL ? (
                   <div className="space-y-1.5 text-[var(--color-muted)]">
                     <p>
-                      تعرض النسخة المجانية من التطبيق إعلانات غير مزعجة عبر <bdi dir="ltr">Google AdSense</bdi> لدعم استمرارية الخدمة مجاناً.
+                      تعرض النسخة المجانية من التطبيق إعلانات مدمجة محدودة وهادئة لدعم استمرارية الخدمة مجاناً.
                     </p>
                     <p>
-                      تستخدم <bdi dir="ltr">Google</bdi> وشركاؤها ملفات تعريف الارتباط (<bdi dir="ltr">Cookies</bdi>) لعرض إعلانات ملاءمة بناءً على زياراتك السابقة، مع احترام موافقة الخصوصية للمستخدمين في المنطقة الاقتصادية الأوروبية والمملكة المتحدة. يمكنك تعديل الإعلانات عبر <bdi dir="ltr">adssettings.google.com</bdi>.
+                      نستخدم ملفات تعريف الارتباط (<bdi dir="ltr">Cookies</bdi>) لعرض إعلانات مدمجة محدودة عبر شركاء الإعلان (مثل <bdi dir="ltr">Adsterra</bdi>) فقط بعد موافقتك عبر شريط الخصوصية، دون مشاركة أي بيانات مالية من دفاترك مع المعلنين.
                     </p>
                     <p>
-                      عند الاشتراك في باقة <bdi dir="ltr">PRO</bdi>، تُزال جميع الإعلانات وسكربتات <bdi dir="ltr">AdSense</bdi> نهائياً. {isPro ? '(حالتك الحالية: مشترك PRO — الإعلانات معطلة بالكامل).' : ''}
+                      عند الاشتراك في باقة <bdi dir="ltr">PRO</bdi> أو <bdi dir="ltr">Business</bdi>، تُزال جميع الإعلانات وسكربتات الإعلان نهائياً. {isPro ? '(حالتك الحالية: اشتراك نشط — الإعلانات معطلة بالكامل).' : ''}
                     </p>
                   </div>
                 ) : (
                   <div className="space-y-1.5 text-[var(--color-muted)]">
                     <p>
-                      The free tier of Raseedi displays unobtrusive advertisements served by <strong>Google AdSense</strong> to help keep core features free.
+                      The free tier of Raseedi displays limited, unobtrusive native advertisements (such as <strong>Adsterra</strong>) only after your privacy consent to help keep core features free.
                     </p>
                     <p>
-                      Google and third-party vendors use cookies to serve ads based on consent (with a consent banner shown to EEA/UK users prior to loading AdSense scripts). You can manage ad personalization at <strong>adssettings.google.com</strong>.
+                      Your personal or organization financial ledger data is never shared with advertisers. You can update or withdraw your consent at any time below.
                     </p>
                     <p>
-                      Upgrading to <strong>Raseedi PRO</strong> permanently removes all ads and AdSense scripts. {isPro ? '(Current status: PRO active — ads disabled.)' : ''}
+                      Upgrading to <strong>Raseedi PRO</strong> or <strong>Business</strong> permanently removes all ads and ad scripts. {isPro ? '(Current status: active subscription — ads disabled.)' : ''}
                     </p>
                   </div>
                 )}
-                {!isPro && Boolean(import.meta.env.VITE_ADSENSE_CLIENT_ID?.trim()) && (
+                {!isPro && (
                   <button
                     type="button"
                     onClick={() => {

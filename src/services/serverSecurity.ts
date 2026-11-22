@@ -605,6 +605,14 @@ export function resolveTrustProxySetting(
   return 'loopback';
 }
 
+const ADSTERRA_CSP_HOSTS = [
+  'https://bauval.org',
+  'https://*.bauval.org',
+  'https://*.effectivegatecpm.com',
+  'https://*.highperformanceformat.com',
+  'https://*.adsterratools.com',
+];
+
 export function buildCspDirectives(options: {
   isProduction: boolean;
   allowPreviewFraming: boolean;
@@ -628,6 +636,7 @@ export function buildCspDirectives(options: {
     'https://googleads.g.doubleclick.net',
     'https://*.doubleclick.net',
     'https://*.adtrafficquality.google',
+    ...ADSTERRA_CSP_HOSTS,
     'wss:',
   ];
 
@@ -660,10 +669,11 @@ export function buildCspDirectives(options: {
       'https://googleads.g.doubleclick.net',
       'https://*.adtrafficquality.google',
       'https://adservice.google.com',
+      ...ADSTERRA_CSP_HOSTS,
     ],
     styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
     fontSrc: ["'self'", 'data:', 'https://fonts.gstatic.com'],
-    imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
+    imgSrc: ["'self'", 'data:', 'blob:', 'https://bauval.org', 'https:'],
     connectSrc,
     frameSrc: [
       "'self'",
@@ -674,6 +684,7 @@ export function buildCspDirectives(options: {
       'https://tpc.googlesyndication.com',
       'https://*.googlesyndication.com',
       'https://*.adtrafficquality.google',
+      ...ADSTERRA_CSP_HOSTS,
     ],
     frameAncestors,
     workerSrc: ["'self'", 'blob:'],
@@ -682,6 +693,13 @@ export function buildCspDirectives(options: {
     baseUri: ["'self'"],
     formAction: ["'self'"],
   };
+}
+
+export function serializeCspDirectives(directives: Record<string, string[]>): string {
+  const toKebab = (key: string) => key.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
+  return Object.entries(directives)
+    .map(([key, values]) => `${toKebab(key)} ${values.join(' ')}`)
+    .join('; ');
 }
 
 export function resolveAdminSessionSecret(

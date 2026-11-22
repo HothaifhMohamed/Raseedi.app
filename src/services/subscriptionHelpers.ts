@@ -226,10 +226,32 @@ export function shouldShowBusinessUpgradeUi(
   return !summary.isAdminOverride && !summary.isBusinessPro;
 }
 
+export interface ShouldShowAdsOptions {
+  isProFlag?: boolean;
+  activeOrgSubscriptionState?: {
+    planTier?: PlanTier;
+    status?: string;
+    isReadOnly?: boolean;
+  } | null;
+}
+
 export function shouldShowAds(
-  summary: Pick<UserSubscriptionSummary, 'isPro' | 'isAdminOverride'>
+  summary: Pick<UserSubscriptionSummary, 'isPro' | 'isAdminOverride'> & {
+    isBusinessPro?: boolean;
+    planTier?: PlanTier;
+  },
+  options?: ShouldShowAdsOptions
 ): boolean {
-  return !summary.isAdminOverride && !summary.isPro;
+  if (options?.isProFlag) return false;
+  if (summary.isAdminOverride || summary.isPro || summary.isBusinessPro) return false;
+  if (summary.planTier && summary.planTier !== 'free') return false;
+
+  const orgSub = options?.activeOrgSubscriptionState;
+  if (orgSub && orgSub.planTier && orgSub.planTier !== 'free' && !orgSub.isReadOnly) {
+    return false;
+  }
+
+  return true;
 }
 
 export function shouldShowUpgradeActionButtons(
