@@ -5,7 +5,6 @@ import {
   ExternalLink,
   Clock,
   CheckCircle2,
-  ShieldCheck,
   Coins,
   AlertCircle,
   WifiOff,
@@ -14,12 +13,6 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useOrg } from '../../context/OrgContext';
-import {
-  AdConsentChoice,
-  getAdConsentChoice,
-  saveAdConsentChoice,
-  subscribeAdConsentChanges,
-} from '../common/AdConsentBanner';
 import {
   ADSTERRA_SMARTLINK_URL,
   CREDITS_AD_COUNTDOWN_MS,
@@ -62,7 +55,6 @@ export const RewardedAdModal: React.FC = () => {
     activeOrgSubscriptionState,
   });
 
-  const [consentChoice, setConsentChoice] = useState<AdConsentChoice>(() => getAdConsentChoice());
   const [session, setSession] = useState<RewardedAdSession | null>(null);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [isOnline, setIsOnline] = useState<boolean>(() => readIsOnline());
@@ -88,12 +80,6 @@ export const RewardedAdModal: React.FC = () => {
     () => setIsRewardedAdModalOpen(false),
     'rewarded-ad-modal'
   );
-
-  useEffect(() => {
-    return subscribeAdConsentChanges(() => {
-      setConsentChoice(getAdConsentChoice());
-    });
-  }, []);
 
   // Track visibility, focus, and network connectivity in real time
   useEffect(() => {
@@ -211,7 +197,6 @@ export const RewardedAdModal: React.FC = () => {
       setShowReopenHint(false);
       setIsOnline(readIsOnline());
       setIsVisibleAndFocused(initialActive);
-      setConsentChoice(getAdConsentChoice());
     }
   }, [isRewardedAdModalOpen]);
 
@@ -280,7 +265,6 @@ export const RewardedAdModal: React.FC = () => {
       remainingCountdownMs <= 0 &&
       isOnline
   );
-  const hasConsent = consentChoice === 'granted';
 
   const scheduleReopenFallbackHint = () => {
     if (openHintTimerRef.current !== null) {
@@ -470,30 +454,7 @@ export const RewardedAdModal: React.FC = () => {
             </div>
           )}
 
-          {!hasConsent ? (
-            <div className="p-3.5 rounded-xl bg-[var(--color-bg)] border border-[var(--color-gold)]/40 space-y-3">
-              <div className="flex items-start gap-2.5">
-                <ShieldCheck className="w-5 h-5 text-[var(--color-accent)] shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <div className="text-xs font-bold text-[var(--color-ink)]">
-                    {isRTL ? 'إعلانات النسخة المجانية موقفة من الإعدادات' : 'Free-Tier Ads Paused in Settings'}
-                  </div>
-                  <p className="text-[11px] text-[var(--color-muted)] leading-relaxed">
-                    {isRTL
-                      ? 'قمت بإيقاف إعلانات النسخة المجانية من الإعدادات. يمكنك إعادة تفعيلها بضغطة واحدة لجمع نقاط رصيدي مجاناً، وتبقى بياناتك المالية خاصة تماماً.'
-                      : 'You previously turned off free-tier ads in Settings. Re-enable them in one tap to earn Raseedi Credits — your financial ledger stays strictly private.'}
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => saveAdConsentChoice('granted')}
-                className="w-full py-2.5 px-3 rounded-xl bg-[var(--color-accent)] text-[var(--color-on-accent)] text-xs font-bold hover:opacity-95 transition-opacity min-h-[44px]"
-              >
-                {isRTL ? 'إعادة التفعيل والمتابعة لمشاهدة الإعلان' : 'Re-enable & Continue to Watch Ad'}
-              </button>
-            </div>
-          ) : claimSuccess ? (
+          {claimSuccess ? (
             <div className="py-3 text-center space-y-3" data-testid="rewarded-ad-claimed-state">
               <div className="w-12 h-12 rounded-2xl bg-[var(--color-accent)]/12 border border-[var(--color-accent)]/30 mx-auto flex items-center justify-center">
                 <CheckCircle2 className="w-6 h-6 text-[var(--color-accent)]" />

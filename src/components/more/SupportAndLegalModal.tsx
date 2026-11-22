@@ -16,12 +16,6 @@ import { useApp } from '../../context/AppContext';
 import { useOrg } from '../../context/OrgContext';
 import { shouldShowRaseediCreditsUi } from '../../services/raseediCredits';
 import { SUPPORT_CONFIG } from '../../constants/support';
-import {
-  getAdConsentChoice,
-  saveAdConsentChoice,
-  subscribeAdConsentChanges,
-  type AdConsentChoice,
-} from '../common/AdConsentBanner';
 import { BrandLogo } from '../common/BrandLogo';
 
 export interface SupportAndLegalModalProps {
@@ -38,9 +32,6 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
   const { isRTL, isPro, subscriptionSummary, setIsUpgradeModalOpen } = useApp();
   const { activeOrgSubscriptionState } = useOrg();
   const [activeTab, setActiveTab] = useState<'support' | 'legal'>(initialTab);
-  const [adConsentChoice, setAdConsentChoice] = useState<AdConsentChoice>(() =>
-    getAdConsentChoice()
-  );
 
   const isFreeTierUser =
     !isPro &&
@@ -51,15 +42,8 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       setActiveTab(initialTab);
-      setAdConsentChoice(getAdConsentChoice());
     }
   }, [isOpen, initialTab]);
-
-  useEffect(() => {
-    return subscribeAdConsentChanges(() => {
-      setAdConsentChoice(getAdConsentChoice());
-    });
-  }, []);
 
   if (!isOpen) return null;
 
@@ -332,16 +316,16 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
                 {isRTL ? (
                   <div className="space-y-1.5 text-[var(--color-muted)]">
                     <p>
-                      تعتمد النسخة المجانية من «رصيدي» افتراضياً على إعلانات خفيفة وغير مزعجة (مثل{' '}
+                      تعتمد النسخة المجانية من «رصيدي» على إعلانات خفيفة وغير مزعجة (مثل{' '}
                       <bdi dir="ltr">Adsterra</bdi>) لدعم استمرارية التطبيق مجاناً للجميع.
                     </p>
                     <p>
-                      لا نشارك أبداً بياناتك المالية أو محافظك أو معاملاتك مع أي معلن. وتبقى
-                      التفضيلات الخاصة بإعلانات النسخة المجانية متاحة للتحكم في أي وقت من الإعدادات أو من الأسفل.
+                      لا نشارك أبداً بياناتك المالية أو محافظك أو معاملاتك مع أي معلن.
                     </p>
                     <p>
-                      عند الاشتراك في باقة <bdi dir="ltr">PRO</bdi> أو <bdi dir="ltr">Business</bdi>،
-                      تُزال جميع الإعلانات وسكربتات الإعلان نهائياً بنسبة 100%.{' '}
+                      للحصول على تجربة خالية من الإعلانات بنسبة 100%، يمكنك الترقية في أي وقت إلى
+                      باقة <bdi dir="ltr">PRO</bdi> أو <bdi dir="ltr">Business</bdi> لإزالة جميع
+                      الإعلانات وسكربتات الإعلان نهائياً.{' '}
                       {!isFreeTierUser
                         ? '(حالتك الحالية: اشتراك نشط — الإعلانات معطلة بالكامل).'
                         : ''}
@@ -350,18 +334,17 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
                 ) : (
                   <div className="space-y-1.5 text-[var(--color-muted)]">
                     <p>
-                      The free tier of Raseedi displays lightweight, unobtrusive advertisements by
-                      default (such as <strong>Adsterra</strong>) to keep core features free for
-                      everyone.
+                      The free tier of Raseedi displays lightweight, unobtrusive advertisements
+                      (such as <strong>Adsterra</strong>) to keep core features free for everyone.
                     </p>
                     <p>
                       Your personal or organization financial ledger data is never shared with
-                      advertisers. You can adjust free-tier ad preferences anytime in Settings or
-                      below.
+                      advertisers.
                     </p>
                     <p>
-                      Upgrading to <strong>Raseedi PRO</strong> or <strong>Business</strong>{' '}
-                      permanently removes all ads and ad scripts.{' '}
+                      For a 100% ad-free experience, upgrade anytime to{' '}
+                      <strong>Raseedi PRO</strong> or <strong>Business</strong> to permanently
+                      remove all ads and ad scripts.{' '}
                       {!isFreeTierUser
                         ? '(Current status: active subscription — ads completely disabled.)'
                         : ''}
@@ -372,6 +355,7 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
                   <div className="pt-1 flex flex-wrap items-center gap-2">
                     <button
                       type="button"
+                      data-testid="legal-ads-upgrade-btn"
                       onClick={() => {
                         onClose();
                         setIsUpgradeModalOpen(true);
@@ -382,23 +366,6 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
                       <span>
                         {isRTL ? 'ترقية إلى PRO (بدون إعلانات)' : 'Upgrade to PRO (Ad-Free)'}
                       </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        saveAdConsentChoice(
-                          adConsentChoice === 'granted' ? 'denied' : 'granted'
-                        )
-                      }
-                      className="inline-flex items-center px-3 py-1.5 rounded-lg bg-[var(--color-surface)] border border-[var(--color-line)] text-[11px] font-semibold text-[var(--color-ink)] hover:border-[var(--color-accent)] min-h-[34px]"
-                    >
-                      {adConsentChoice === 'granted'
-                        ? isRTL
-                          ? 'إيقاف إعلانات النسخة المجانية'
-                          : 'Disable Free-Tier Ads'
-                        : isRTL
-                        ? 'إعادة تفعيل الإعلانات ونقاط رصيدي'
-                        : 'Re-enable Ads & Raseedi Credits'}
                     </button>
                   </div>
                 )}

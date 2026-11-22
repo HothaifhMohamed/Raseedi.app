@@ -31,12 +31,6 @@ import { useApp } from '../../context/AppContext';
 import { useOrg } from '../../context/OrgContext';
 import { shouldShowRaseediCreditsUi } from '../../services/raseediCredits';
 import {
-  getAdConsentChoice,
-  saveAdConsentChoice,
-  subscribeAdConsentChanges,
-  type AdConsentChoice,
-} from '../common/AdConsentBanner';
-import {
   formatUsernameHandle,
   normalizeUsername,
   validateUsernameFormat,
@@ -126,9 +120,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     typeof navigator === 'undefined' ? true : navigator.onLine
   );
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
-  const [adConsentChoice, setAdConsentChoice] = useState<AdConsentChoice>(() =>
-    getAdConsentChoice()
-  );
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -136,13 +127,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     const handleOffline = () => setIsOnline(false);
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
-    const unsubscribeAds = subscribeAdConsentChanges(() => {
-      setAdConsentChoice(getAdConsentChoice());
-    });
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
-      unsubscribeAds();
     };
   }, []);
 
@@ -1255,30 +1242,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <>
                     تعتمد النسخة المجانية من «رصيدي» على إعلانات خفيفة وغير مزعجة (مثل{' '}
                     <bdi dir="ltr">Adsterra</bdi>) للحفاظ على التطبيق مجانياً للجميع، دون مشاركة أي
-                    بيانات مالية من دفاترك أبداً. يمكنك الترقية إلى باقة{' '}
-                    <bdi dir="ltr">PRO</bdi> لتجربة خالية من الإعلانات بنسبة 100%.
+                    بيانات مالية من دفاترك أبداً. لإزالة الإعلانات نهائياً والاستمتاع بتجربة هادئة
+                    بنسبة 100%، يمكنك الترقية في أي وقت إلى باقة <bdi dir="ltr">PRO</bdi>.
                   </>
                 ) : (
-                  'The free tier of Raseedi relies on lightweight ads (such as Adsterra) to keep the app free for everyone. Your financial ledger data is never shared with advertisers. Upgrade to PRO for a 100% ad-free experience.'
+                  'The free tier of Raseedi relies on lightweight, unobtrusive ads (such as Adsterra) to keep the app free for everyone. Your financial ledger data is never shared with advertisers. Upgrade anytime to PRO for a 100% ad-free experience.'
                 )}
               </p>
-
-              <label className="flex items-center justify-between gap-3 pt-2 border-t border-[var(--color-line)] cursor-pointer">
-                <span className="text-xs text-[var(--color-ink)]">
-                  {isRTL
-                    ? 'عرض الإعلانات الخفيفة ونقاط رصيدي'
-                    : 'Enable lightweight ads & Raseedi Credits'}
-                </span>
-                <input
-                  type="checkbox"
-                  data-testid="settings-ad-consent-toggle"
-                  checked={adConsentChoice === 'granted'}
-                  onChange={(e) =>
-                    saveAdConsentChoice(e.target.checked ? 'granted' : 'denied')
-                  }
-                  className="w-4 h-4 accent-[var(--color-accent)] rounded cursor-pointer shrink-0"
-                />
-              </label>
 
               <button
                 type="button"
@@ -1292,8 +1262,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <Crown className="w-3.5 h-3.5 text-[var(--color-gold)] shrink-0" />
                 <span>
                   {isRTL
-                    ? 'ترقية إلى PRO لتجربة بدون إعلانات'
-                    : 'Upgrade to PRO (100% Ad-Free)'}
+                    ? 'ترقية إلى PRO (بدون إعلانات)'
+                    : 'Upgrade to PRO (Ad-Free)'}
                 </span>
               </button>
             </div>

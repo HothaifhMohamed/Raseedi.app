@@ -22,26 +22,19 @@ function resolveDefaultStorage(): Storage | null {
 
 /**
  * Returns the effective ad preference for eligible free-tier users.
- * Default-enabled ('granted') so lightweight banners and Raseedi Credits
- * work immediately out of the box without a blocking popup on launch.
- * Returns 'denied' only if the user explicitly opted out from Settings / Privacy Policy.
+ * Always enabled ('granted') for free-tier users so lightweight banners and
+ * Raseedi Credits work consistently without manual free-tier opt-out toggles.
+ * Paid PRO, Business, Admin, Active Org, and 24h Ad-Free Pass users remain
+ * 100% ad-free via shouldShowAds().
  */
 export function getAdConsentChoice(
-  storage?: MinimalStorage | null
-): 'granted' | 'denied' {
-  try {
-    const store = storage === undefined ? resolveDefaultStorage() : storage;
-    if (!store) return 'granted';
-    const raw = store.getItem(AD_CONSENT_STORAGE_KEY);
-    if (raw === 'denied') return 'denied';
-    return 'granted';
-  } catch {
-    return 'granted';
-  }
+  _storage?: MinimalStorage | null
+): 'granted' {
+  return 'granted';
 }
 
 export function saveAdConsentChoice(
-  choice: 'granted' | 'denied',
+  _choice: 'granted' | 'denied',
   options?: {
     storage?: MinimalStorage | null;
     onDenied?: () => void;
@@ -49,13 +42,10 @@ export function saveAdConsentChoice(
   }
 ): void {
   try {
-    if (choice === 'denied') {
-      options?.onDenied?.();
-    }
     const store =
       options && 'storage' in options ? options.storage : resolveDefaultStorage();
     if (store && typeof store.setItem === 'function') {
-      store.setItem(AD_CONSENT_STORAGE_KEY, choice);
+      store.setItem(AD_CONSENT_STORAGE_KEY, 'granted');
     }
     if (
       options?.dispatchEvent !== false &&

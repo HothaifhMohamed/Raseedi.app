@@ -282,7 +282,7 @@ test('CSP directives in serverSecurity.ts and vercel.json allow Adsterra https:/
   assert.equal(cspHeader.value.includes(' ws:'), false);
 });
 
-test('Ad consent defaults to enabled (granted) without a blocking popup while honoring explicit opt-out and one-tap re-enable', () => {
+test('Free-tier ad consent stays enabled without manual opt-out buttons in Settings or Privacy Policy while preserving PRO upgrade CTAs', () => {
   const store = new Map<string, string>();
   const mockStorage = {
     getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
@@ -294,32 +294,41 @@ test('Ad consent defaults to enabled (granted) without a blocking popup while ho
     },
   };
 
-  // Fresh install / empty storage -> default granted
+  // Fresh install / empty storage -> granted
   assert.equal(getAdConsentChoice(mockStorage), 'granted');
   assert.equal(hasAdConsent(mockStorage), true);
   assert.equal(hasAdSenseConsent(mockStorage), true);
 
-  // Explicit opt-out from Settings -> denied & invokes teardown callback
-  let tornDown = false;
-  saveAdConsentChoice('denied', {
-    storage: mockStorage,
-    dispatchEvent: false,
-    onDenied: () => {
-      tornDown = true;
-    },
-  });
-  assert.equal(tornDown, true);
-  assert.equal(getAdConsentChoice(mockStorage), 'denied');
-  assert.equal(hasAdConsent(mockStorage), false);
-
-  // One-tap re-enable restores granted
-  saveAdConsentChoice('granted', { storage: mockStorage, dispatchEvent: false });
+  // Even if legacy 'denied' was stored previously, free-tier ads resolve as granted
+  store.set('raseedi_ad_consent_v1', 'denied');
   assert.equal(getAdConsentChoice(mockStorage), 'granted');
   assert.equal(hasAdConsent(mockStorage), true);
 
-  // Reset removes key and keeps default-enabled behavior
+  // saveAdConsentChoice and resetAdConsentChoice keep free-tier consent granted
   saveAdConsentChoice('denied', { storage: mockStorage, dispatchEvent: false });
+  assert.equal(getAdConsentChoice(mockStorage), 'granted');
   resetAdConsentChoice({ storage: mockStorage, dispatchEvent: false });
   assert.equal(getAdConsentChoice(mockStorage), 'granted');
+
+  // Verify SettingsModal & SupportAndLegalModal have NO manual disable-ads button/toggle
+  // and keep the PRO upgrade CTA intact
+  const settingsSrc = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/more/SettingsModal.tsx'),
+    'utf8'
+  );
+  const legalSrc = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/more/SupportAndLegalModal.tsx'),
+    'utf8'
+  );
+
+  assert.equal(settingsSrc.includes('settings-ad-consent-toggle'), false);
+  assert.equal(settingsSrc.includes('إيقاف إعلانات النسخة المجانية'), false);
+  assert.equal(settingsSrc.includes('Disable Free-Tier Ads'), false);
+  assert.ok(settingsSrc.includes('settings-ads-upgrade-btn'));
+
+  assert.equal(legalSrc.includes('إيقاف إعلانات النسخة المجانية'), false);
+  assert.equal(legalSrc.includes('Disable Free-Tier Ads'), false);
+  assert.equal(legalSrc.includes('saveAdConsentChoice'), false);
+  assert.ok(legalSrc.includes('legal-ads-upgrade-btn'));
 });
 
