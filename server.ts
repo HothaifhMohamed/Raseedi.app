@@ -1143,8 +1143,40 @@ export async function createExpressApp(options?: { apiOnly?: boolean }) {
 
           const entitlement = resolveUserEntitlement(userSnap.data());
           const currentCount = Math.max(0, Number(quotaSnap.data()?.count || 0));
+          const currentCreditBonusUsed = Math.max(0, Number(quotaSnap.data()?.creditBonusUsed || 0));
+          const requestedCreditBonus = Boolean(
+            (req.body as { useCreditBonusScan?: unknown } | undefined)?.useCreditBonusScan
+          );
+          const MAX_MONTHLY_CREDIT_BONUS_SCANS = 10;
 
           if (currentCount >= entitlement.scanLimit) {
+            if (
+              !entitlement.isPro &&
+              requestedCreditBonus &&
+              currentCreditBonusUsed < MAX_MONTHLY_CREDIT_BONUS_SCANS
+            ) {
+              const nextCreditBonusUsed = currentCreditBonusUsed + 1;
+              tx.set(
+                activeQuotaRef,
+                {
+                  month: monthKey,
+                  count: currentCount,
+                  creditBonusUsed: nextCreditBonusUsed,
+                  updatedAt: FieldValue.serverTimestamp(),
+                },
+                { merge: true }
+              );
+              return {
+                allowed: true as const,
+                usedCreditBonus: true as const,
+                isPro: entitlement.isPro,
+                planTier: entitlement.planTier,
+                used: currentCount,
+                limit: entitlement.scanLimit,
+                remaining: 0,
+              };
+            }
+
             return {
               allowed: false as const,
               isPro: entitlement.isPro,

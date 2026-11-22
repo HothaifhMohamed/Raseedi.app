@@ -24,6 +24,7 @@ import { MoneyText } from '../common/MoneyText';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
 import { HairlineEmptyState, HairlineFigure } from '../common/HairlineVisuals';
 import { shouldShowPersonalUpgradeUi } from '../../services/subscriptionHelpers';
+import { AdBanner } from '../common/AdBanner';
 
 export const BudgetPage: React.FC = () => {
   const {
@@ -358,6 +359,9 @@ export const BudgetPage: React.FC = () => {
           ))}
         </div>
       )}
+
+      {/* Free-tier calm bottom banner */}
+      <AdBanner variant="banner" />
 
       {/* Add / Edit Budget Modal */}
       {isModalOpen && (

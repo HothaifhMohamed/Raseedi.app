@@ -608,6 +608,8 @@ export function resolveTrustProxySetting(
 const ADSTERRA_CSP_HOSTS = [
   'https://bauval.org',
   'https://*.bauval.org',
+  'https://araplhn.org',
+  'https://*.araplhn.org',
   'https://*.effectivegatecpm.com',
   'https://*.highperformanceformat.com',
   'https://*.adsterratools.com',
@@ -673,7 +675,7 @@ export function buildCspDirectives(options: {
     ],
     styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
     fontSrc: ["'self'", 'data:', 'https://fonts.gstatic.com'],
-    imgSrc: ["'self'", 'data:', 'blob:', 'https://bauval.org', 'https:'],
+    imgSrc: ["'self'", 'data:', 'blob:', 'https://bauval.org', 'https://araplhn.org', 'https:'],
     connectSrc,
     frameSrc: [
       "'self'",

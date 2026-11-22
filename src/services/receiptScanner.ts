@@ -79,7 +79,8 @@ export async function scanReceiptWithAI(
   mimeType: string,
   categories: Category[],
   isRTL = true,
-  orgId?: string
+  orgId?: string,
+  useCreditBonusScan = false
 ): Promise<ScannedReceiptResult> {
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     throw new ReceiptScanError(
@@ -134,6 +135,7 @@ export async function scanReceiptWithAI(
         mimeType,
         clientLocalDate: formatLocalDate(new Date()),
         ...(orgId ? { orgId } : {}),
+        ...(useCreditBonusScan ? { useCreditBonusScan: true } : {}),
         categories: categories
           .filter((c) => !c.isHidden)
           .map((c) => ({

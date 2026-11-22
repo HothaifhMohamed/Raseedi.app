@@ -63,6 +63,16 @@ const StatisticsTab = React.lazy(() =>
 const TemplatesTab = React.lazy(() =>
   import('./components/home/TemplatesTab').then((m) => ({ default: m.TemplatesTab }))
 );
+const RaseediCreditsModal = React.lazy(() =>
+  import('./components/rewards/RaseediCreditsModal').then((m) => ({
+    default: m.RaseediCreditsModal,
+  }))
+);
+const RewardedAdModal = React.lazy(() =>
+  import('./components/rewards/RewardedAdModal').then((m) => ({
+    default: m.RewardedAdModal,
+  }))
+);
 const TransactionModal = React.lazy(() =>
   import('./components/TransactionModal').then((m) => ({ default: m.TransactionModal }))
 );
@@ -137,6 +147,10 @@ const MainLayout: React.FC = () => {
     setIsOrgHubOpen,
     isOrgMigrationModalOpen,
     legacyLocalOrgs,
+    isCreditsModalOpen,
+    isRewardedAdModalOpen,
+    creditsToast,
+    dismissCreditsToast,
     isPro,
     t,
     isRTL,
@@ -401,6 +415,25 @@ const MainLayout: React.FC = () => {
         <UndoSnackbar />
         <ToastNotification />
 
+        {/* Raseedi Credits Floating Toast (top-positioned so it never covers BottomNav or modal actions) */}
+        {creditsToast && (
+          <div
+            role="status"
+            aria-live="polite"
+            data-testid="raseedi-credits-toast"
+            className="fixed top-4 inset-x-0 z-[80] px-4 pointer-events-none flex justify-center"
+            dir={isRTL ? 'rtl' : 'ltr'}
+          >
+            <button
+              type="button"
+              onClick={dismissCreditsToast}
+              className="pointer-events-auto max-w-md px-4 py-2.5 rounded-xl bg-[var(--color-surface)] border border-[var(--color-gold)]/55 shadow-xl text-xs font-bold text-[var(--color-ink)] flex items-center gap-2 text-start"
+            >
+              <span>{creditsToast.text}</span>
+            </button>
+          </div>
+        )}
+
         {/* EEA/UK Cookie Consent Banner before loading AdSense */}
         <AdConsentBanner />
 
@@ -408,6 +441,18 @@ const MainLayout: React.FC = () => {
         {isUpgradeModalOpen && (
           <React.Suspense fallback={<ModalOverlaySkeleton />}>
             <UpgradeModal />
+          </React.Suspense>
+        )}
+
+        {/* Global Raseedi Credits Store & Rewarded Ad Modals */}
+        {isCreditsModalOpen && (
+          <React.Suspense fallback={<ModalOverlaySkeleton />}>
+            <RaseediCreditsModal />
+          </React.Suspense>
+        )}
+        {isRewardedAdModalOpen && (
+          <React.Suspense fallback={<ModalOverlaySkeleton />}>
+            <RewardedAdModal />
           </React.Suspense>
         )}
 

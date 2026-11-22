@@ -793,7 +793,6 @@ export const TransactionsTab: React.FC = () => {
                 })}
               </div>
             </div>
-            {groupIndex === 0 && <AdBanner variant="native-card" />}
             </React.Fragment>
           ))}
 
@@ -837,6 +836,9 @@ export const TransactionsTab: React.FC = () => {
           )}
         </div>
       )}
+
+      {/* Free-tier calm bottom banner */}
+      <AdBanner variant="banner" />
 
       {/* Confirmation Modal for Multi-Delete */}
       <ConfirmationModal

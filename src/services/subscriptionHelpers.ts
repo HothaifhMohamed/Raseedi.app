@@ -228,6 +228,7 @@ export function shouldShowBusinessUpgradeUi(
 
 export interface ShouldShowAdsOptions {
   isProFlag?: boolean;
+  creditsAdFreeActive?: boolean;
   activeOrgSubscriptionState?: {
     planTier?: PlanTier;
     status?: string;
@@ -243,6 +244,7 @@ export function shouldShowAds(
   options?: ShouldShowAdsOptions
 ): boolean {
   if (options?.isProFlag) return false;
+  if (options?.creditsAdFreeActive) return false;
   if (summary.isAdminOverride || summary.isPro || summary.isBusinessPro) return false;
   if (summary.planTier && summary.planTier !== 'free') return false;
 

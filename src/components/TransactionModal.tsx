@@ -47,6 +47,7 @@ import {
 } from '../services/numbers';
 import { prepareReceiptImageDataUrl, ReceiptScanError, scanReceiptWithAI } from '../services/receiptScanner';
 import { matchMerchantRule, sanitizeMerchantRules } from '../services/merchantRules';
+import { CreditsContextualPrompt } from './rewards/CreditsContextualPrompt';
 
 import { TransactionDraftPreset } from '../services/walletQuickActions';
 
@@ -82,6 +83,8 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     transactions,
     isPro,
     setIsUpgradeModalOpen,
+    creditsState,
+    consumeCreditBonusReceiptScan,
     isOrgWorkspace,
     activeOrganization,
     activeOrgRole,
@@ -95,6 +98,10 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     t,
     isRTL,
   } = useApp();
+
+  const [showReceiptCreditsPrompt, setShowReceiptCreditsPrompt] = useState(false);
+  const bonusReceiptScans = creditsState.bonusReceiptScans;
+  const effectiveRemainingScans = (scanQuota ? scanQuota.remaining : 3) + bonusReceiptScans;
 
   const workspaceRuleKey =
     isOrgWorkspace && activeOrganization
@@ -637,7 +644,14 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
 
     setErrorMsg('');
     setScanSuccessMsg('');
+    setShowReceiptCreditsPrompt(false);
     setIsScanningReceipt(true);
+
+    const usingCreditBonusScan =
+      !isPro &&
+      !isOrgWorkspace &&
+      Boolean(scanQuota && scanQuota.remaining <= 0) &&
+      bonusReceiptScans > 0;
 
     try {
       const { dataUrl, mimeType } = await prepareReceiptImageDataUrl(file);
@@ -646,8 +660,13 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
         mimeType,
         categories,
         isRTL,
-        isOrgWorkspace ? activeOrganization?.id : undefined
+        isOrgWorkspace ? activeOrganization?.id : undefined,
+        usingCreditBonusScan
       );
+
+      if (usingCreditBonusScan) {
+        consumeCreditBonusReceiptScan();
+      }
 
       setType('expense');
       if (scanned.amount > 0) {
@@ -688,7 +707,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
         if (err.code === 'AUTH_REQUIRED') {
           setReceiptAuthPrompt(true);
         } else if (err.code === 'QUOTA_EXCEEDED') {
-          setIsUpgradeModalOpen(true);
+          setShowReceiptCreditsPrompt(true);
         }
       }
       const msg =
@@ -1091,10 +1110,11 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                       );
                       return;
                     }
-                    if (!isPro && scanQuota && scanQuota.remaining <= 0) {
-                      setIsUpgradeModalOpen(true);
+                    if (!isPro && effectiveRemainingScans <= 0) {
+                      setShowReceiptCreditsPrompt(true);
                       return;
                     }
+                    setShowReceiptCreditsPrompt(false);
                     receiptInputRef.current?.click();
                   }}
                   disabled={isScanningReceipt}
@@ -1118,11 +1138,15 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                   </span>
                   {!isPro && (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[var(--color-accent)]/12 text-[var(--color-accent)] text-[10px] font-bold shrink-0">
-                      {scanQuota && scanQuota.remaining <= 0 ? (
+                      {effectiveRemainingScans <= 0 ? (
                         <>
                           <Crown className="w-3 h-3" />
                           <bdi dir="ltr">PRO</bdi>
                         </>
+                      ) : bonusReceiptScans > 0 ? (
+                        <bdi dir="ltr">
+                          {effectiveRemainingScans} (+{bonusReceiptScans} 🪙)
+                        </bdi>
                       ) : (
                         <bdi dir="ltr">
                           {scanQuota ? `${scanQuota.remaining}/${scanQuota.limit}` : '3/mo'}
@@ -1131,6 +1155,16 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                     </span>
                   )}
                 </button>
+                {!isPro && showReceiptCreditsPrompt && (
+                  <CreditsContextualPrompt
+                    redemptionId="ai_scans_2"
+                    onDismiss={() => setShowReceiptCreditsPrompt(false)}
+                    onRedeemed={() => {
+                      setShowReceiptCreditsPrompt(false);
+                      setErrorMsg('');
+                    }}
+                  />
+                )}
                 {receiptAuthPrompt && !user?.isLoggedIn && (
                   <button
                     type="button"

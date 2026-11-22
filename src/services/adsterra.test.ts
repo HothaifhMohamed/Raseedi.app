@@ -3,11 +3,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  ADSTERRA_NATIVE_CONTAINER_ID,
-  ADSTERRA_NATIVE_SCRIPT_ID,
-  ADSTERRA_NATIVE_SCRIPT_SRC,
-  mountAdsterraNativeBanner,
-  teardownAdsterraNativeBanner,
+  ADSTERRA_BANNER_ERROR_MESSAGE,
+  ADSTERRA_BANNER_HEIGHT,
+  ADSTERRA_BANNER_IFRAME_ID,
+  ADSTERRA_BANNER_KEY,
+  ADSTERRA_BANNER_SCRIPT_SRC,
+  ADSTERRA_BANNER_WIDTH,
+  buildAdsterraBannerSrcDoc,
+  mountAdsterraBanner320x50,
+  teardownAdsterraBanner320x50,
 } from './adsterra';
 import { shouldShowAds, computeUserSubscriptionSummary } from './subscriptionHelpers';
 import { buildCspDirectives } from './serverSecurity';
@@ -15,9 +19,11 @@ import { buildCspDirectives } from './serverSecurity';
 interface MockElement {
   tagName: string;
   id: string;
-  src: string;
-  async: boolean;
-  innerHTML: string;
+  title: string;
+  width: string;
+  height: string;
+  srcdoc: string;
+  contentWindow: object | null;
   attributes: Record<string, string>;
   children: MockElement[];
   parentElement: MockElement | null;
@@ -32,24 +38,23 @@ interface MockElement {
 }
 
 interface MockDocument {
-  head: MockElement;
   body: MockElement;
-  all: MockElement[];
+  defaultView: null;
   createElement: (tag: string) => MockElement;
   getElementById: (id: string) => MockElement | null;
-  querySelector: (selector: string) => MockElement | null;
+  querySelectorAll: (selector: string) => MockElement[];
 }
 
 function createMockDom() {
-  const all: MockElement[] = [];
-
   const makeEl = (tag: string, doc: MockDocument): MockElement => {
     const el: MockElement = {
       tagName: tag.toUpperCase(),
       id: '',
-      src: '',
-      async: false,
-      innerHTML: '',
+      title: '',
+      width: '',
+      height: '',
+      srcdoc: '',
+      contentWindow: null,
       attributes: {},
       children: [],
       parentElement: null,
@@ -69,7 +74,6 @@ function createMockDom() {
         child.parentElement = this;
         child.parentNode = this;
         this.children.push(child);
-        if (!all.includes(child)) all.push(child);
         return child;
       },
       removeChild(child: MockElement) {
@@ -89,44 +93,54 @@ function createMockDom() {
   };
 
   const doc = {} as MockDocument;
-  doc.all = all;
-  doc.head = makeEl('head', doc);
+  doc.defaultView = null;
   doc.body = makeEl('body', doc);
   doc.createElement = (tag: string) => makeEl(tag, doc);
-  doc.getElementById = (id: string) => {
-    const visit = (node: MockElement): MockElement | null => {
-      if (node.id === id) return node;
-      for (const child of node.children) {
-        const hit = visit(child);
-        if (hit) return hit;
-      }
-      return null;
-    };
-    return visit(doc.head) || visit(doc.body);
+
+  const collectAll = (node: MockElement, acc: MockElement[] = []): MockElement[] => {
+    acc.push(node);
+    for (const child of node.children) {
+      collectAll(child, acc);
+    }
+    return acc;
   };
-  doc.querySelector = (selector: string) => {
-    const srcMatch = selector.match(/^script\[src="(.+)"\]$/);
-    if (!srcMatch) return null;
-    const expectedSrc = srcMatch[1];
-    return (
-      doc.head.children.find((c) => c.tagName === 'SCRIPT' && c.src === expectedSrc) ||
-      doc.body.children.find((c) => c.tagName === 'SCRIPT' && c.src === expectedSrc) ||
-      null
-    );
+
+  doc.getElementById = (id: string) => {
+    return collectAll(doc.body).find((n) => n.id === id) || null;
+  };
+
+  doc.querySelectorAll = (selector: string) => {
+    const match = selector.match(/^iframe#(.+)$/);
+    if (!match) return [];
+    const targetId = match[1];
+    return collectAll(doc.body).filter((n) => n.tagName === 'IFRAME' && n.id === targetId);
   };
 
   return doc;
 }
 
-test('Adsterra constants match the exact requested Native Banner script URL and container ID', () => {
+test('Adsterra 320x50 banner constants and srcdoc match the exact requested snippet', () => {
+  assert.equal(ADSTERRA_BANNER_KEY, '0891c1d3ea3d6bed258a7ebd3c28256b');
   assert.equal(
-    ADSTERRA_NATIVE_SCRIPT_SRC,
-    'https://bauval.org/21/bad6a35cb4587aaf45121214f6b6581c'
+    ADSTERRA_BANNER_SCRIPT_SRC,
+    'https://bauval.org/22/0891c1d3ea3d6bed258a7ebd3c28256b'
   );
-  assert.equal(ADSTERRA_NATIVE_CONTAINER_ID, 'container-bad6a35cb4587aaf45121214f6b6581c');
+  assert.equal(ADSTERRA_BANNER_WIDTH, 320);
+  assert.equal(ADSTERRA_BANNER_HEIGHT, 50);
+
+  const srcDoc = buildAdsterraBannerSrcDoc();
+  assert.ok(srcDoc.includes("'key' : '0891c1d3ea3d6bed258a7ebd3c28256b'"));
+  assert.ok(srcDoc.includes("'format' : 'iframe'"));
+  assert.ok(srcDoc.includes("'height' : 50"));
+  assert.ok(srcDoc.includes("'width' : 320"));
+  assert.ok(srcDoc.includes("'params' : {}"));
+  assert.ok(
+    srcDoc.includes('<script src="https://bauval.org/22/0891c1d3ea3d6bed258a7ebd3c28256b"></script>')
+  );
+  assert.ok(srcDoc.includes(ADSTERRA_BANNER_ERROR_MESSAGE));
 });
 
-test('mountAdsterraNativeBanner injects script strictly once across re-mounts/tab switches and cleans up on teardown', () => {
+test('mountAdsterraBanner320x50 mounts a single 320x50 iframe without duplication across tab switches and cleans up on teardown', () => {
   const doc = createMockDom();
   const hostA = doc.createElement('div');
   const hostB = doc.createElement('div');
@@ -134,39 +148,46 @@ test('mountAdsterraNativeBanner injects script strictly once across re-mounts/ta
   doc.body.appendChild(hostB);
 
   // First mount in Tab A
-  const unmountA = mountAdsterraNativeBanner(hostA as unknown as HTMLElement, {
+  const unmountA = mountAdsterraBanner320x50(hostA as unknown as HTMLElement, {
     doc: doc as unknown as Document,
+    title: 'إعلان',
   });
 
-  const scriptsAfterFirst = doc.head.children.filter((c) => c.tagName === 'SCRIPT');
-  assert.equal(scriptsAfterFirst.length, 1);
-  assert.equal(scriptsAfterFirst[0].id, ADSTERRA_NATIVE_SCRIPT_ID);
-  assert.equal(scriptsAfterFirst[0].src, ADSTERRA_NATIVE_SCRIPT_SRC);
-  assert.equal(scriptsAfterFirst[0].async, true);
-  assert.equal(scriptsAfterFirst[0].getAttribute('async'), 'async');
-  assert.equal(scriptsAfterFirst[0].getAttribute('data-cfasync'), 'false');
+  const iframesAfterFirst = doc.querySelectorAll(`iframe#${ADSTERRA_BANNER_IFRAME_ID}`);
+  assert.equal(iframesAfterFirst.length, 1);
   assert.equal(hostA.children.length, 1);
-  assert.equal(hostA.children[0].id, ADSTERRA_NATIVE_CONTAINER_ID);
+  assert.equal(iframesAfterFirst[0].width, '320');
+  assert.equal(iframesAfterFirst[0].height, '50');
+  assert.equal(iframesAfterFirst[0].title, 'إعلان');
+  assert.equal(iframesAfterFirst[0].getAttribute('data-ad-key'), ADSTERRA_BANNER_KEY);
+  const sandboxAttr = iframesAfterFirst[0].getAttribute('sandbox') || '';
+  assert.ok(sandboxAttr.includes('allow-scripts'));
+  assert.equal(sandboxAttr.includes('allow-same-origin'), false);
+  assert.ok(
+    iframesAfterFirst[0].srcdoc.includes('https://bauval.org/22/0891c1d3ea3d6bed258a7ebd3c28256b')
+  );
 
-  // Simulate switching from Tab A to Tab B
-  unmountA();
-  assert.equal(hostA.children.length, 0);
-
-  const unmountB = mountAdsterraNativeBanner(hostB as unknown as HTMLElement, {
+  // Mounting in Tab B before Tab A unmounts must still keep strictly 1 iframe in DOM
+  const unmountB = mountAdsterraBanner320x50(hostB as unknown as HTMLElement, {
     doc: doc as unknown as Document,
   });
-
-  // Script MUST NOT be duplicated on tab switch
-  const scriptsAfterSecond = doc.head.children.filter((c) => c.tagName === 'SCRIPT');
-  assert.equal(scriptsAfterSecond.length, 1);
+  const iframesAfterSecond = doc.querySelectorAll(`iframe#${ADSTERRA_BANNER_IFRAME_ID}`);
+  assert.equal(iframesAfterSecond.length, 1);
+  assert.equal(hostA.children.length, 0);
   assert.equal(hostB.children.length, 1);
-  assert.equal(hostB.children[0].id, ADSTERRA_NATIVE_CONTAINER_ID);
 
-  // Teardown on PRO upgrade or consent denial removes script & container completely
+  // Calling stale unmountA must NOT remove Tab B's active iframe
+  unmountA();
+  assert.equal(hostB.children.length, 1);
+
+  // Teardown on PRO upgrade or consent denial removes iframe completely
+  teardownAdsterraBanner320x50(doc as unknown as Document);
+  assert.equal(doc.querySelectorAll(`iframe#${ADSTERRA_BANNER_IFRAME_ID}`).length, 0);
+  assert.equal(doc.getElementById(ADSTERRA_BANNER_IFRAME_ID), null);
+
+  // Subsequent unmountB is a safe no-op
   unmountB();
-  teardownAdsterraNativeBanner(doc as unknown as Document);
-  assert.equal(doc.head.children.filter((c) => c.tagName === 'SCRIPT').length, 0);
-  assert.equal(doc.getElementById(ADSTERRA_NATIVE_CONTAINER_ID), null);
+  assert.equal(doc.querySelectorAll(`iframe#${ADSTERRA_BANNER_IFRAME_ID}`).length, 0);
 });
 
 test('shouldShowAds strictly hides ads for PRO, Business, Admin, and active paid/trial organization entitlements', () => {
@@ -195,18 +216,12 @@ test('shouldShowAds strictly hides ads for PRO, Business, Admin, and active paid
   });
   const adminSummary = computeUserSubscriptionSummary({ verifiedPro: null, isAdminUser: true });
 
-  // Pure free user -> allowed (subject to consent in UI)
   assert.equal(shouldShowAds(freeSummary), true);
-
-  // Paid personal PRO / Business PRO / Admin -> strictly hidden
   assert.equal(shouldShowAds(personalProSummary), false);
   assert.equal(shouldShowAds(businessSummary), false);
   assert.equal(shouldShowAds(adminSummary), false);
-
-  // Explicit isProFlag -> strictly hidden even if summary is stale
   assert.equal(shouldShowAds(freeSummary, { isProFlag: true }), false);
 
-  // Active paid/trial organization subscription -> strictly hidden
   assert.equal(
     shouldShowAds(freeSummary, {
       activeOrgSubscriptionState: { planTier: 'business_pro', status: 'active', isReadOnly: false },
@@ -220,7 +235,6 @@ test('shouldShowAds strictly hides ads for PRO, Business, Admin, and active paid
     false
   );
 
-  // Expired read-only org or free org -> falls back to personal free status
   assert.equal(
     shouldShowAds(freeSummary, {
       activeOrgSubscriptionState: { planTier: 'business_pro', status: 'read_only', isReadOnly: true },

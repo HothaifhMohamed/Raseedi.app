@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { FileText, Download, Printer, X, Lock } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import {
@@ -12,6 +12,7 @@ import { MoneyText } from '../common/MoneyText';
 import { HairlineFigure } from '../common/HairlineVisuals';
 import { BrandLogo } from '../common/BrandLogo';
 import { indexById, paginateList } from '../../services/lookupCache';
+import { CreditsContextualPrompt } from '../rewards/CreditsContextualPrompt';
 
 interface ReportsModalProps {
   isOpen: boolean;
@@ -19,10 +20,23 @@ interface ReportsModalProps {
 }
 
 export const ReportsModal: React.FC<ReportsModalProps> = ({ isOpen, onClose }) => {
-  const { transactions, categories, wallets, settings, isPro, setIsUpgradeModalOpen, t, isRTL } = useApp();
+  const {
+    transactions,
+    categories,
+    wallets,
+    settings,
+    isPro,
+    creditsState,
+    consumeCreditExportPass,
+    showCreditsToast,
+    t,
+    isRTL,
+  } = useApp();
 
   const [period, setPeriod] = useState<'weekly' | 'monthly'>('monthly');
   const [visibleRows, setVisibleRows] = useState<number>(30);
+  const [pendingCreditExport, setPendingCreditExport] = useState<'csv' | 'pdf' | null>(null);
+  const [pendingAutoExport, setPendingAutoExport] = useState<'csv' | 'pdf' | null>(null);
 
   const categoriesById = useMemo(() => indexById(categories), [categories]);
   const walletsById = useMemo(() => indexById(wallets), [wallets]);
@@ -102,22 +116,60 @@ export const ReportsModal: React.FC<ReportsModalProps> = ({ isOpen, onClose }) =
     document.body.removeChild(link);
   };
 
-  // Pro-gated Export CSV
-  const handleExportCSV = () => {
-    if (!isPro) {
-      setIsUpgradeModalOpen(true);
-      return;
+  const runExportAction = (action: 'csv' | 'pdf') => {
+    if (action === 'csv') {
+      executeExportCSV();
+    } else {
+      window.print();
     }
-    executeExportCSV();
   };
 
-  // Pro-gated Print PDF
-  const handlePrint = () => {
-    if (!isPro) {
-      setIsUpgradeModalOpen(true);
+  useEffect(() => {
+    if (!pendingAutoExport || creditsState.exportPasses <= 0) return;
+    const action = pendingAutoExport;
+    setPendingAutoExport(null);
+    if (consumeCreditExportPass()) {
+      runExportAction(action);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingAutoExport, creditsState.exportPasses]);
+
+  // Pro-gated Export CSV (also supports redeemed Raseedi Credits export pass)
+  const handleExportCSV = () => {
+    if (isPro) {
+      executeExportCSV();
       return;
     }
-    window.print();
+    if (creditsState.exportPasses > 0 && consumeCreditExportPass()) {
+      showCreditsToast(
+        isRTL
+          ? 'تم استخدام بطاقة تصدير تقرير واحدة من نقاط رصيدي 🪙'
+          : 'Used 1 Pro report export pass from Raseedi Credits 🪙'
+      );
+      setPendingCreditExport(null);
+      executeExportCSV();
+      return;
+    }
+    setPendingCreditExport('csv');
+  };
+
+  // Pro-gated Print PDF (also supports redeemed Raseedi Credits export pass)
+  const handlePrint = () => {
+    if (isPro) {
+      window.print();
+      return;
+    }
+    if (creditsState.exportPasses > 0 && consumeCreditExportPass()) {
+      showCreditsToast(
+        isRTL
+          ? 'تم استخدام بطاقة تصدير تقرير واحدة من نقاط رصيدي 🪙'
+          : 'Used 1 Pro report export pass from Raseedi Credits 🪙'
+      );
+      setPendingCreditExport(null);
+      window.print();
+      return;
+    }
+    setPendingCreditExport('pdf');
   };
 
   if (!isOpen) return null;
@@ -194,22 +246,51 @@ export const ReportsModal: React.FC<ReportsModalProps> = ({ isOpen, onClose }) =
             <div className="flex items-center gap-2">
               <button
                 onClick={handlePrint}
+                data-testid="reports-print-pdf-btn"
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--color-bg)] hover:bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-ink)] rounded-lg text-xs font-medium min-h-[36px]"
               >
-                {!isPro && <Lock className="w-3 h-3 text-[var(--color-warning-text)]" />}
+                {!isPro && creditsState.exportPasses <= 0 && (
+                  <Lock className="w-3 h-3 text-[var(--color-warning-text)]" />
+                )}
                 <Printer className="w-3.5 h-3.5" />
                 <span>{isRTL ? <>طباعة <bdi dir="ltr">PDF</bdi></> : 'Print PDF'}</span>
               </button>
               <button
                 onClick={handleExportCSV}
+                data-testid="reports-export-csv-btn"
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--color-accent)] hover:opacity-90 text-[var(--color-on-accent)] rounded-lg text-xs font-semibold min-h-[36px]"
               >
-                {!isPro && <Lock className="w-3 h-3" />}
+                {!isPro && creditsState.exportPasses <= 0 && <Lock className="w-3 h-3" />}
                 <Download className="w-3.5 h-3.5" />
                 <bdi dir="ltr">Excel / CSV</bdi>
               </button>
             </div>
           </div>
+
+          {/* Active redeemed export pass badge */}
+          {!isPro && creditsState.exportPasses > 0 && (
+            <div className="px-3 py-2 rounded-xl bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30 text-[11px] font-semibold text-[var(--color-accent)] print:hidden">
+              {isRTL
+                ? `لديك ${creditsState.exportPasses} بطاقة تصدير تقرير جاهزة للاستخدام من نقاط رصيدي 🪙`
+                : `You have ${creditsState.exportPasses} Pro report export pass ready from Raseedi Credits 🪙`}
+            </div>
+          )}
+
+          {/* Contextual Smart Credits Prompt when free user requests export */}
+          {!isPro && pendingCreditExport && (
+            <CreditsContextualPrompt
+              redemptionId="export_report_1"
+              className="print:hidden"
+              onDismiss={() => setPendingCreditExport(null)}
+              onRedeemed={() => {
+                const action = pendingCreditExport;
+                setPendingCreditExport(null);
+                if (action) {
+                  setPendingAutoExport(action);
+                }
+              }}
+            />
+          )}
 
           {/* Printable Report Card */}
           <div className="p-4 rounded-xl bg-[var(--color-bg)] border border-[var(--color-line)] print:bg-white print:border-black print:text-black space-y-4">

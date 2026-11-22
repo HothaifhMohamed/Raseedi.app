@@ -3,7 +3,7 @@ import { Cookie, ShieldCheck } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useOrg } from '../../context/OrgContext';
 import { shouldShowAds } from '../../services/subscriptionHelpers';
-import { teardownAdsterraNativeBanner } from '../../services/adsterra';
+import { teardownAdsterraBanner320x50 } from '../../services/adsterra';
 
 const AD_CONSENT_STORAGE_KEY = 'raseedi_ad_consent_v1';
 const AD_CONSENT_EVENT = 'raseedi-ad-consent-changed';
@@ -24,7 +24,7 @@ export function getAdConsentChoice(): AdConsentChoice {
 export function saveAdConsentChoice(choice: 'granted' | 'denied'): void {
   try {
     if (choice === 'denied') {
-      teardownAdsterraNativeBanner();
+      teardownAdsterraBanner320x50();
     }
     if (typeof window !== 'undefined' && window.localStorage) {
       window.localStorage.setItem(AD_CONSENT_STORAGE_KEY, choice);
@@ -61,12 +61,13 @@ export function subscribeAdConsentChanges(callback: () => void): () => void {
 }
 
 export const AdConsentBanner: React.FC = () => {
-  const { isPro, subscriptionSummary, isRTL } = useApp();
+  const { isPro, subscriptionSummary, hasActiveAdFreePass, isRTL } = useApp();
   const { activeOrgSubscriptionState } = useOrg();
   const [choice, setChoice] = useState<AdConsentChoice>(() => getAdConsentChoice());
 
   const showAds = shouldShowAds(subscriptionSummary, {
     isProFlag: isPro,
+    creditsAdFreeActive: hasActiveAdFreePass,
     activeOrgSubscriptionState,
   });
 
@@ -100,10 +101,10 @@ export const AdConsentBanner: React.FC = () => {
             <p className="text-[11px] text-[var(--color-muted)] leading-relaxed">
               {isRTL ? (
                 <>
-                  نستخدم ملفات تعريف الارتباط لعرض إعلانات مدمجة محدودة (مثل <bdi dir="ltr">Adsterra</bdi>) لدعم النسخة المجانية. بياناتك المالية تبقى خاصة تماماً ولا تُشارك أبداً مع أي معلن.
+                  نستخدم ملفات تعريف الارتباط لعرض إعلانات خفيفة محدودة (مثل <bdi dir="ltr">Adsterra</bdi>) لدعم النسخة المجانية. بياناتك المالية تبقى خاصة تماماً ولا تُشارك أبداً مع أي معلن.
                 </>
               ) : (
-                'We use cookies to display limited native ads (such as Adsterra) in the free tier. Your financial ledger data stays strictly private and is never shared with advertisers.'
+                'We use cookies to display lightweight ads (such as Adsterra) in the free tier. Your financial ledger data stays strictly private and is never shared with advertisers.'
               )}
             </p>
           </div>

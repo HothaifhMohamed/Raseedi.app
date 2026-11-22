@@ -478,6 +478,7 @@ export interface AppSettings {
   homeSectionOrders?: Record<string, HomeSectionId[]>;
   dismissedGetStartedIds?: string[];
   merchantRulesByWorkspace?: Record<string, MerchantRule[]>;
+  raseediCredits?: import('../services/raseediCredits').RaseediCreditsState;
 }
 
 export interface VerifiedProEntitlement {

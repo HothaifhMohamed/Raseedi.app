@@ -25,6 +25,7 @@ import {
   PiggyBank,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { AdBanner } from '../common/AdBanner';
 import {
   calculateTotalBalance,
   calculateIncomeExpenseNet,
@@ -1086,6 +1087,9 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
 
       {/* Reorderable Workspace Home Sections */}
       {sectionOrder.map((sectionId) => renderSection(sectionId))}
+
+      {/* Free-tier calm bottom banner */}
+      <AdBanner variant="banner" />
 
       <ArrangeSectionsModal
         isOpen={isArrangeOpen}

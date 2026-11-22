@@ -15,6 +15,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { Wallet, WalletAssetClass, WalletAssetSubtype, WalletType } from '../../types';
 import { IconRenderer } from '../common/IconRenderer';
+import { AdBanner } from '../common/AdBanner';
 import {
   formatCurrencyAmount,
   calculateTotalBalance,
@@ -800,6 +801,9 @@ export const WalletsPage: React.FC = () => {
         })}
       </div>
       )}
+
+      {/* Free-tier calm bottom banner */}
+      <AdBanner variant="banner" />
 
       {/* Add / Edit Wallet Modal */}
       {isEditModalOpen && (

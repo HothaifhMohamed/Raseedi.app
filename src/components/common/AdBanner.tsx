@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Crown, Sparkles } from 'lucide-react';
+import { Crown } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useOrg } from '../../context/OrgContext';
 import {
@@ -9,8 +9,8 @@ import {
 } from './AdConsentBanner';
 import { shouldShowAds } from '../../services/subscriptionHelpers';
 import {
-  mountAdsterraNativeBanner,
-  teardownAdsterraNativeBanner,
+  mountAdsterraBanner320x50,
+  teardownAdsterraBanner320x50,
 } from '../../services/adsterra';
 
 export interface AdBannerProps {
@@ -25,17 +25,14 @@ export interface AdBannerProps {
 
 export const AdBanner: React.FC<AdBannerProps> = ({
   variant = 'banner',
-  fallbackTitleAr,
-  fallbackTitleEn,
-  fallbackBodyAr,
-  fallbackBodyEn,
   className = '',
 }) => {
-  const { isPro, subscriptionSummary, setIsUpgradeModalOpen, isRTL } = useApp();
+  const { isPro, subscriptionSummary, hasActiveAdFreePass, setIsUpgradeModalOpen, isRTL } = useApp();
   const { activeOrgSubscriptionState } = useOrg();
 
   const showAds = shouldShowAds(subscriptionSummary, {
     isProFlag: isPro,
+    creditsAdFreeActive: hasActiveAdFreePass,
     activeOrgSubscriptionState,
   });
 
@@ -67,128 +64,70 @@ export const AdBanner: React.FC<AdBannerProps> = ({
     };
   }, []);
 
-  // Ensure zero lingering ad scripts or DOM when user is PRO/Business or rejects consent
+  // Ensure zero lingering ad iframes when user is PRO/Business or rejects consent
   useEffect(() => {
     if (!showAds || consentChoice === 'denied') {
-      teardownAdsterraNativeBanner();
+      teardownAdsterraBanner320x50();
     }
   }, [showAds, consentChoice]);
 
-  // Mount singleton Adsterra Native Banner container & inject script strictly once
+  // Mount isolated 320x50 Adsterra banner iframe strictly once per active view
   useEffect(() => {
     if (!canRenderAdsterra || !slotHostRef.current) return;
-    return mountAdsterraNativeBanner(slotHostRef.current, {
+    return mountAdsterraBanner320x50(slotHostRef.current, {
+      title: isRTL ? 'إعلان' : 'Advertisement',
       onError: () => setAdLoadFailed(true),
     });
-  }, [canRenderAdsterra]);
+  }, [canRenderAdsterra, isRTL]);
 
   if (!showAds || !hasConsent) {
     return null;
   }
 
-  const titleText = isRTL
-    ? fallbackTitleAr || 'رَصِيدِي برو — تحكم مالي أذكى بدون إعلانات'
-    : fallbackTitleEn || 'Raseedi PRO — Smarter finance, zero ads';
-
-  const bodyText = isRTL
-    ? fallbackBodyAr || (
-        <>
-          افتح ماسح الفواتير <bdi dir="ltr">Gemini AI</bdi>، المرفقات غير المحدودة، وتقارير <bdi dir="ltr">PDF</bdi> الاحترافية.
-        </>
-      )
-    : fallbackBodyEn ||
-      'Unlock Gemini AI receipt scanning, unlimited photo attachments, and Pro PDF reports.';
-
-  if (variant === 'native-card') {
-    return (
-      <aside
-        aria-label={isRTL ? 'إعلان' : 'Advertisement'}
-        className={`shrink-0 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-3 space-y-2 transition-colors max-w-full overflow-hidden ${className}`}
-        dir={isRTL ? 'rtl' : 'ltr'}
-        data-ad-variant="native-card"
-        data-ad-network="adsterra"
-      >
-        <div className="flex items-center justify-between gap-2">
-          <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[var(--color-bg)] border border-[var(--color-line)] text-[var(--color-muted)]">
-            {isRTL ? 'إعلان' : 'Ad'}
-          </span>
-          <button
-            type="button"
-            onClick={() => setIsUpgradeModalOpen(true)}
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 transition-colors min-h-[32px]"
-          >
-            <Crown className="w-3 h-3 shrink-0 text-[var(--color-gold)]" />
-            <span>{isRTL ? 'إزالة الإعلانات' : 'Remove Ads'}</span>
-          </button>
-        </div>
-
-        {canRenderAdsterra ? (
-          <div
-            ref={slotHostRef}
-            className="overflow-hidden max-w-full rounded-lg min-h-[72px] bg-[var(--color-surface-subtle)]/50"
-          />
-        ) : (
-          <button
-            type="button"
-            onClick={() => setIsUpgradeModalOpen(true)}
-            className="w-full text-start flex items-start gap-2.5 group"
-          >
-            <Sparkles className="w-4 h-4 text-[var(--color-gold)] shrink-0 mt-0.5" />
-            <div className="min-w-0 flex-1 space-y-0.5">
-              <div className="text-xs font-bold text-[var(--color-ink)] group-hover:text-[var(--color-accent)] transition-colors">
-                {titleText}
-              </div>
-              <p className="text-[11px] text-[var(--color-muted)] leading-relaxed">
-                {bodyText}
-              </p>
-            </div>
-          </button>
-        )}
-      </aside>
-    );
-  }
-
   return (
     <aside
       aria-label={isRTL ? 'إعلان' : 'Advertisement'}
-      className={`shrink-0 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl px-3 py-2.5 transition-colors max-w-full overflow-hidden ${className}`}
+      className={`shrink-0 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl px-2.5 py-2 transition-colors max-w-full overflow-hidden ${className}`}
       dir={isRTL ? 'rtl' : 'ltr'}
-      data-ad-variant="banner"
+      data-ad-variant={variant}
+      data-ad-format="banner-320x50"
       data-ad-network="adsterra"
     >
       {canRenderAdsterra ? (
         <div className="space-y-1.5 max-w-full overflow-hidden">
           <div className="flex items-center justify-between gap-2">
-            <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[var(--color-bg)] border border-[var(--color-line)] text-[var(--color-muted)]">
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[var(--color-bg)] border border-[var(--color-line)] text-[var(--color-muted)] leading-none">
               {isRTL ? 'إعلان' : 'Ad'}
             </span>
             <button
               type="button"
               onClick={() => setIsUpgradeModalOpen(true)}
-              className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--color-accent)] hover:underline min-h-[28px]"
+              className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--color-accent)] hover:underline min-h-[24px]"
             >
               <Crown className="w-3 h-3 shrink-0 text-[var(--color-gold)]" />
               <span>{isRTL ? 'إزالة الإعلانات' : 'Remove Ads'}</span>
             </button>
           </div>
-          <div
-            ref={slotHostRef}
-            className="overflow-hidden max-w-full rounded-lg min-h-[64px] bg-[var(--color-surface-subtle)]/50"
-          />
+          <div className="w-full flex items-center justify-center overflow-hidden">
+            <div
+              ref={slotHostRef}
+              className="w-[320px] max-w-full h-[50px] rounded-md overflow-hidden bg-[var(--color-surface-subtle)]/40 flex items-center justify-center"
+            />
+          </div>
         </div>
       ) : (
-        <div className="flex items-center justify-between gap-2.5">
+        <div className="flex items-center justify-between gap-2.5 min-h-[50px]">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[var(--color-bg)] border border-[var(--color-line)] text-[var(--color-muted)] shrink-0">
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[var(--color-bg)] border border-[var(--color-line)] text-[var(--color-muted)] shrink-0 leading-none">
               {isRTL ? 'إعلان' : 'Ad'}
             </span>
             <span className="text-[11px] text-[var(--color-muted)] leading-snug line-clamp-2">
               {isRTL ? (
                 <>
-                  تجربة بدون إعلانات مع باقة <bdi dir="ltr">PRO</bdi>
+                  تجربة هادئة بدون إعلانات مع باقة <bdi dir="ltr">PRO</bdi>
                 </>
               ) : (
-                'Ad-free experience with Raseedi PRO'
+                'Calm, ad-free experience with Raseedi PRO'
               )}
             </span>
           </div>
@@ -206,4 +145,3 @@ export const AdBanner: React.FC<AdBannerProps> = ({
     </aside>
   );
 };
-

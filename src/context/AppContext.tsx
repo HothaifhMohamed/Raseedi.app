@@ -64,6 +64,24 @@ import {
   loadActiveWorkspacePref,
   saveActiveWorkspacePref,
 } from '../services/db';
+import {
+  RaseediCreditsState,
+  RewardedAdSession,
+  CreditRewardRedemptionId,
+  ClaimRewardedAdResult,
+  RedeemCreditResult,
+  loadCreditsStateFromStorage,
+  saveCreditsStateToStorage,
+  mergeRaseediCreditsStates,
+  evaluateDailyStreak,
+  claimRewardedAdReward,
+  redeemCredits as redeemCreditsPure,
+  consumeExportPass as consumeExportPassPure,
+  consumeBonusReceiptScan as consumeBonusReceiptScanPure,
+  isAdFreePassActive,
+  isProPassActive,
+  shouldShowRaseediCreditsUi,
+} from '../services/raseediCredits';
 import { translations } from '../services/i18n';
 import {
   initPWAInstallCapture,
@@ -540,6 +558,23 @@ interface AppContextType {
   scanQuota: ScanQuotaInfo | null;
   setScanQuota: React.Dispatch<React.SetStateAction<ScanQuotaInfo | null>>;
   refreshScanQuota: () => Promise<void>;
+
+  // Raseedi Credits (Smartlink Rewarded Credits System)
+  creditsState: RaseediCreditsState;
+  creditsNowMs: number;
+  hasActiveProPass: boolean;
+  hasActiveAdFreePass: boolean;
+  isCreditsModalOpen: boolean;
+  setIsCreditsModalOpen: (open: boolean) => void;
+  isRewardedAdModalOpen: boolean;
+  setIsRewardedAdModalOpen: (open: boolean) => void;
+  creditsToast: { id: number; text: string } | null;
+  dismissCreditsToast: () => void;
+  showCreditsToast: (text: string) => void;
+  claimRewardedAdCredits: (session: RewardedAdSession | null) => ClaimRewardedAdResult;
+  redeemCreditOption: (redemptionId: CreditRewardRedemptionId) => RedeemCreditResult;
+  consumeCreditExportPass: () => boolean;
+  consumeCreditBonusReceiptScan: () => boolean;
   isCloudSyncing: boolean;
   cloudSyncStatus: 'idle' | 'syncing' | 'synced' | 'error';
   cloudSyncError: string | null;
@@ -1208,8 +1243,149 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     [verifiedPro, isAdminUser, devProTierPreview]
   );
 
-  const isPro = subscriptionSummary.isPro;
-  const planTier = subscriptionSummary.planTier;
+  // Raseedi Credits state (localStorage + synced inside settings.raseediCredits)
+  const [creditsState, setCreditsState] = useState<RaseediCreditsState>(() =>
+    loadCreditsStateFromStorage(null)
+  );
+  const [creditsNowMs, setCreditsNowMs] = useState<number>(() => Date.now());
+  const [isCreditsModalOpen, setIsCreditsModalOpen] = useState(false);
+  const [isRewardedAdModalOpen, setIsRewardedAdModalOpen] = useState(false);
+  const [creditsToast, setCreditsToast] = useState<{ id: number; text: string } | null>(null);
+  const creditsToastTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const dismissCreditsToast = useCallback(() => {
+    if (creditsToastTimerRef.current) {
+      clearTimeout(creditsToastTimerRef.current);
+      creditsToastTimerRef.current = null;
+    }
+    setCreditsToast(null);
+  }, []);
+
+  const showCreditsToast = useCallback((text: string) => {
+    if (creditsToastTimerRef.current) {
+      clearTimeout(creditsToastTimerRef.current);
+    }
+    setCreditsToast({ id: Date.now(), text });
+    creditsToastTimerRef.current = setTimeout(() => {
+      setCreditsToast(null);
+      creditsToastTimerRef.current = null;
+    }, 4500);
+  }, []);
+
+  const persistCreditsState = useCallback(
+    (next: RaseediCreditsState, syncSettings: boolean = true) => {
+      saveCreditsStateToStorage(next, user?.id || null);
+      if (syncSettings) {
+        setSettings((prev) => ({
+          ...prev,
+          raseediCredits: next,
+        }));
+      }
+    },
+    [user?.id]
+  );
+
+  // Hydrate & merge credits when user account or synced settings change, and evaluate daily streak
+  useEffect(() => {
+    const now = Date.now();
+    setCreditsNowMs(now);
+    const stored = loadCreditsStateFromStorage(user?.id || null, now);
+    const merged = mergeRaseediCreditsStates(stored, settings.raseediCredits, now);
+    const evaluated = evaluateDailyStreak(merged, now);
+    setCreditsState(evaluated.state);
+    saveCreditsStateToStorage(evaluated.state, user?.id || null);
+
+    const canShowCredits = shouldShowRaseediCreditsUi(subscriptionSummary);
+    if (evaluated.rewardAwarded > 0 && canShowCredits) {
+      persistCreditsState(evaluated.state, true);
+      const isArabic = settings.language === 'ar';
+      showCreditsToast(
+        isArabic
+          ? `🔥 مكافأة الدخول المتتالي (${evaluated.milestoneHit} أيام): +${evaluated.rewardAwarded} نقاط رصيدي 🪙`
+          : `🔥 ${evaluated.milestoneHit}-Day Login Streak Bonus: +${evaluated.rewardAwarded} Raseedi Credits 🪙`
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, settings.raseediCredits?.updatedAtMs]);
+
+  const hasPaidSubscription = subscriptionSummary.isPro;
+  const hasActiveProPass = !hasPaidSubscription && isProPassActive(creditsState, creditsNowMs);
+  const hasActiveAdFreePass = isAdFreePassActive(creditsState, creditsNowMs);
+
+  // Keep temporary 24h PRO / Ad-Free pass countdowns accurate in real time
+  useEffect(() => {
+    if (!hasActiveProPass && !hasActiveAdFreePass) return;
+    const tick = () => setCreditsNowMs(Date.now());
+    const interval = window.setInterval(tick, 30_000);
+    window.addEventListener('focus', tick);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', tick);
+    };
+  }, [hasActiveProPass, hasActiveAdFreePass]);
+
+  const claimRewardedAdCredits = useCallback(
+    (session: RewardedAdSession | null): ClaimRewardedAdResult => {
+      const now = Date.now();
+      setCreditsNowMs(now);
+      const result = claimRewardedAdReward(creditsState, session, now);
+      if (result.ok) {
+        setCreditsState(result.state);
+        persistCreditsState(result.state, true);
+        const isArabic = settings.language === 'ar';
+        showCreditsToast(
+          isArabic
+            ? `تمت إضافة +${result.awarded} نقاط رصيدي 🪙 — رصيدك الآن ${result.state.balance} نقطة`
+            : `+${result.awarded} Raseedi Credits added 🪙 — Balance: ${result.state.balance}`
+        );
+      }
+      return result;
+    },
+    [creditsState, persistCreditsState, settings.language, showCreditsToast]
+  );
+
+  const redeemCreditOption = useCallback(
+    (redemptionId: CreditRewardRedemptionId): RedeemCreditResult => {
+      const now = Date.now();
+      setCreditsNowMs(now);
+      const result = redeemCreditsPure(creditsState, redemptionId, now);
+      if (result.ok) {
+        setCreditsState(result.state);
+        persistCreditsState(result.state, true);
+        const isArabic = settings.language === 'ar';
+        showCreditsToast(
+          isArabic
+            ? `تم التفعيل بنجاح: ${result.option.titleAr} (-${result.option.cost} نقطة)`
+            : `Activated: ${result.option.titleEn} (-${result.option.cost} credits)`
+        );
+      }
+      return result;
+    },
+    [creditsState, persistCreditsState, settings.language, showCreditsToast]
+  );
+
+  const consumeCreditExportPass = useCallback((): boolean => {
+    const now = Date.now();
+    const res = consumeExportPassPure(creditsState, now);
+    if (!res.ok) return false;
+    setCreditsState(res.state);
+    persistCreditsState(res.state, true);
+    return true;
+  }, [creditsState, persistCreditsState]);
+
+  const consumeCreditBonusReceiptScan = useCallback((): boolean => {
+    const now = Date.now();
+    const res = consumeBonusReceiptScanPure(creditsState, now);
+    if (!res.ok) return false;
+    setCreditsState(res.state);
+    persistCreditsState(res.state, true);
+    return true;
+  }, [creditsState, persistCreditsState]);
+
+  const isPro = hasPaidSubscription || hasActiveProPass;
+  const planTier = hasActiveProPass && subscriptionSummary.planTier === 'free'
+    ? 'personal_pro'
+    : subscriptionSummary.planTier;
   const isBusinessPro = subscriptionSummary.isBusinessPro;
 
   const handleSetIsUpgradeModalOpen = useCallback((open: boolean) => {
@@ -9650,6 +9826,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       scanQuota,
       setScanQuota,
       refreshScanQuota,
+      creditsState,
+      creditsNowMs,
+      hasActiveProPass,
+      hasActiveAdFreePass,
+      isCreditsModalOpen,
+      setIsCreditsModalOpen,
+      isRewardedAdModalOpen,
+      setIsRewardedAdModalOpen,
+      creditsToast,
+      dismissCreditsToast,
+      showCreditsToast,
+      claimRewardedAdCredits,
+      redeemCreditOption,
+      consumeCreditExportPass,
+      consumeCreditBonusReceiptScan,
       isCloudSyncing,
       cloudSyncStatus,
       cloudSyncError,
@@ -9895,6 +10086,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       restorePurchases,
       scanQuota,
       refreshScanQuota,
+      creditsState,
+      creditsNowMs,
+      hasActiveProPass,
+      hasActiveAdFreePass,
+      isCreditsModalOpen,
+      isRewardedAdModalOpen,
+      creditsToast,
+      dismissCreditsToast,
+      showCreditsToast,
+      claimRewardedAdCredits,
+      redeemCreditOption,
+      consumeCreditExportPass,
+      consumeCreditBonusReceiptScan,
       isCloudSyncing,
       cloudSyncStatus,
       cloudSyncError,

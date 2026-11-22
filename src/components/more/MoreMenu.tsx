@@ -34,6 +34,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { sanitizeMerchantRules } from '../../services/merchantRules';
 import { AdBanner } from '../common/AdBanner';
+import { RaseediCreditsCard } from '../rewards/RaseediCreditsCard';
 import { SUPPORT_CONFIG } from '../../constants/support';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
 import { BrandLogo } from '../common/BrandLogo';
@@ -349,6 +350,9 @@ export const MoreMenu: React.FC = () => {
           </button>
         </div>
       )}
+
+      {/* RASEEDI CREDITS REWARDS CARD (Strictly hidden for paid PRO / Business / Admin / Active Org) */}
+      <RaseediCreditsCard />
 
       {/* LEGACY LOCAL ORGS MIGRATION BANNER */}
       {legacyLocalOrgs.length > 0 && (
