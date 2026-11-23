@@ -8,6 +8,11 @@ import { ArrowLeft, ArrowRight } from 'lucide-react';
 import { AppProvider, useApp } from './context/AppContext';
 import { useOrg } from './context/OrgContext';
 import { shouldShowAds } from './services/subscriptionHelpers';
+import {
+  shouldLoadMonetagZone,
+  syncMonetagZoneScript,
+  teardownMonetagZoneScript,
+} from './services/monetag';
 import { useModalBackHandler } from './hooks/useModalBackHandler';
 import { resetScrollToTop } from './hooks/useScrollToTop';
 import {
@@ -113,6 +118,7 @@ const OrgMigrationWizardModal = React.lazy(() =>
 const MainLayout: React.FC = () => {
   const {
     isLoading,
+    isCloudLoaded,
     hasCompletedOnboarding,
     user,
     isGuestMode,
@@ -167,6 +173,9 @@ const MainLayout: React.FC = () => {
   });
 
   const [hasConsentForAds, setHasConsentForAds] = React.useState<boolean>(() => hasAdSenseConsent());
+  const [isBrowserOnline, setIsBrowserOnline] = React.useState<boolean>(() =>
+    typeof navigator === 'undefined' ? true : navigator.onLine
+  );
   const [showFullLedger, setShowFullLedgerState] = React.useState<boolean>(() =>
     activeNav === 'home' && homeTab === 'transactions' ? safeReadFullLedgerPref() : false
   );
@@ -202,6 +211,28 @@ const MainLayout: React.FC = () => {
   }, []);
 
   React.useEffect(() => {
+    const handleOnline = () => setIsBrowserOnline(true);
+    const handleOffline = () => setIsBrowserOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  const isMainShellReady =
+    !isLoading && !isAppLocked && (Boolean(user?.isLoggedIn) || isGuestMode) && hasCompletedOnboarding;
+
+  const isEntitlementResolved = !user?.isLoggedIn || isCloudLoaded;
+  const allowAdSenseRequests =
+    allowAdsForUser &&
+    hasConsentForAds &&
+    isBrowserOnline &&
+    isMainShellReady &&
+    isEntitlementResolved;
+
+  React.useEffect(() => {
     const adSenseClient =
       import.meta.env.VITE_ADSENSE_CLIENT_ID?.trim() || 'ca-pub-7802456607447662';
     const scriptId = 'raseedi-adsense-script';
@@ -214,22 +245,21 @@ const MainLayout: React.FC = () => {
       adsbygoogle?: Array<unknown> & { pauseAdRequests?: number };
     };
 
-    if (!allowAdsForUser || !hasConsentForAds) {
+    if (!allowAdSenseRequests) {
+      document.documentElement.classList.add('raseedi-ads-suppressed');
       try {
         win.adsbygoogle = win.adsbygoogle || [];
         win.adsbygoogle.pauseAdRequests = 1;
       } catch {
         // Non-fatal
       }
-      adSenseScripts.forEach((node) => node.remove());
-      document
-        .querySelectorAll('ins.adsbygoogle, .google-auto-placed')
-        .forEach((node) => node.remove());
       return;
     }
 
+    document.documentElement.classList.remove('raseedi-ads-suppressed');
     try {
-      if (win.adsbygoogle && win.adsbygoogle.pauseAdRequests === 1) {
+      win.adsbygoogle = win.adsbygoogle || [];
+      if (win.adsbygoogle.pauseAdRequests === 1) {
         win.adsbygoogle.pauseAdRequests = 0;
       }
     } catch {
@@ -245,10 +275,28 @@ const MainLayout: React.FC = () => {
     script.crossOrigin = 'anonymous';
     script.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(adSenseClient)}`;
     document.head.appendChild(script);
-  }, [allowAdsForUser, hasConsentForAds]);
+  }, [allowAdSenseRequests]);
 
-  const isMainShellReady =
-    !isLoading && !isAppLocked && (Boolean(user?.isLoggedIn) || isGuestMode) && hasCompletedOnboarding;
+  const allowMonetagZone = shouldLoadMonetagZone({
+    subscriptionSummary,
+    isProFlag: isPro,
+    creditsAdFreeActive: hasActiveAdFreePass,
+    activeOrgSubscriptionState,
+    hasConsent: hasConsentForAds,
+    isOnline: isBrowserOnline,
+    isMainShellReady,
+    isEntitlementResolved,
+  });
+
+  React.useEffect(() => {
+    syncMonetagZoneScript(allowMonetagZone);
+  }, [allowMonetagZone]);
+
+  React.useEffect(() => {
+    return () => {
+      teardownMonetagZoneScript();
+    };
+  }, []);
   useModalBackHandler(isMainShellReady && isAddModalOpen, () => setIsAddModalOpen(false), 'add-tx');
   useModalBackHandler(isMainShellReady && isFilterOpen, () => setIsFilterOpen(false), 'filters');
   useModalBackHandler(isMainShellReady && isSettingsOpen, () => setIsSettingsOpen(false), 'settings');

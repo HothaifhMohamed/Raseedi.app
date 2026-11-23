@@ -12,6 +12,7 @@ import {
   ADSTERRA_BANNER_SCRIPT_SRC,
   ADSTERRA_BANNER_WIDTH,
   buildAdsterraBannerSrcDoc,
+  isBenignAdSenseNoDivError,
   mountAdsterraBanner320x50,
   resolveAdBannerVisibility,
   teardownAdsterraBanner320x50,
@@ -549,5 +550,52 @@ test('AuthGateScreen exposes visitor overview, features, FAQ, and direct pre-log
   assert.ok(authGateSrc.includes('سياسة الخصوصية وشروط الاستخدام'));
   assert.ok(authGateSrc.includes('الدعم والتواصل'));
 });
+
+test('AdSense no_div prevention: pre-pauses before adsbygoogle.js, uses non-destructive CSS suppression, and guards only third-party AdSense no_div errors', () => {
+  // Matches exact third-party AdSense Error: no_div
+  assert.equal(
+    isBenignAdSenseNoDivError({
+      message: 'Error: no_div',
+      filename:
+        'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-7802456607447662',
+      stack:
+        'Error: no_div\n    at https://pagead2.googlesyndication.com/pagead/managed/js/adsense/m202611110101/show_ads_impl_fy2021.js:851:2089',
+    }),
+    true
+  );
+
+  // Never matches app errors (even if message contains no_div) or non-no_div AdSense errors
+  assert.equal(
+    isBenignAdSenseNoDivError({
+      message: 'Error: no_div',
+      filename: 'https://raseedi.app/assets/index.js',
+      stack: 'Error: no_div\n    at App (https://raseedi.app/assets/index.js:12:4)',
+    }),
+    false
+  );
+  assert.equal(
+    isBenignAdSenseNoDivError({
+      message: 'TypeError: Cannot read properties of undefined',
+      filename: 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js',
+    }),
+    false
+  );
+
+  // index.html pauses AdSense requests BEFORE loading adsbygoogle.js
+  const indexHtml = fs.readFileSync(path.resolve(process.cwd(), 'index.html'), 'utf8');
+  const pauseIdx = indexHtml.indexOf('window.adsbygoogle.pauseAdRequests = 1');
+  const scriptIdx = indexHtml.indexOf('pagead2.googlesyndication.com/pagead/js/adsbygoogle.js');
+  assert.ok(pauseIdx > 0 && scriptIdx > pauseIdx, 'index.html must pre-pause AdSense before script tag');
+
+  // App.tsx suppresses non-destructively via raseedi-ads-suppressed without ripping live ins.adsbygoogle nodes
+  const appSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  assert.ok(appSrc.includes('raseedi-ads-suppressed'));
+  assert.equal(appSrc.includes("querySelectorAll('ins.adsbygoogle, .google-auto-placed')"), false);
+
+  // index.css defines the non-destructive suppression class
+  const cssSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/index.css'), 'utf8');
+  assert.ok(cssSrc.includes('html.raseedi-ads-suppressed ins.adsbygoogle'));
+});
+
 
 

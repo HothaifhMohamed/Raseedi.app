@@ -50,6 +50,7 @@ export interface CreditLedgerEntry {
 
 export interface RaseediCreditsState {
   version: 1;
+  ownerId?: string;
   balance: number;
   welcomeBonusClaimed: boolean;
   adsWatchedDate: string; // Local YYYY-MM-DD
@@ -66,6 +67,12 @@ export interface RaseediCreditsState {
   proPassUntilMs: number;
   ledger: CreditLedgerEntry[];
   updatedAtMs: number;
+}
+
+export interface CreditsStorageLike {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem?(key: string): void;
 }
 
 export interface CreditRedemptionOption {
@@ -196,7 +203,44 @@ export function resolveSafeNowMs(
   return Math.max(safeInput, floor);
 }
 
-export function createInitialCreditsState(nowMs: number = Date.now()): RaseediCreditsState {
+export function getCreditsScopeId(userId?: string | null): string {
+  return userId && userId.trim() ? userId.trim() : 'guest';
+}
+
+export function isCreditsStorageKey(key: string): boolean {
+  return (
+    key === CREDITS_STORAGE_KEY_PREFIX ||
+    key.startsWith(`${CREDITS_STORAGE_KEY_PREFIX}:`)
+  );
+}
+
+/**
+ * Returns true ONLY when the credits state is an untouched default welcome state
+ * (no ads watched, no streak progression beyond day 1, no redemptions/passes, no real activity).
+ * Used to guarantee a brand-new default state never overwrites real persisted or cloud credits.
+ */
+export function isDefaultInitialCreditsState(state: RaseediCreditsState): boolean {
+  const hasOnlyWelcomeLedger =
+    state.ledger.length === 0 ||
+    (state.ledger.length === 1 && state.ledger[0].type === 'welcome');
+  return (
+    state.balance === CREDITS_WELCOME_BONUS &&
+    state.adsWatchedToday === 0 &&
+    state.lastAdClaimAtMs === 0 &&
+    state.streakCount <= 1 &&
+    state.claimedStreakMilestones.length === 0 &&
+    state.bonusReceiptScans === 0 &&
+    state.exportPasses === 0 &&
+    state.adFreeUntilMs === 0 &&
+    state.proPassUntilMs === 0 &&
+    hasOnlyWelcomeLedger
+  );
+}
+
+export function createInitialCreditsState(
+  nowMs: number = Date.now(),
+  ownerId?: string
+): RaseediCreditsState {
   const today = getLocalDateKey(nowMs);
   const entry = makeLedgerEntry(
     'welcome',
@@ -206,8 +250,10 @@ export function createInitialCreditsState(nowMs: number = Date.now()): RaseediCr
     'رصيد ترحيبي مجاني للبدء في نقاط رصيدي',
     'Welcome bonus to try Raseedi Credits'
   );
+  const trimmedOwner = ownerId && ownerId.trim() ? ownerId.trim() : undefined;
   return {
     version: 1,
+    ...(trimmedOwner ? { ownerId: trimmedOwner } : {}),
     balance: CREDITS_WELCOME_BONUS,
     welcomeBonusClaimed: true,
     adsWatchedDate: today,
@@ -223,7 +269,8 @@ export function createInitialCreditsState(nowMs: number = Date.now()): RaseediCr
     adFreeUntilMs: 0,
     proPassUntilMs: 0,
     ledger: [entry],
-    updatedAtMs: nowMs,
+    // Keep updatedAtMs at 0 on fresh unmodified default state so it never outranks saved/cloud history
+    updatedAtMs: 0,
   };
 }
 
@@ -274,8 +321,12 @@ export function normalizeCreditsState(
     );
   }
 
+  const normalizedOwnerId =
+    typeof obj.ownerId === 'string' && obj.ownerId.trim() ? obj.ownerId.trim() : undefined;
+
   return {
     version: 1,
+    ...(normalizedOwnerId ? { ownerId: normalizedOwnerId } : {}),
     balance,
     welcomeBonusClaimed: true,
     adsWatchedDate:
@@ -329,7 +380,7 @@ export function normalizeCreditsState(
     updatedAtMs:
       typeof obj.updatedAtMs === 'number' && Number.isFinite(obj.updatedAtMs)
         ? Math.max(0, Math.floor(obj.updatedAtMs))
-        : safeMax,
+        : 0,
   };
 }
 
@@ -961,6 +1012,7 @@ export function shouldShowRaseediCreditsUi(
 /**
  * Merges local and cloud/backup credit states safely without losing earned
  * credits or weakening anti-abuse high-water-mark timestamps.
+ * A fresh default welcome state can NEVER clobber a real persisted or cloud state.
  */
 export function mergeRaseediCreditsStates(
   local: RaseediCreditsState,
@@ -969,8 +1021,18 @@ export function mergeRaseediCreditsStates(
 ): RaseediCreditsState {
   if (!incoming) return local;
   const normalizedIncoming = normalizeCreditsState(incoming, nowMs);
-  const base =
-    normalizedIncoming.updatedAtMs > local.updatedAtMs ? normalizedIncoming : local;
+  const localIsDefault = isDefaultInitialCreditsState(local);
+  const incomingIsDefault = isDefaultInitialCreditsState(normalizedIncoming);
+
+  let base: RaseediCreditsState;
+  if (localIsDefault && !incomingIsDefault) {
+    base = normalizedIncoming;
+  } else if (!localIsDefault && incomingIsDefault) {
+    base = local;
+  } else {
+    base =
+      normalizedIncoming.updatedAtMs > local.updatedAtMs ? normalizedIncoming : local;
+  }
   const other = base === normalizedIncoming ? local : normalizedIncoming;
 
   const maxObserved = Math.max(
@@ -984,8 +1046,25 @@ export function mergeRaseediCreditsStates(
       ? normalizedIncoming.adsWatchedDate
       : local.adsWatchedDate;
 
+  const streakDayDiff = getLocalDayDiff(base.lastStreakDate, other.lastStreakDate);
+  let resolvedLastStreakDate = base.lastStreakDate;
+  let resolvedStreakCount = base.streakCount;
+  let resolvedStreakCycleStartDate = base.streakCycleStartDate;
+
+  if (streakDayDiff > 0 && !isDefaultInitialCreditsState(other)) {
+    resolvedLastStreakDate = other.lastStreakDate;
+    resolvedStreakCount = other.streakCount;
+    resolvedStreakCycleStartDate = other.streakCycleStartDate;
+  } else if (streakDayDiff === 0 && other.streakCount > base.streakCount) {
+    resolvedStreakCount = other.streakCount;
+    resolvedStreakCycleStartDate = other.streakCycleStartDate;
+  }
+
+  const resolvedOwnerId = local.ownerId || normalizedIncoming.ownerId;
+
   return {
     ...base,
+    ...(resolvedOwnerId ? { ownerId: resolvedOwnerId } : {}),
     welcomeBonusClaimed: true,
     maxObservedNowMs: maxObserved,
     adsWatchedDate: latestAdDate,
@@ -995,6 +1074,9 @@ export function mergeRaseediCreditsStates(
       ? normalizedIncoming.adsWatchedToday
       : local.adsWatchedToday,
     lastAdClaimAtMs: Math.max(local.lastAdClaimAtMs, normalizedIncoming.lastAdClaimAtMs),
+    lastStreakDate: resolvedLastStreakDate,
+    streakCount: resolvedStreakCount,
+    streakCycleStartDate: resolvedStreakCycleStartDate,
     adFreeUntilMs: Math.max(local.adFreeUntilMs, normalizedIncoming.adFreeUntilMs),
     proPassUntilMs: Math.max(local.proPassUntilMs, normalizedIncoming.proPassUntilMs),
     claimedStreakMilestones: Array.from(
@@ -1004,45 +1086,80 @@ export function mergeRaseediCreditsStates(
 }
 
 export function getCreditsStorageKey(userId?: string | null): string {
-  const scope = userId && userId.trim() ? userId.trim() : 'guest';
-  return `${CREDITS_STORAGE_KEY_PREFIX}:${scope}`;
+  return `${CREDITS_STORAGE_KEY_PREFIX}:${getCreditsScopeId(userId)}`;
+}
+
+function resolveCreditsStorage(override?: CreditsStorageLike): CreditsStorageLike | null {
+  if (override) return override;
+  if (typeof window !== 'undefined' && window.localStorage) {
+    return window.localStorage;
+  }
+  return null;
 }
 
 export function loadCreditsStateFromStorage(
   userId?: string | null,
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  options?: { storage?: CreditsStorageLike; fallbackToGuest?: boolean }
 ): RaseediCreditsState {
+  const scopeId = getCreditsScopeId(userId);
   try {
-    if (typeof window === 'undefined' || !window.localStorage) {
-      return createInitialCreditsState(nowMs);
+    const storage = resolveCreditsStorage(options?.storage);
+    if (!storage) {
+      return createInitialCreditsState(nowMs, scopeId);
     }
     const scopedKey = getCreditsStorageKey(userId);
-    const raw = window.localStorage.getItem(scopedKey);
+    const raw = storage.getItem(scopedKey);
     if (raw) {
-      return normalizeCreditsState(JSON.parse(raw), nowMs);
+      return {
+        ...normalizeCreditsState(JSON.parse(raw), nowMs),
+        ownerId: scopeId,
+      };
     }
-    // Migrate guest balance into newly signed-in free account once if no account state exists yet
-    if (userId) {
-      const guestRaw = window.localStorage.getItem(getCreditsStorageKey(null));
+    // Migrate non-default guest activity into newly signed-in free account once if no account state exists yet
+    if (userId && userId.trim() && options?.fallbackToGuest !== false) {
+      const guestRaw = storage.getItem(getCreditsStorageKey(null));
       if (guestRaw) {
-        return normalizeCreditsState(JSON.parse(guestRaw), nowMs);
+        const normalizedGuest = normalizeCreditsState(JSON.parse(guestRaw), nowMs);
+        if (!isDefaultInitialCreditsState(normalizedGuest)) {
+          return {
+            ...normalizedGuest,
+            ownerId: scopeId,
+          };
+        }
       }
     }
-    return createInitialCreditsState(nowMs);
+    return createInitialCreditsState(nowMs, scopeId);
   } catch {
-    return createInitialCreditsState(nowMs);
+    return createInitialCreditsState(nowMs, scopeId);
   }
 }
 
 export function saveCreditsStateToStorage(
   state: RaseediCreditsState,
-  userId?: string | null
+  userId?: string | null,
+  options?: { storage?: CreditsStorageLike }
 ): void {
   try {
-    if (typeof window === 'undefined' || !window.localStorage) return;
+    const storage = resolveCreditsStorage(options?.storage);
+    if (!storage) return;
+    const scopeId = getCreditsScopeId(userId);
     const scopedKey = getCreditsStorageKey(userId);
-    window.localStorage.setItem(scopedKey, JSON.stringify(state));
+    storage.setItem(scopedKey, JSON.stringify({ ...state, ownerId: scopeId }));
   } catch {
     // Ignore storage quota errors
+  }
+}
+
+export function removeCreditsStateFromStorage(
+  userId?: string | null,
+  options?: { storage?: CreditsStorageLike }
+): void {
+  try {
+    const storage = resolveCreditsStorage(options?.storage);
+    if (!storage || !storage.removeItem) return;
+    storage.removeItem(getCreditsStorageKey(userId));
+  } catch {
+    // Ignore storage errors
   }
 }

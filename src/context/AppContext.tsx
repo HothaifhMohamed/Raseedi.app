@@ -70,8 +70,11 @@ import {
   CreditRewardRedemptionId,
   ClaimRewardedAdResult,
   RedeemCreditResult,
+  createInitialCreditsState,
+  getCreditsScopeId,
   loadCreditsStateFromStorage,
   saveCreditsStateToStorage,
+  removeCreditsStateFromStorage,
   mergeRaseediCreditsStates,
   evaluateDailyStreak,
   claimRewardedAdReward,
@@ -1260,10 +1263,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     [verifiedPro, isAdminUser, devProTierPreview]
   );
 
-  // Raseedi Credits state (localStorage + synced inside settings.raseediCredits)
+  // Raseedi Credits state (localStorage per-account scoped + synced inside settings.raseediCredits)
   const [creditsState, setCreditsState] = useState<RaseediCreditsState>(() =>
     loadCreditsStateFromStorage(null)
   );
+  const latestCreditsStateRef = React.useRef<RaseediCreditsState>(creditsState);
+  latestCreditsStateRef.current = creditsState;
   const [creditsNowMs, setCreditsNowMs] = useState<number>(() => Date.now());
   const [isCreditsModalOpen, setIsCreditsModalOpen] = useState(false);
   const [isRewardedAdModalOpen, setIsRewardedAdModalOpen] = useState(false);
@@ -1291,30 +1296,62 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const persistCreditsState = useCallback(
     (next: RaseediCreditsState, syncSettings: boolean = true) => {
-      saveCreditsStateToStorage(next, user?.id || null);
+      const activeUid = user?.isLoggedIn ? user.id : null;
+      const scopeId = getCreditsScopeId(activeUid);
+      const taggedNext: RaseediCreditsState = { ...next, ownerId: scopeId };
+      latestCreditsStateRef.current = taggedNext;
+      saveCreditsStateToStorage(taggedNext, activeUid);
       if (syncSettings) {
-        setSettings((prev) => ({
-          ...prev,
-          raseediCredits: next,
-        }));
+        setSettings((prev) => {
+          const nextSettings: AppSettings = {
+            ...prev,
+            raseediCredits: taggedNext,
+          };
+          if (latestPersonalRef.current) {
+            latestPersonalRef.current = {
+              ...latestPersonalRef.current,
+              settings: nextSettings,
+            };
+            persistDataDebounced(latestPersonalRef.current, handleLocalPersistError);
+          }
+          return nextSettings;
+        });
       }
     },
-    [user?.id]
+    [user?.id, user?.isLoggedIn, handleLocalPersistError]
   );
 
-  // Hydrate & merge credits when user account or synced settings change, and evaluate daily streak
+  // Hydrate & merge credits when user account, guest mode, or synced settings change, and evaluate daily streak
   useEffect(() => {
     const now = Date.now();
     setCreditsNowMs(now);
-    const stored = loadCreditsStateFromStorage(user?.id || null, now);
-    const merged = mergeRaseediCreditsStates(stored, settings.raseediCredits, now);
+    const hasActiveSession = Boolean(user?.isLoggedIn || isGuestMode);
+    if (!hasActiveSession) {
+      const clean = createInitialCreditsState(now);
+      latestCreditsStateRef.current = clean;
+      setCreditsState(clean);
+      return;
+    }
+
+    const activeUid = user?.isLoggedIn ? user.id : null;
+    const scopeId = getCreditsScopeId(activeUid);
+    const stored = loadCreditsStateFromStorage(activeUid, now);
+    const incomingSettingsCredits =
+      settings.raseediCredits &&
+      (!settings.raseediCredits.ownerId || settings.raseediCredits.ownerId === scopeId)
+        ? settings.raseediCredits
+        : undefined;
+    const merged = mergeRaseediCreditsStates(stored, incomingSettingsCredits, now);
     const evaluated = evaluateDailyStreak(merged, now);
-    setCreditsState(evaluated.state);
-    saveCreditsStateToStorage(evaluated.state, user?.id || null);
+    const finalState: RaseediCreditsState = { ...evaluated.state, ownerId: scopeId };
+
+    latestCreditsStateRef.current = finalState;
+    setCreditsState(finalState);
+    saveCreditsStateToStorage(finalState, activeUid);
 
     const canShowCredits = shouldShowRaseediCreditsUi(subscriptionSummary);
     if (evaluated.rewardAwarded > 0 && canShowCredits) {
-      persistCreditsState(evaluated.state, true);
+      persistCreditsState(finalState, true);
       const isArabic = settings.language === 'ar';
       showCreditsToast(
         isArabic
@@ -1323,7 +1360,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, settings.raseediCredits?.updatedAtMs]);
+  }, [user?.id, user?.isLoggedIn, isGuestMode, settings.raseediCredits?.updatedAtMs]);
 
   const hasPaidSubscription = subscriptionSummary.isPro;
   const hasActiveProPass = !hasPaidSubscription && isProPassActive(creditsState, creditsNowMs);
@@ -2125,10 +2162,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         writeStoredThemePreference(reconciledTheme.theme, reconciledTheme.themeUpdatedAt);
         applyThemeToDocument(reconciledTheme.theme);
       }
+      // Preserve & safely merge per-account Raseedi Credits (never let an older cloud backup or empty state overwrite earned local credits)
+      const creditsNow = Date.now();
+      const creditsScopeUid = currentUser?.id || null;
+      const creditsScopeId = getCreditsScopeId(creditsScopeUid);
+      const preservedLocalCredits = loadCreditsStateFromStorage(creditsScopeUid, creditsNow, {
+        fallbackToGuest: false,
+      });
+      const mergedCredits: RaseediCreditsState = {
+        ...mergeRaseediCreditsStates(
+          preservedLocalCredits,
+          baseMergedSettings.raseediCredits,
+          creditsNow
+        ),
+        ownerId: creditsScopeId,
+      };
+      saveCreditsStateToStorage(mergedCredits, creditsScopeUid);
+      latestCreditsStateRef.current = mergedCredits;
+      setCreditsState(mergedCredits);
+
       // Preserve local device App Lock PIN (PIN hashes are strictly local and stripped from cloud backups)
       const hasLocalAppPin = Boolean(prevSettings.isAppLockEnabled && prevSettings.appPin);
       const mergedSettings: AppSettings = {
         ...baseMergedSettings,
+        raseediCredits: mergedCredits,
         theme: reconciledTheme.theme,
         ...(reconciledTheme.themeUpdatedAt > 0
           ? { themeUpdatedAt: reconciledTheme.themeUpdatedAt }
@@ -3985,6 +4042,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setIsCloudSyncing(true);
       setCloudSyncError(null);
       try {
+        const signingOutUid =
+          latestPersonalRef.current.user?.id || auth.currentUser?.uid || null;
+        const signingOutScopeId = getCreditsScopeId(signingOutUid);
+        const latestCreditsSnapshot: RaseediCreditsState = {
+          ...mergeRaseediCreditsStates(
+            latestCreditsStateRef.current,
+            latestPersonalRef.current.settings?.raseediCredits &&
+              (!latestPersonalRef.current.settings.raseediCredits.ownerId ||
+                latestPersonalRef.current.settings.raseediCredits.ownerId === signingOutScopeId)
+              ? latestPersonalRef.current.settings.raseediCredits
+              : undefined,
+            Date.now()
+          ),
+          ownerId: signingOutScopeId,
+        };
+
         if (options?.backupFirst && auth.currentUser) {
           const snap = latestPersonalRef.current;
           try {
@@ -4002,7 +4075,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 moneyCircles: snap.moneyCircles,
                 orgWorkspaces: latestLocalOrgWorkspacesRef.current,
                 activeWorkspace: activeWorkspaceRef.current || 'personal',
-                settings: snap.settings,
+                settings: {
+                  ...snap.settings,
+                  raseediCredits: latestCreditsSnapshot,
+                },
                 hasCompletedOnboarding: snap.hasCompletedOnboarding,
               },
               { source: 'manual', recordHistory: true }
@@ -4019,6 +4095,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }
         }
 
+        // Persist the active user's Raseedi Credits to their scoped storage key before clearing
+        // session data (clearLocalAppStorageAndDb intentionally preserves raseedi_credits_state_v1:*).
+        if (signingOutUid || latestPersonalRef.current.user?.isLoggedIn || loadGuestModePref()) {
+          saveCreditsStateToStorage(latestCreditsSnapshot, signingOutUid);
+        }
+
+        autoBackupSchedulerRef.current?.cancel();
         await signOutGoogle().catch(() => {});
         await clearLocalAppStorageAndDb().catch(() => {});
 
@@ -4071,6 +4154,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               }
             : DEFAULT_SETTINGS
         );
+        const cleanAuthGateCredits = createInitialCreditsState(Date.now());
+        latestCreditsStateRef.current = cleanAuthGateCredits;
+        setCreditsState(cleanAuthGateCredits);
         setUser(null);
         setFirebaseAuthUser(null);
         setVerifiedPro(null);
@@ -4628,6 +4714,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const deleteAccountAndData = useCallback(
     async (): Promise<{ ok: boolean; errorCode?: string; errorMessage?: string }> => {
+      const deletedUid =
+        auth.currentUser?.uid || latestPersonalRef.current.user?.id || null;
       try {
         if (auth.currentUser) {
           try {
@@ -4644,6 +4732,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           await signOutGoogle().catch(() => {});
         }
         await clearLocalAppStorageAndDb();
+        removeCreditsStateFromStorage(deletedUid);
+        const resetCredits = createInitialCreditsState(Date.now());
+        latestCreditsStateRef.current = resetCredits;
+        setCreditsState(resetCredits);
         latestVerifiedProRef.current = null;
         setPersonalTransactions([]);
         setPersonalWallets(DEFAULT_WALLETS);
@@ -4691,6 +4783,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         // Even on unexpected local error, still reset session cleanly
         await signOutGoogle().catch(() => {});
         await clearLocalAppStorageAndDb().catch(() => {});
+        removeCreditsStateFromStorage(deletedUid);
+        const resetCredits = createInitialCreditsState(Date.now());
+        latestCreditsStateRef.current = resetCredits;
+        setCreditsState(resetCredits);
         setUser(null);
         setVerifiedPro(null);
         setCloudSyncStatus('idle');

@@ -615,6 +615,11 @@ const ADSTERRA_CSP_HOSTS = [
   'https://*.adsterratools.com',
 ];
 
+const MONETAG_CSP_HOSTS = [
+  'https://nap5k.com',
+  'https://*.nap5k.com',
+];
+
 export function buildCspDirectives(options: {
   isProduction: boolean;
   allowPreviewFraming: boolean;
@@ -641,6 +646,7 @@ export function buildCspDirectives(options: {
     'https://adservice.google.com',
     'https://*.adtrafficquality.google',
     ...ADSTERRA_CSP_HOSTS,
+    ...MONETAG_CSP_HOSTS,
     'wss:',
   ];
 
@@ -675,10 +681,19 @@ export function buildCspDirectives(options: {
       'https://*.adtrafficquality.google',
       'https://adservice.google.com',
       ...ADSTERRA_CSP_HOSTS,
+      ...MONETAG_CSP_HOSTS,
     ],
     styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
     fontSrc: ["'self'", 'data:', 'https://fonts.gstatic.com'],
-    imgSrc: ["'self'", 'data:', 'blob:', 'https://bauval.org', 'https://araplhn.org', 'https:'],
+    imgSrc: [
+      "'self'",
+      'data:',
+      'blob:',
+      'https://bauval.org',
+      'https://araplhn.org',
+      'https://nap5k.com',
+      'https:',
+    ],
     connectSrc,
     frameSrc: [
       "'self'",
@@ -690,6 +705,7 @@ export function buildCspDirectives(options: {
       'https://*.googlesyndication.com',
       'https://*.adtrafficquality.google',
       ...ADSTERRA_CSP_HOSTS,
+      ...MONETAG_CSP_HOSTS,
     ],
     frameAncestors,
     workerSrc: ["'self'", 'blob:'],

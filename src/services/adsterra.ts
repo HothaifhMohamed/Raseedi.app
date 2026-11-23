@@ -323,3 +323,29 @@ export function mountAdsterraBanner320x50(
 export function teardownAdsterraBanner320x50(doc: Document = document): void {
   removeExistingBannerIframes(doc);
 }
+
+/**
+ * Returns true ONLY for the known third-party Google AdSense Auto Ads `Error: no_div`
+ * emitted asynchronously by `pagead2.googlesyndication.com` / `doubleclick.net`
+ * when a SPA transitions routes or runs inside a constrained preview frame.
+ * Never matches application errors.
+ */
+export function isBenignAdSenseNoDivError(input: {
+  message?: unknown;
+  filename?: unknown;
+  stack?: unknown;
+}): boolean {
+  const message = typeof input.message === 'string' ? input.message : '';
+  const filename = typeof input.filename === 'string' ? input.filename : '';
+  const stack = typeof input.stack === 'string' ? input.stack : '';
+
+  const isNoDiv = /\bno_div\b/i.test(message) || /\bno_div\b/i.test(stack);
+  if (!isNoDiv) return false;
+
+  const isAdSenseOrigin =
+    /googlesyndication\.com|doubleclick\.net|adsbygoogle\.js|show_ads_impl/i.test(filename) ||
+    /googlesyndication\.com|doubleclick\.net|adsbygoogle\.js|show_ads_impl/i.test(stack);
+
+  return isAdSenseOrigin;
+}
+

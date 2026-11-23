@@ -10,25 +10,35 @@ import {
   CREDITS_AD_MAX_TICK_DELTA_MS,
   CREDITS_AD_REWARD,
   CREDITS_DAILY_AD_LIMIT,
+  CREDITS_STORAGE_KEY_PREFIX,
   CREDITS_STREAK_3_REWARD,
   CREDITS_STREAK_7_REWARD,
   CREDITS_WELCOME_BONUS,
+  type CreditsStorageLike,
   advanceRewardedAdSession,
   claimRewardedAdReward,
   consumeBonusReceiptScan,
   consumeExportPass,
   createInitialCreditsState,
   evaluateDailyStreak,
+  getCreditsStorageKey,
   getRewardedAdAvailability,
   getRewardedAdRemainingMs,
   isAdFreePassActive,
+  isCreditsStorageKey,
+  isDefaultInitialCreditsState,
   isProPassActive,
+  loadCreditsStateFromStorage,
   mergeRaseediCreditsStates,
   recordRewardedAdOpenAttempt,
   redeemCredits,
+  removeCreditsStateFromStorage,
+  saveCreditsStateToStorage,
   shouldShowRaseediCreditsUi,
   startRewardedAdSession,
 } from './raseediCredits';
+import { shouldPreserveLocalStorageKeyOnLogout } from './db';
+import { THEME_PREF_STORAGE_KEY } from './workspaceSync';
 import { computeUserSubscriptionSummary, shouldShowAds } from './subscriptionHelpers';
 import { buildCspDirectives } from './serverSecurity';
 
@@ -458,3 +468,270 @@ test('CSP directives in serverSecurity.ts and vercel.json allow https://araplhn.
   assert.ok(cspHeader.value.includes('https://araplhn.org'));
   assert.ok(cspHeader.value.includes('https://*.araplhn.org'));
 });
+
+function createMockStorage(): CreditsStorageLike & {
+  store: Map<string, string>;
+  keys: () => string[];
+} {
+  const store = new Map<string, string>();
+  return {
+    store,
+    keys: () => Array.from(store.keys()),
+    getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+    setItem: (key: string, value: string) => {
+      store.set(key, value);
+    },
+    removeItem: (key: string) => {
+      store.delete(key);
+    },
+  };
+}
+
+function simulateLogoutLocalStorageClear(
+  storage: ReturnType<typeof createMockStorage>
+): void {
+  const toRemove = storage
+    .keys()
+    .filter(
+      (k) =>
+        !shouldPreserveLocalStorageKeyOnLogout(k) &&
+        (k.startsWith('raseedi_pin_lockout_v1:') || k.startsWith('raseedi_'))
+    );
+  toRemove.forEach((k) => storage.removeItem?.(k));
+}
+
+function completeOneRewardedAd(
+  state: ReturnType<typeof createInitialCreditsState>,
+  now: number
+): { state: ReturnType<typeof createInitialCreditsState>; nextNow: number } {
+  const started = startRewardedAdSession(state, now, { isOnline: true, openAttempted: false });
+  if (started.ok === false) {
+    throw new Error(`Expected ad session to start, got ${started.reason}`);
+  }
+  let session = recordRewardedAdOpenAttempt(started.session, {
+    succeeded: true,
+    isOnline: true,
+  });
+  for (let step = 0; step < 10; step++) {
+    session = advanceRewardedAdSession(session, {
+      deltaMs: 1000,
+      isVisibleAndFocused: true,
+      isOnline: true,
+    });
+  }
+  const claimAt = now + 10_200;
+  const claim = claimRewardedAdReward(state, session, claimAt, { isOnline: true });
+  if (claim.ok === false) {
+    throw new Error(`Expected ad claim to succeed, got ${claim.reason}`);
+  }
+  return { state: claim.state, nextNow: claimAt + CREDITS_AD_COOLDOWN_MS + 500 };
+}
+
+test('Raseedi Credits balance, daily ad cap, cooldown, streak, and clock guard persist across logout & re-login', () => {
+  const storage = createMockStorage();
+  const uid = 'uid-free-user-001';
+  let now = BASE_DAY_1;
+
+  // Populate other localStorage keys that MUST be cleared on logout + theme key that MUST stay
+  storage.setItem('raseedi_settings_v1', JSON.stringify({ language: 'ar' }));
+  storage.setItem('raseedi_data_v1', JSON.stringify({ transactions: [] }));
+  storage.setItem('raseedi_guest_mode_v1', '0');
+  storage.setItem('raseedi_pin_lockout_v1:app', JSON.stringify({ count: 2 }));
+  storage.setItem(THEME_PREF_STORAGE_KEY, JSON.stringify({ theme: 'dark', updatedAt: now }));
+
+  // 1. User advances streak through Day 2 and Day 3 (+5 milestone -> 20 credits),
+  // then watches 2 rewarded ads on Day 3 (+20 -> 40 credits, adsWatchedToday = 2)
+  let state = loadCreditsStateFromStorage(uid, now, { storage });
+  assert.equal(state.balance, 15);
+  assert.equal(isDefaultInitialCreditsState(state), true);
+
+  const day2 = BASE_DAY_1 + CREDITS_24H_MS;
+  const day3 = BASE_DAY_1 + 2 * CREDITS_24H_MS;
+  state = evaluateDailyStreak(state, day2).state;
+  const day3Eval = evaluateDailyStreak(state, day3);
+  assert.equal(day3Eval.milestoneHit, 3);
+  assert.equal(day3Eval.rewardAwarded, CREDITS_STREAK_3_REWARD);
+  state = day3Eval.state;
+
+  now = day3 + 1_000;
+  for (let i = 0; i < 2; i++) {
+    const res = completeOneRewardedAd(state, now);
+    state = res.state;
+    now = res.nextNow;
+    saveCreditsStateToStorage(state, uid, { storage });
+  }
+
+  const balanceBeforeLogout = state.balance;
+  const watchedBeforeLogout = state.adsWatchedToday;
+  const lastClaimBeforeLogout = state.lastAdClaimAtMs;
+  const maxNowBeforeLogout = state.maxObservedNowMs;
+  const ledgerLenBeforeLogout = state.ledger.length;
+  assert.equal(balanceBeforeLogout, 40);
+  assert.equal(watchedBeforeLogout, 2);
+
+  // 2. Simulate logout clearing localStorage via shouldPreserveLocalStorageKeyOnLogout
+  assert.equal(getCreditsStorageKey(uid).startsWith(`${CREDITS_STORAGE_KEY_PREFIX}:`), true);
+  assert.equal(isCreditsStorageKey(getCreditsStorageKey(uid)), true);
+  assert.equal(shouldPreserveLocalStorageKeyOnLogout(getCreditsStorageKey(uid)), true);
+  assert.equal(shouldPreserveLocalStorageKeyOnLogout(THEME_PREF_STORAGE_KEY), true);
+  assert.equal(shouldPreserveLocalStorageKeyOnLogout('raseedi_settings_v1'), false);
+  assert.equal(shouldPreserveLocalStorageKeyOnLogout('raseedi_data_v1'), false);
+
+  simulateLogoutLocalStorageClear(storage);
+
+  // Session keys cleared, theme & credits key preserved
+  assert.equal(storage.getItem('raseedi_settings_v1'), null);
+  assert.equal(storage.getItem('raseedi_data_v1'), null);
+  assert.equal(storage.getItem('raseedi_pin_lockout_v1:app'), null);
+  assert.notEqual(storage.getItem(THEME_PREF_STORAGE_KEY), null);
+  assert.notEqual(storage.getItem(getCreditsStorageKey(uid)), null);
+
+  // 3. Re-login as the same user -> exact credits state restored!
+  const restored = loadCreditsStateFromStorage(uid, day3 + 5_000, { storage });
+  assert.equal(restored.balance, balanceBeforeLogout);
+  assert.equal(restored.adsWatchedToday, watchedBeforeLogout);
+  assert.equal(restored.lastAdClaimAtMs, lastClaimBeforeLogout);
+  assert.equal(restored.streakCount, 3);
+  assert.equal(restored.claimedStreakMilestones.length, 1);
+  assert.equal(restored.maxObservedNowMs >= maxNowBeforeLogout, true);
+  assert.equal(restored.ledger.length, ledgerLenBeforeLogout);
+  assert.equal(restored.ownerId, uid);
+});
+
+test('Raseedi Credits are strictly isolated between different accounts and guest mode across logout/re-login', () => {
+  const storage = createMockStorage();
+  let now = BASE_DAY_1;
+
+  // User A earns 30 credits (balance 45, 3 ads watched)
+  let userA = loadCreditsStateFromStorage('uid-alpha', now, { storage });
+  for (let i = 0; i < 3; i++) {
+    const res = completeOneRewardedAd(userA, now);
+    userA = res.state;
+    now = res.nextNow;
+    saveCreditsStateToStorage(userA, 'uid-alpha', { storage });
+  }
+  assert.equal(userA.balance, 45);
+  assert.equal(userA.adsWatchedToday, 3);
+
+  // User A logs out
+  simulateLogoutLocalStorageClear(storage);
+
+  // User B logs in on the same device -> must NOT inherit User A's credits
+  let userB = loadCreditsStateFromStorage('uid-beta', now + 1_000, { storage });
+  assert.equal(userB.balance, CREDITS_WELCOME_BONUS);
+  assert.equal(userB.adsWatchedToday, 0);
+  assert.equal(userB.ownerId, 'uid-beta');
+
+  // User B watches 1 ad -> balance 25, adsWatchedToday 1
+  const bRes = completeOneRewardedAd(userB, now + 2_000);
+  userB = bRes.state;
+  saveCreditsStateToStorage(userB, 'uid-beta', { storage });
+
+  // User B logs out, User A logs back in -> User A's exact 45 credits & 3 ads remain intact
+  simulateLogoutLocalStorageClear(storage);
+  const restoredA = loadCreditsStateFromStorage('uid-alpha', bRes.nextNow + 5_000, { storage });
+  assert.equal(restoredA.balance, 45);
+  assert.equal(restoredA.adsWatchedToday, 3);
+  assert.equal(restoredA.ownerId, 'uid-alpha');
+
+  // Permanent deletion of User B removes ONLY User B's key
+  removeCreditsStateFromStorage('uid-beta', { storage });
+  assert.equal(storage.getItem(getCreditsStorageKey('uid-beta')), null);
+  assert.notEqual(storage.getItem(getCreditsStorageKey('uid-alpha')), null);
+});
+
+test('mergeRaseediCreditsStates never lets a fresh default initial state overwrite real cloud or local earned credits', () => {
+  const earlierNow = BASE_DAY_1 + 100_000;
+  const laterNow = BASE_DAY_1 + 500_000;
+
+  // Scenario 1: Fresh device default (created at laterNow) merges with older real cloud credits
+  const freshDefaultLocal = createInitialCreditsState(laterNow, 'uid-cloud-user');
+  assert.equal(freshDefaultLocal.updatedAtMs, 0);
+  assert.equal(isDefaultInitialCreditsState(freshDefaultLocal), true);
+
+  const realCloudCredits = {
+    ...createInitialCreditsState(BASE_DAY_1, 'uid-cloud-user'),
+    balance: 45,
+    adsWatchedToday: 3,
+    lastAdClaimAtMs: earlierNow,
+    streakCount: 4,
+    claimedStreakMilestones: ['cycle:2026-11-19:3'],
+    maxObservedNowMs: earlierNow,
+    updatedAtMs: earlierNow,
+  };
+
+  const mergedOnFreshDevice = mergeRaseediCreditsStates(
+    freshDefaultLocal,
+    realCloudCredits,
+    laterNow
+  );
+  assert.equal(mergedOnFreshDevice.balance, 45);
+  assert.equal(mergedOnFreshDevice.adsWatchedToday, 3);
+  assert.equal(mergedOnFreshDevice.lastAdClaimAtMs, earlierNow);
+  assert.equal(mergedOnFreshDevice.streakCount, 4);
+  assert.equal(mergedOnFreshDevice.maxObservedNowMs, laterNow);
+
+  // Scenario 2: Earned local credits merge with an older untouched default cloud backup
+  const mergedWithStaleCloud = mergeRaseediCreditsStates(
+    realCloudCredits,
+    createInitialCreditsState(laterNow, 'uid-cloud-user'),
+    laterNow
+  );
+  assert.equal(mergedWithStaleCloud.balance, 45);
+  assert.equal(mergedWithStaleCloud.adsWatchedToday, 3);
+  assert.equal(mergedWithStaleCloud.streakCount, 4);
+});
+
+test('db.ts and AppContext.tsx wire logout preservation and cloud-merge protection for Raseedi Credits', () => {
+  const dbSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/services/db.ts'),
+    'utf8'
+  );
+  assert.ok(dbSource.includes('shouldPreserveLocalStorageKeyOnLogout'));
+  assert.ok(dbSource.includes('isCreditsStorageKey'));
+
+  const appContextSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/context/AppContext.tsx'),
+    'utf8'
+  );
+  assert.ok(appContextSource.includes('latestCreditsStateRef'));
+  assert.ok(appContextSource.includes('preservedLocalCredits'));
+  assert.ok(appContextSource.includes('removeCreditsStateFromStorage'));
+});
+
+test('Upgrading a free user to PRO/Business/Admin/Active Org hides credits & ads without wiping stored Raseedi Credits', () => {
+  const storage = createMockStorage();
+  const uid = 'uid-upgrade-user';
+  let now = BASE_DAY_1;
+
+  // Earn 20 credits while Free (balance 35, 2 ads watched)
+  let state = loadCreditsStateFromStorage(uid, now, { storage });
+  for (let i = 0; i < 2; i++) {
+    const res = completeOneRewardedAd(state, now);
+    state = res.state;
+    now = res.nextNow;
+    saveCreditsStateToStorage(state, uid, { storage });
+  }
+  assert.equal(state.balance, 35);
+
+  // User upgrades to PRO -> UI & ads are strictly hidden
+  const proSummary = computeUserSubscriptionSummary({
+    verifiedPro: {
+      isPro: true,
+      planTier: 'personal_pro',
+      billingCycle: 'monthly',
+      expiresAt: now + 30 * CREDITS_24H_MS,
+    },
+  });
+  assert.equal(shouldShowRaseediCreditsUi(proSummary), false);
+  assert.equal(shouldShowAds(proSummary), false);
+
+  // Stored credits remain intact (never wiped by upgrade or logout)
+  simulateLogoutLocalStorageClear(storage);
+  const preserved = loadCreditsStateFromStorage(uid, now + 5_000, { storage });
+  assert.equal(preserved.balance, 35);
+  assert.equal(preserved.adsWatchedToday, 2);
+  assert.equal(preserved.ownerId, uid);
+});
+
+

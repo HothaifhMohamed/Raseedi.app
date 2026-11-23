@@ -24,6 +24,7 @@ import {
 import { SUPPORT_CONFIG } from '../constants/support';
 import { removeOrgFromWorkspacesMap } from './workspaceCleanup';
 import { normalizeThemePreference, THEME_PREF_STORAGE_KEY } from './workspaceSync';
+import { isCreditsStorageKey } from './raseediCredits';
 
 const DB_NAME = 'raseedi_expense_tracker_db';
 const DB_VERSION = 1;
@@ -916,6 +917,17 @@ export function saveUnsyncedDirtyFlag(dirty: boolean): void {
   }
 }
 
+/**
+ * Determines whether a `localStorage` key MUST survive logout (`clearLocalAppStorageAndDb`).
+ * - Theme preference (`THEME_PREF_STORAGE_KEY`) is preserved so Dark/Light mode never flickers.
+ * - Per-account Raseedi Credits keys (`raseedi_credits_state_v1:<uid>` / `:guest`) are preserved
+ *   so balance, daily ad watch cap, cooldown, streak, and clock guard survive logout & re-login
+ *   while remaining strictly isolated per user ID.
+ */
+export function shouldPreserveLocalStorageKeyOnLogout(key: string): boolean {
+  return key === THEME_PREF_STORAGE_KEY || isCreditsStorageKey(key);
+}
+
 export async function clearLocalAppStorageAndDb(): Promise<void> {
   cancelPendingPersistData();
   memoryCache = null;
@@ -930,7 +942,7 @@ export async function clearLocalAppStorageAndDb(): Promise<void> {
       const k = localStorage.key(i);
       if (
         k &&
-        k !== THEME_PREF_STORAGE_KEY &&
+        !shouldPreserveLocalStorageKeyOnLogout(k) &&
         (k.startsWith('raseedi_pin_lockout_v1:') || k.startsWith('raseedi_'))
       ) {
         keysToRemove.push(k);
