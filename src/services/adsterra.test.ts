@@ -4,13 +4,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   ADSTERRA_BANNER_ERROR_MESSAGE,
+  ADSTERRA_BANNER_FILLED_MESSAGE,
   ADSTERRA_BANNER_HEIGHT,
   ADSTERRA_BANNER_IFRAME_ID,
   ADSTERRA_BANNER_KEY,
+  ADSTERRA_BANNER_NO_FILL_MESSAGE,
   ADSTERRA_BANNER_SCRIPT_SRC,
   ADSTERRA_BANNER_WIDTH,
   buildAdsterraBannerSrcDoc,
   mountAdsterraBanner320x50,
+  resolveAdBannerVisibility,
   teardownAdsterraBanner320x50,
 } from './adsterra';
 import { shouldShowAds, computeUserSubscriptionSummary } from './subscriptionHelpers';
@@ -44,15 +47,38 @@ interface MockElement {
   addEventListener: (event: string, fn: () => void) => void;
 }
 
+interface MockWindow {
+  listeners: Record<string, Array<(event: MessageEvent) => void>>;
+  addEventListener: (event: string, fn: (event: MessageEvent) => void) => void;
+  removeEventListener: (event: string, fn: (event: MessageEvent) => void) => void;
+  dispatchMessage: (data: unknown, source?: object | null) => void;
+}
+
 interface MockDocument {
   body: MockElement;
-  defaultView: null;
+  defaultView: MockWindow;
   createElement: (tag: string) => MockElement;
   getElementById: (id: string) => MockElement | null;
   querySelectorAll: (selector: string) => MockElement[];
 }
 
 function createMockDom() {
+  const mockWin: MockWindow = {
+    listeners: {},
+    addEventListener(event, fn) {
+      this.listeners[event] = this.listeners[event] || [];
+      this.listeners[event].push(fn);
+    },
+    removeEventListener(event, fn) {
+      this.listeners[event] = (this.listeners[event] || []).filter((cb) => cb !== fn);
+    },
+    dispatchMessage(data, source = null) {
+      for (const fn of [...(this.listeners.message || [])]) {
+        fn({ data, source } as MessageEvent);
+      }
+    },
+  };
+
   const makeEl = (tag: string, doc: MockDocument): MockElement => {
     const el: MockElement = {
       tagName: tag.toUpperCase(),
@@ -61,7 +87,7 @@ function createMockDom() {
       width: '',
       height: '',
       srcdoc: '',
-      contentWindow: null,
+      contentWindow: tag.toLowerCase() === 'iframe' ? {} : null,
       attributes: {},
       children: [],
       parentElement: null,
@@ -100,7 +126,7 @@ function createMockDom() {
   };
 
   const doc = {} as MockDocument;
-  doc.defaultView = null;
+  doc.defaultView = mockWin;
   doc.body = makeEl('body', doc);
   doc.createElement = (tag: string) => makeEl(tag, doc);
 
@@ -126,7 +152,7 @@ function createMockDom() {
   return doc;
 }
 
-test('Adsterra 320x50 banner constants and srcdoc match the exact requested snippet', () => {
+test('Adsterra 320x50 banner constants and srcdoc match the exact requested snippet and prevent white-flash in Light & Dark Mode', () => {
   assert.equal(ADSTERRA_BANNER_KEY, '0891c1d3ea3d6bed258a7ebd3c28256b');
   assert.equal(
     ADSTERRA_BANNER_SCRIPT_SRC,
@@ -135,16 +161,24 @@ test('Adsterra 320x50 banner constants and srcdoc match the exact requested snip
   assert.equal(ADSTERRA_BANNER_WIDTH, 320);
   assert.equal(ADSTERRA_BANNER_HEIGHT, 50);
 
-  const srcDoc = buildAdsterraBannerSrcDoc();
-  assert.ok(srcDoc.includes("'key' : '0891c1d3ea3d6bed258a7ebd3c28256b'"));
-  assert.ok(srcDoc.includes("'format' : 'iframe'"));
-  assert.ok(srcDoc.includes("'height' : 50"));
-  assert.ok(srcDoc.includes("'width' : 320"));
-  assert.ok(srcDoc.includes("'params' : {}"));
+  const srcDocLight = buildAdsterraBannerSrcDoc({ theme: 'light' });
+  assert.ok(srcDocLight.includes("'key' : '0891c1d3ea3d6bed258a7ebd3c28256b'"));
+  assert.ok(srcDocLight.includes("'format' : 'iframe'"));
+  assert.ok(srcDocLight.includes("'height' : 50"));
+  assert.ok(srcDocLight.includes("'width' : 320"));
+  assert.ok(srcDocLight.includes("'params' : {}"));
   assert.ok(
-    srcDoc.includes('<script src="https://bauval.org/22/0891c1d3ea3d6bed258a7ebd3c28256b"></script>')
+    srcDocLight.includes('<script src="https://bauval.org/22/0891c1d3ea3d6bed258a7ebd3c28256b"></script>')
   );
-  assert.ok(srcDoc.includes(ADSTERRA_BANNER_ERROR_MESSAGE));
+  assert.ok(srcDocLight.includes(ADSTERRA_BANNER_ERROR_MESSAGE));
+  assert.ok(srcDocLight.includes(ADSTERRA_BANNER_FILLED_MESSAGE));
+  assert.ok(srcDocLight.includes(ADSTERRA_BANNER_NO_FILL_MESSAGE));
+  assert.ok(srcDocLight.includes('background:transparent!important'));
+  assert.ok(srcDocLight.includes('color-scheme:light'));
+
+  const srcDocDark = buildAdsterraBannerSrcDoc({ theme: 'dark' });
+  assert.ok(srcDocDark.includes('<meta name="color-scheme" content="dark" />'));
+  assert.ok(srcDocDark.includes('color-scheme:dark'));
 });
 
 test('mountAdsterraBanner320x50 mounts a single 320x50 iframe without duplication across tab switches and cleans up on teardown', () => {
@@ -154,10 +188,11 @@ test('mountAdsterraBanner320x50 mounts a single 320x50 iframe without duplicatio
   doc.body.appendChild(hostA);
   doc.body.appendChild(hostB);
 
-  // First mount in Tab A
+  // First mount in Tab A (dark theme)
   const unmountA = mountAdsterraBanner320x50(hostA as unknown as HTMLElement, {
     doc: doc as unknown as Document,
     title: 'إعلان',
+    theme: 'dark',
   });
 
   const iframesAfterFirst = doc.querySelectorAll(`iframe#${ADSTERRA_BANNER_IFRAME_ID}`);
@@ -167,6 +202,9 @@ test('mountAdsterraBanner320x50 mounts a single 320x50 iframe without duplicatio
   assert.equal(iframesAfterFirst[0].height, '50');
   assert.equal(iframesAfterFirst[0].title, 'إعلان');
   assert.equal(iframesAfterFirst[0].getAttribute('data-ad-key'), ADSTERRA_BANNER_KEY);
+  assert.equal(iframesAfterFirst[0].getAttribute('data-ad-theme'), 'dark');
+  assert.equal(iframesAfterFirst[0].getAttribute('allowtransparency'), 'true');
+  assert.ok((iframesAfterFirst[0].getAttribute('style') || '').includes('color-scheme:dark'));
   const sandboxAttr = iframesAfterFirst[0].getAttribute('sandbox') || '';
   assert.ok(sandboxAttr.includes('allow-scripts'));
   assert.equal(sandboxAttr.includes('allow-same-origin'), false);
@@ -195,6 +233,100 @@ test('mountAdsterraBanner320x50 mounts a single 320x50 iframe without duplicatio
   // Subsequent unmountB is a safe no-op
   unmountB();
   assert.equal(doc.querySelectorAll(`iframe#${ADSTERRA_BANNER_IFRAME_ID}`).length, 0);
+});
+
+test('mountAdsterraBanner320x50 handles filled, no-fill, error, and timeout without leaving blank white boxes', async () => {
+  // 1) Filled message triggers onFilled and cancels no-fill fallback
+  const doc1 = createMockDom();
+  const host1 = doc1.createElement('div');
+  doc1.body.appendChild(host1);
+  let filledCount = 0;
+  let noFillCount = 0;
+  let errorCount = 0;
+
+  const unmount1 = mountAdsterraBanner320x50(host1 as unknown as HTMLElement, {
+    doc: doc1 as unknown as Document,
+    timeoutMs: 40,
+    onFilled: () => {
+      filledCount += 1;
+    },
+    onNoFill: () => {
+      noFillCount += 1;
+    },
+    onError: () => {
+      errorCount += 1;
+    },
+  });
+
+  const iframe1 = doc1.getElementById(ADSTERRA_BANNER_IFRAME_ID)!;
+  doc1.defaultView.dispatchMessage({ type: ADSTERRA_BANNER_FILLED_MESSAGE }, iframe1.contentWindow);
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(filledCount, 1);
+  assert.equal(noFillCount, 0);
+  assert.equal(errorCount, 0);
+  unmount1();
+
+  // 2) No creative loaded before timeout -> triggers onNoFill so banner collapses cleanly
+  const doc2 = createMockDom();
+  const host2 = doc2.createElement('div');
+  doc2.body.appendChild(host2);
+  let timedOutNoFill = 0;
+
+  const unmount2 = mountAdsterraBanner320x50(host2 as unknown as HTMLElement, {
+    doc: doc2 as unknown as Document,
+    timeoutMs: 25,
+    onNoFill: () => {
+      timedOutNoFill += 1;
+    },
+  });
+
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(timedOutNoFill, 1);
+  unmount2();
+
+  // 3) Explicit no-fill message settles immediately
+  const doc3 = createMockDom();
+  const host3 = doc3.createElement('div');
+  doc3.body.appendChild(host3);
+  let immediateNoFill = 0;
+  const unmount3 = mountAdsterraBanner320x50(host3 as unknown as HTMLElement, {
+    doc: doc3 as unknown as Document,
+    timeoutMs: 5000,
+    onNoFill: () => {
+      immediateNoFill += 1;
+    },
+  });
+  const iframe3 = doc3.getElementById(ADSTERRA_BANNER_IFRAME_ID)!;
+  doc3.defaultView.dispatchMessage({ type: ADSTERRA_BANNER_NO_FILL_MESSAGE }, iframe3.contentWindow);
+  assert.equal(immediateNoFill, 1);
+  unmount3();
+});
+
+test('resolveAdBannerVisibility never displays a visible blank box during loading, No-Fill, error, offline, or paid plans', () => {
+  assert.equal(
+    resolveAdBannerVisibility({ showAds: true, hasConsent: true, isOnline: true, loadState: 'loading' }),
+    'loading-hidden'
+  );
+  assert.equal(
+    resolveAdBannerVisibility({ showAds: true, hasConsent: true, isOnline: true, loadState: 'filled' }),
+    'visible'
+  );
+  assert.equal(
+    resolveAdBannerVisibility({ showAds: true, hasConsent: true, isOnline: true, loadState: 'no-fill' }),
+    'hidden'
+  );
+  assert.equal(
+    resolveAdBannerVisibility({ showAds: true, hasConsent: true, isOnline: true, loadState: 'error' }),
+    'hidden'
+  );
+  assert.equal(
+    resolveAdBannerVisibility({ showAds: true, hasConsent: true, isOnline: false, loadState: 'filled' }),
+    'hidden'
+  );
+  assert.equal(
+    resolveAdBannerVisibility({ showAds: false, hasConsent: true, isOnline: true, loadState: 'filled' }),
+    'hidden'
+  );
 });
 
 test('shouldShowAds strictly hides ads for PRO, Business, Admin, and active paid/trial organization entitlements', () => {
@@ -331,4 +463,91 @@ test('Free-tier ad consent stays enabled without manual opt-out buttons in Setti
   assert.equal(legalSrc.includes('saveAdConsentChoice'), false);
   assert.ok(legalSrc.includes('legal-ads-upgrade-btn'));
 });
+
+test('Google AdSense requirements: single script in index.html head, pub-7802456607447662 in ads.txt, official CSP domains, and subscriber suppression', () => {
+  const indexHtml = fs.readFileSync(path.resolve(process.cwd(), 'index.html'), 'utf8');
+  const headMatch = indexHtml.match(/<head>([\s\S]*?)<\/head>/i);
+  assert.ok(headMatch, 'index.html must contain <head>');
+  const adSenseMatches =
+    headMatch[1].match(
+      /pagead2\.googlesyndication\.com\/pagead\/js\/adsbygoogle\.js\?client=ca-pub-7802456607447662/g
+    ) || [];
+  assert.equal(
+    adSenseMatches.length,
+    1,
+    'AdSense script for ca-pub-7802456607447662 must appear strictly once inside <head>'
+  );
+
+  const adsTxt = fs.readFileSync(path.resolve(process.cwd(), 'public/ads.txt'), 'utf8');
+  const adsLines = adsTxt
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('#'));
+  const targetLine = 'google.com, pub-7802456607447662, DIRECT, f08c47fec0942fa0';
+  assert.equal(
+    adsLines.filter((line) => line === targetLine).length,
+    1,
+    'public/ads.txt must include pub-7802456607447662 exactly once'
+  );
+  assert.equal(
+    new Set(adsLines).size,
+    adsLines.length,
+    'public/ads.txt must not contain duplicate entries'
+  );
+
+  // Verify official AdSense CSP domains in serverSecurity.ts
+  const prod = buildCspDirectives({ isProduction: true, allowPreviewFraming: false });
+  assert.ok(prod.scriptSrc.includes('https://pagead2.googlesyndication.com'));
+  assert.ok(prod.scriptSrc.includes('https://googleads.g.doubleclick.net'));
+  assert.ok(prod.scriptSrc.includes('https://www.googletagservices.com'));
+  assert.ok(prod.scriptSrc.includes('https://adservice.google.com'));
+  assert.ok(prod.connectSrc.includes('https://pagead2.googlesyndication.com'));
+  assert.ok(prod.connectSrc.includes('https://googleads.g.doubleclick.net'));
+  assert.ok(prod.connectSrc.includes('https://www.googletagservices.com'));
+  assert.ok(prod.connectSrc.includes('https://adservice.google.com'));
+  assert.ok(prod.frameSrc.includes('https://tpc.googlesyndication.com'));
+  assert.ok(prod.frameSrc.includes('https://googleads.g.doubleclick.net'));
+  assert.deepEqual(prod.frameAncestors, ["'self'"]);
+
+  // Verify vercel.json CSP matches all official AdSense domains + Adsterra + frame-ancestors 'self'
+  const vercelConfig = JSON.parse(
+    fs.readFileSync(path.resolve(process.cwd(), 'vercel.json'), 'utf8')
+  ) as { headers?: Array<{ headers?: Array<{ key: string; value: string }> }> };
+  const cspHeader = vercelConfig.headers
+    ?.flatMap((rule) => rule.headers || [])
+    .find((h) => h.key === 'Content-Security-Policy');
+  assert.ok(cspHeader);
+  for (const domain of [
+    'https://pagead2.googlesyndication.com',
+    'https://googleads.g.doubleclick.net',
+    'https://tpc.googlesyndication.com',
+    'https://www.googletagservices.com',
+    'https://adservice.google.com',
+    'https://bauval.org',
+    'https://araplhn.org',
+  ]) {
+    assert.ok(cspHeader.value.includes(domain), `vercel.json CSP must allow ${domain}`);
+  }
+  assert.ok(cspHeader.value.includes("frame-ancestors 'self'"));
+
+  // Verify App.tsx suppresses AdSense for PRO/Business/Admin/Org/Ad-Free subscribers via shouldShowAds
+  const appSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  assert.ok(appSrc.includes('shouldShowAds(subscriptionSummary'));
+  assert.ok(appSrc.includes('pauseAdRequests = 1'));
+});
+
+test('AuthGateScreen exposes visitor overview, features, FAQ, and direct pre-login Privacy/Terms & Support links', () => {
+  const authGateSrc = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/auth/AuthGateScreen.tsx'),
+    'utf8'
+  );
+  assert.ok(authGateSrc.includes('auth-gate-overview-section'));
+  assert.ok(authGateSrc.includes('auth-gate-faq-section'));
+  assert.ok(authGateSrc.includes('auth-gate-legal-btn'));
+  assert.ok(authGateSrc.includes('auth-gate-support-btn'));
+  assert.ok(authGateSrc.includes('SupportAndLegalModal'));
+  assert.ok(authGateSrc.includes('سياسة الخصوصية وشروط الاستخدام'));
+  assert.ok(authGateSrc.includes('الدعم والتواصل'));
+});
+
 

@@ -106,6 +106,13 @@ import {
   computeTransactionUpdate,
 } from '../services/transactionUpdate';
 import {
+  AUTO_CLOUD_BACKUP_DEBOUNCE_MS,
+  createAutoCloudBackupScheduler,
+  type AutoCloudBackupEligibility,
+  type AutoCloudBackupReason,
+  type AutoCloudBackupScheduler,
+} from '../services/autoCloudBackup';
+import {
   convertCurrency,
   fetchLiveExchangeRatesDetailed,
   getCachedExchangeRatesMeta,
@@ -579,6 +586,7 @@ interface AppContextType {
   consumeCreditExportPass: () => boolean;
   consumeCreditBonusReceiptScan: () => boolean;
   isCloudSyncing: boolean;
+  isAutoBackupPending: boolean;
   cloudSyncStatus: 'idle' | 'syncing' | 'synced' | 'error';
   cloudSyncError: string | null;
   cloudDiagnosticsError: string | null;
@@ -900,6 +908,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // Cloud Sync State
   const [isCloudSyncing, setIsCloudSyncing] = useState(false);
+  const [isAutoBackupPending, setIsAutoBackupPending] = useState(false);
   const [cloudSyncStatus, setCloudSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
   const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
   const [cloudDiagnosticsError, setCloudDiagnosticsError] = useState<string | null>(null);
@@ -926,6 +935,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     loadPreRestoreSnapshotTimestampSync()
   );
   const skipNextAutoSyncRef = React.useRef(false);
+  const autoBackupSchedulerRef = React.useRef<AutoCloudBackupScheduler | null>(null);
+  const scheduleTransactionAutoBackup = useCallback((reason: AutoCloudBackupReason) => {
+    skipNextAutoSyncRef.current = false;
+    autoBackupSchedulerRef.current?.schedule(reason);
+  }, []);
   const hasCompletedInitialCloudSyncRef = React.useRef(false);
   const isCloudLoadedRef = React.useRef(false);
   const workspaceSyncEpochRef = React.useRef(0);
@@ -4144,6 +4158,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const syncToCloudNow = useCallback(async (_forceOverwrite = false): Promise<boolean> => {
     if (!auth.currentUser) return false;
+    autoBackupSchedulerRef.current?.cancel();
     setIsCloudSyncing(true);
     setCloudSyncStatus('syncing');
     setCloudSyncError(null);
@@ -4686,7 +4701,160 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     []
   );
 
-  // Silent Auto Cloud Sync (personal & local-first org state, keeping last 7 auto backups)
+  // Silent Auto Cloud Sync (unified debounced scheduler: ~2.5s batching on tx add/edit/delete & state edits, keeping last 7 auto backups)
+  const latestAutoBackupEligibilityRef = React.useRef<() => AutoCloudBackupEligibility>(() => ({
+    hasCompletedOnboarding: false,
+    isAuthenticated: false,
+    isCloudLoaded: false,
+    isEmergencyRecoveryActive: false,
+    isOnline: false,
+  }));
+  latestAutoBackupEligibilityRef.current = () => ({
+    hasCompletedOnboarding,
+    isAuthenticated: Boolean(user?.isLoggedIn && auth.currentUser),
+    isCloudLoaded:
+      isCloudLoaded &&
+      hasCompletedInitialCloudSyncRef.current &&
+      isCloudLoadedRef.current,
+    isEmergencyRecoveryActive: isEmergencyRecoveryActiveRef.current,
+    isOnline: typeof navigator === 'undefined' ? true : navigator.onLine,
+  });
+
+  const latestAutoCloudBackupRunnerRef = React.useRef<
+    (reason: AutoCloudBackupReason) => Promise<void>
+  >(async () => {});
+  latestAutoCloudBackupRunnerRef.current = async (_reason: AutoCloudBackupReason) => {
+    if (
+      !canPerformAutomaticCloudWrite({
+        isAuthenticated: Boolean(auth.currentUser),
+        isCloudLoaded:
+          hasCompletedInitialCloudSyncRef.current && isCloudLoadedRef.current,
+        isEmergencyRecoveryActive: isEmergencyRecoveryActiveRef.current,
+      }) ||
+      !auth.currentUser
+    ) {
+      return;
+    }
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      return;
+    }
+
+    const snap = latestPersonalRef.current;
+    const autoActiveCloudOrgCounts =
+      isOrgWorkspace && activeOrganization && !isUsingLocalOrgMode
+        ? {
+            orgId: activeOrganization.id,
+            orgName: activeOrganization.name,
+            transactions: activeCloudTransactions.filter((tx) => !tx.deletedAt).length,
+            wallets: activeCloudWallets.length,
+          }
+        : undefined;
+
+    const hasActiveCloudOrgTx = Boolean(
+      autoActiveCloudOrgCounts && autoActiveCloudOrgCounts.transactions > 0
+    );
+    if (lastCloudBackupExists && snap.transactions.length === 0 && !hasActiveCloudOrgTx) {
+      console.warn(
+        '[AutoCloudSync] Skipped automatic upload because local transactions are empty while cloud backup exists.'
+      );
+      return;
+    }
+
+    try {
+      setCloudSyncStatus('syncing');
+
+      const { syncedAt, updatedAtMs, skippedAttachmentsCount, blockedEmptyOverwrite } =
+        await saveCloudBackup(
+          auth.currentUser.uid,
+          {
+            transactions: snap.transactions,
+            wallets: snap.wallets,
+            categories: snap.categories,
+            budgets: snap.budgets,
+            debts: snap.debts,
+            goals: snap.goals,
+            templates: snap.templates,
+            moneyCircles: snap.moneyCircles,
+            orgWorkspaces: latestLocalOrgWorkspacesRef.current,
+            activeWorkspace: activeWorkspaceRef.current || 'personal',
+            settings: snap.settings,
+            hasCompletedOnboarding: snap.hasCompletedOnboarding,
+          },
+          {
+            source: 'auto',
+            recordHistory: true,
+            allowEmptyOverwrite: false,
+            activeCloudOrgCounts: autoActiveCloudOrgCounts,
+          }
+        );
+
+      if (blockedEmptyOverwrite) {
+        setCloudSyncStatus('idle');
+        return;
+      }
+
+      setCloudSkippedAttachmentsWarning(skippedAttachmentsCount);
+      setLastCloudBackupExists(true);
+      setCloudConflict(null);
+      setCloudSyncStatus('synced');
+      setCloudSyncError(null);
+      saveUnsyncedDirtyFlag(false);
+      setHasUnsyncedLocalChanges(false);
+      void refreshCloudBackupHistory();
+      skipNextAutoSyncRef.current = true;
+      setSettings((prev) => {
+        const next = {
+          ...prev,
+          lastCloudSyncAt: syncedAt,
+          lastBackupAt: syncedAt,
+          lastKnownCloudUpdatedAtMs: updatedAtMs,
+        };
+        persistDataDebounced(
+          { ...latestPersonalRef.current, settings: next },
+          handleLocalPersistError
+        );
+        return next;
+      });
+    } catch (err) {
+      const isAr = snap.settings.language !== 'en';
+      const msg = formatFirestoreErrorForDisplay(err, isAr);
+      setCloudSyncStatus('error');
+      setCloudSyncError(msg);
+      throw err;
+    }
+  };
+
+  useEffect(() => {
+    const scheduler = createAutoCloudBackupScheduler({
+      debounceMs: AUTO_CLOUD_BACKUP_DEBOUNCE_MS,
+      getEligibility: () => latestAutoBackupEligibilityRef.current(),
+      runBackup: (reason) => latestAutoCloudBackupRunnerRef.current(reason),
+      onStatusChange: (status) => {
+        setIsAutoBackupPending(status === 'scheduled');
+      },
+    });
+    autoBackupSchedulerRef.current = scheduler;
+
+    const handleOnline = () => {
+      scheduler.handleOnline();
+    };
+    window.addEventListener('online', handleOnline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      scheduler.cancel();
+      if (autoBackupSchedulerRef.current === scheduler) {
+        autoBackupSchedulerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!user?.isLoggedIn || !isCloudLoaded) {
+      autoBackupSchedulerRef.current?.cancel();
+    }
+  }, [user?.isLoggedIn, isCloudLoaded]);
+
   useEffect(() => {
     if (!hasCompletedOnboarding) return;
     if (
@@ -4701,104 +4869,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     ) {
       return;
     }
-    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
     if (skipNextAutoSyncRef.current) {
       skipNextAutoSyncRef.current = false;
       return;
     }
 
-    const timer = window.setTimeout(async () => {
-      if (
-        !canPerformAutomaticCloudWrite({
-          isAuthenticated: Boolean(auth.currentUser),
-          isCloudLoaded:
-            hasCompletedInitialCloudSyncRef.current && isCloudLoadedRef.current,
-          isEmergencyRecoveryActive: isEmergencyRecoveryActiveRef.current,
-        }) ||
-        !auth.currentUser
-      ) {
-        return;
-      }
-      const snap = latestPersonalRef.current;
-      if (lastCloudBackupExists && snap.transactions.length === 0) {
-        console.warn(
-          '[AutoCloudSync] Skipped automatic upload because local transactions are empty while cloud backup exists.'
-        );
-        return;
-      }
-      try {
-        setCloudSyncStatus('syncing');
-
-        const autoActiveCloudOrgCounts =
-          isOrgWorkspace && activeOrganization && !isUsingLocalOrgMode
-            ? {
-                orgId: activeOrganization.id,
-                orgName: activeOrganization.name,
-                transactions: activeCloudTransactions.filter((tx) => !tx.deletedAt).length,
-                wallets: activeCloudWallets.length,
-              }
-            : undefined;
-
-        const { syncedAt, updatedAtMs, skippedAttachmentsCount, blockedEmptyOverwrite } =
-          await saveCloudBackup(
-            auth.currentUser.uid,
-            {
-              transactions: snap.transactions,
-              wallets: snap.wallets,
-              categories: snap.categories,
-              budgets: snap.budgets,
-              debts: snap.debts,
-              goals: snap.goals,
-              templates: snap.templates,
-              moneyCircles: snap.moneyCircles,
-              orgWorkspaces: latestLocalOrgWorkspacesRef.current,
-              activeWorkspace: activeWorkspaceRef.current || 'personal',
-              settings: snap.settings,
-              hasCompletedOnboarding: snap.hasCompletedOnboarding,
-            },
-            {
-              source: 'auto',
-              recordHistory: true,
-              allowEmptyOverwrite: false,
-              activeCloudOrgCounts: autoActiveCloudOrgCounts,
-            }
-          );
-
-        if (blockedEmptyOverwrite) {
-          setCloudSyncStatus('idle');
-          return;
-        }
-
-        setCloudSkippedAttachmentsWarning(skippedAttachmentsCount);
-        setLastCloudBackupExists(true);
-        setCloudConflict(null);
-        setCloudSyncStatus('synced');
-        setCloudSyncError(null);
-        saveUnsyncedDirtyFlag(false);
-        setHasUnsyncedLocalChanges(false);
-        void refreshCloudBackupHistory();
-        skipNextAutoSyncRef.current = true;
-        setSettings((prev) => {
-          const next = {
-            ...prev,
-            lastCloudSyncAt: syncedAt,
-            lastKnownCloudUpdatedAtMs: updatedAtMs,
-          };
-          persistDataDebounced(
-            { ...latestPersonalRef.current, settings: next },
-            handleLocalPersistError
-          );
-          return next;
-        });
-      } catch (err) {
-        const isAr = snap.settings.language !== 'en';
-        const msg = formatFirestoreErrorForDisplay(err, isAr);
-        setCloudSyncStatus('error');
-        setCloudSyncError(msg);
-      }
-    }, 1800);
-
-    return () => window.clearTimeout(timer);
+    autoBackupSchedulerRef.current?.schedule('state_change');
   }, [
     user?.isLoggedIn,
     hasCompletedOnboarding,
@@ -6582,6 +6658,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         syncWorkspaceTxWriteImmediately('personal', newTx, true);
       }
 
+      scheduleTransactionAutoBackup('transaction_add');
       return newTx;
     },
     [
@@ -6603,6 +6680,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       personalTransactions,
       savePersonalState,
       syncWorkspaceTxWriteImmediately,
+      scheduleTransactionAutoBackup,
     ]
   );
 
@@ -7411,6 +7489,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               ),
             };
           });
+          scheduleTransactionAutoBackup('transaction_update');
           return;
         }
         void updateOrgTransactionCloud(
@@ -7420,7 +7499,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           activeCloudWallets,
           settings.customExchangeRates,
           getOrgActor()
-        ).catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Update failed'));
+        )
+          .then(() => {
+            scheduleTransactionAutoBackup('transaction_update');
+          })
+          .catch((err) => setOrgActionError(err instanceof Error ? err.message : 'Update failed'));
         return;
       }
 
@@ -7437,6 +7520,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setPersonalWallets(updatedWallets);
       savePersonalState({ transactions: nextTx, wallets: updatedWallets });
       syncWorkspaceTxWriteImmediately('personal', taggedMergedTx, false);
+      scheduleTransactionAutoBackup('transaction_update');
     },
     [
       transactions,
@@ -7456,6 +7540,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       personalTransactions,
       savePersonalState,
       syncWorkspaceTxWriteImmediately,
+      scheduleTransactionAutoBackup,
     ]
   );
 
@@ -7543,8 +7628,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                   ),
                 };
               });
+              scheduleTransactionAutoBackup('transaction_update');
             },
           });
+          scheduleTransactionAutoBackup('transaction_delete');
           return;
         }
         void softDeleteOrgTransactionCloud(
@@ -7555,6 +7642,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           actor
         )
           .then(() => {
+            scheduleTransactionAutoBackup('transaction_delete');
             setUndoAction({
               id: `undo-${Date.now()}`,
               message: t('transactionDeleted'),
@@ -7565,9 +7653,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                   activeCloudWallets,
                   settings.customExchangeRates,
                   actor
-                ).catch((err) =>
-                  setOrgActionError(err instanceof Error ? err.message : 'Restore failed')
-                );
+                )
+                  .then(() => {
+                    scheduleTransactionAutoBackup('transaction_update');
+                  })
+                  .catch((err) =>
+                    setOrgActionError(err instanceof Error ? err.message : 'Restore failed')
+                  );
               },
             });
           })
@@ -7583,6 +7675,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setPersonalWallets(updatedWallets);
       savePersonalState({ transactions: nextTx, wallets: updatedWallets });
       syncWorkspaceTxDeleteImmediately('personal', [id]);
+      scheduleTransactionAutoBackup('transaction_delete');
 
       setUndoAction({
         id: `undo-${Date.now()}`,
@@ -7592,6 +7685,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setPersonalWallets(prevWallets);
           savePersonalState({ transactions: prevTx, wallets: prevWallets });
           syncWorkspaceTxWriteImmediately('personal', { ...oldTx, workspaceId: 'personal' }, true);
+          scheduleTransactionAutoBackup('transaction_update');
         },
       });
     },
@@ -7613,6 +7707,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       savePersonalState,
       syncWorkspaceTxDeleteImmediately,
       syncWorkspaceTxWriteImmediately,
+      scheduleTransactionAutoBackup,
       t,
     ]
   );
@@ -9852,6 +9947,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       consumeCreditExportPass,
       consumeCreditBonusReceiptScan,
       isCloudSyncing,
+      isAutoBackupPending,
       cloudSyncStatus,
       cloudSyncError,
       cloudDiagnosticsError,
@@ -10110,6 +10206,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       consumeCreditExportPass,
       consumeCreditBonusReceiptScan,
       isCloudSyncing,
+      isAutoBackupPending,
       cloudSyncStatus,
       cloudSyncError,
       cloudDiagnosticsError,

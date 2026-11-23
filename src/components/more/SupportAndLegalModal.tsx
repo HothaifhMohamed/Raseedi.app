@@ -22,12 +22,14 @@ export interface SupportAndLegalModalProps {
   isOpen: boolean;
   onClose: () => void;
   initialTab?: 'support' | 'legal';
+  hideUpgradeAction?: boolean;
 }
 
 export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
   isOpen,
   onClose,
   initialTab = 'support',
+  hideUpgradeAction = false,
 }) => {
   const { isRTL, isPro, subscriptionSummary, setIsUpgradeModalOpen } = useApp();
   const { activeOrgSubscriptionState } = useOrg();
@@ -317,7 +319,8 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
                   <div className="space-y-1.5 text-[var(--color-muted)]">
                     <p>
                       تعتمد النسخة المجانية من «رصيدي» على إعلانات خفيفة وغير مزعجة (مثل{' '}
-                      <bdi dir="ltr">Adsterra</bdi>) لدعم استمرارية التطبيق مجاناً للجميع.
+                      <bdi dir="ltr">Google AdSense</bdi> و<bdi dir="ltr">Adsterra</bdi>) لدعم
+                      استمرارية التطبيق مجاناً للجميع.
                     </p>
                     <p>
                       لا نشارك أبداً بياناتك المالية أو محافظك أو معاملاتك مع أي معلن.
@@ -335,7 +338,8 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
                   <div className="space-y-1.5 text-[var(--color-muted)]">
                     <p>
                       The free tier of Raseedi displays lightweight, unobtrusive advertisements
-                      (such as <strong>Adsterra</strong>) to keep core features free for everyone.
+                      (such as <strong>Google AdSense</strong> and <strong>Adsterra</strong>) to
+                      keep core features free for everyone.
                     </p>
                     <p>
                       Your personal or organization financial ledger data is never shared with
@@ -351,7 +355,7 @@ export const SupportAndLegalModal: React.FC<SupportAndLegalModalProps> = ({
                     </p>
                   </div>
                 )}
-                {isFreeTierUser && (
+                {isFreeTierUser && !hideUpgradeAction && (
                   <div className="pt-1 flex flex-wrap items-center gap-2">
                     <button
                       type="button"

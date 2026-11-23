@@ -9,7 +9,11 @@ import {
 } from './AdConsentBanner';
 import { shouldShowAds } from '../../services/subscriptionHelpers';
 import {
+  AdBannerLoadState,
+  AdBannerTheme,
+  ADSTERRA_NO_FILL_TIMEOUT_MS,
   mountAdsterraBanner320x50,
+  resolveAdBannerVisibility,
   teardownAdsterraBanner320x50,
 } from '../../services/adsterra';
 
@@ -23,11 +27,27 @@ export interface AdBannerProps {
   className?: string;
 }
 
+function resolveDocumentTheme(themeSetting?: string): AdBannerTheme {
+  if (themeSetting === 'dark') return 'dark';
+  if (themeSetting === 'light') return 'light';
+  if (typeof document !== 'undefined' && document.documentElement.classList.contains('dark')) {
+    return 'dark';
+  }
+  return 'light';
+}
+
 export const AdBanner: React.FC<AdBannerProps> = ({
   variant = 'banner',
   className = '',
 }) => {
-  const { isPro, subscriptionSummary, hasActiveAdFreePass, setIsUpgradeModalOpen, isRTL } = useApp();
+  const {
+    isPro,
+    subscriptionSummary,
+    hasActiveAdFreePass,
+    setIsUpgradeModalOpen,
+    isRTL,
+    settings,
+  } = useApp();
   const { activeOrgSubscriptionState } = useOrg();
 
   const showAds = shouldShowAds(subscriptionSummary, {
@@ -40,18 +60,27 @@ export const AdBanner: React.FC<AdBannerProps> = ({
   const [isOnline, setIsOnline] = useState<boolean>(
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
-  const [adLoadFailed, setAdLoadFailed] = useState(false);
+  const [loadState, setLoadState] = useState<AdBannerLoadState>('loading');
   const [consentChoice, setConsentChoice] = useState<AdConsentChoice>(() => getAdConsentChoice());
 
   const hasConsent = consentChoice === 'granted';
-  const canRenderAdsterra = showAds && hasConsent && isOnline && !adLoadFailed;
+  const bannerTheme: AdBannerTheme = resolveDocumentTheme(settings?.theme);
+  const visibility = resolveAdBannerVisibility({
+    showAds,
+    hasConsent,
+    isOnline,
+    loadState,
+  });
+  const shouldMountIframe = visibility === 'loading-hidden' || visibility === 'visible';
 
   useEffect(() => {
     const handleOnline = () => {
       setIsOnline(true);
-      setAdLoadFailed(false);
+      setLoadState('loading');
     };
-    const handleOffline = () => setIsOnline(false);
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
     const unsubscribeConsent = subscribeAdConsentChanges(() => {
@@ -64,37 +93,52 @@ export const AdBanner: React.FC<AdBannerProps> = ({
     };
   }, []);
 
-  // Ensure zero lingering ad iframes when user is PRO/Business or rejects consent
+  // Ensure zero lingering ad iframes when hidden (PRO/Business/Admin/Active Org/No-Fill/Offline)
   useEffect(() => {
-    if (!showAds || consentChoice === 'denied') {
+    if (!shouldMountIframe) {
       teardownAdsterraBanner320x50();
     }
-  }, [showAds, consentChoice]);
+  }, [shouldMountIframe]);
 
-  // Mount isolated 320x50 Adsterra banner iframe strictly once per active view
+  // Mount isolated 320x50 Adsterra banner iframe strictly once per active view.
+  // Stays collapsed (0px, opacity-0) until Adsterra confirms an actual creative
+  // filled; collapses completely on No-Fill, timeout, or script error.
   useEffect(() => {
-    if (!canRenderAdsterra || !slotHostRef.current) return;
+    if (!shouldMountIframe || !slotHostRef.current) return;
     return mountAdsterraBanner320x50(slotHostRef.current, {
       title: isRTL ? 'إعلان' : 'Advertisement',
-      onError: () => setAdLoadFailed(true),
+      theme: bannerTheme,
+      timeoutMs: ADSTERRA_NO_FILL_TIMEOUT_MS,
+      onFilled: () => setLoadState('filled'),
+      onNoFill: () => setLoadState('no-fill'),
+      onError: () => setLoadState('error'),
     });
-  }, [canRenderAdsterra, isRTL]);
+  }, [shouldMountIframe, isRTL, bannerTheme]);
 
-  if (!showAds || !hasConsent) {
+  if (visibility === 'hidden') {
     return null;
   }
+
+  const isVisible = visibility === 'visible';
 
   return (
     <aside
       aria-label={isRTL ? 'إعلان' : 'Advertisement'}
-      className={`shrink-0 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl px-2.5 py-2 transition-colors max-w-full overflow-hidden ${className}`}
+      aria-hidden={!isVisible}
+      className={
+        isVisible
+          ? `shrink-0 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl px-2.5 py-2 transition-opacity duration-200 opacity-100 max-w-full overflow-hidden ${className}`
+          : 'h-0 max-h-0 m-0 p-0 border-0 overflow-hidden opacity-0 pointer-events-none select-none'
+      }
       dir={isRTL ? 'rtl' : 'ltr'}
       data-ad-variant={variant}
       data-ad-format="banner-320x50"
       data-ad-network="adsterra"
+      data-ad-state={loadState}
+      data-testid="adsterra-banner-container"
     >
-      {canRenderAdsterra ? (
-        <div className="space-y-1.5 max-w-full overflow-hidden">
+      <div className="space-y-1.5 max-w-full overflow-hidden">
+        {isVisible && (
           <div className="flex items-center justify-between gap-2">
             <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[var(--color-bg)] border border-[var(--color-line)] text-[var(--color-muted)] leading-none">
               {isRTL ? 'إعلان' : 'Ad'}
@@ -108,40 +152,14 @@ export const AdBanner: React.FC<AdBannerProps> = ({
               <span>{isRTL ? 'إزالة الإعلانات' : 'Remove Ads'}</span>
             </button>
           </div>
-          <div className="w-full flex items-center justify-center overflow-hidden">
-            <div
-              ref={slotHostRef}
-              className="w-[320px] max-w-full h-[50px] rounded-md overflow-hidden bg-[var(--color-surface-subtle)]/40 flex items-center justify-center"
-            />
-          </div>
+        )}
+        <div className="w-full flex items-center justify-center overflow-hidden">
+          <div
+            ref={slotHostRef}
+            className="w-[320px] max-w-full h-[50px] rounded-md overflow-hidden bg-transparent flex items-center justify-center"
+          />
         </div>
-      ) : (
-        <div className="flex items-center justify-between gap-2.5 min-h-[50px]">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[var(--color-bg)] border border-[var(--color-line)] text-[var(--color-muted)] shrink-0 leading-none">
-              {isRTL ? 'إعلان' : 'Ad'}
-            </span>
-            <span className="text-[11px] text-[var(--color-muted)] leading-snug line-clamp-2">
-              {isRTL ? (
-                <>
-                  تجربة هادئة بدون إعلانات مع باقة <bdi dir="ltr">PRO</bdi>
-                </>
-              ) : (
-                'Calm, ad-free experience with Raseedi PRO'
-              )}
-            </span>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setIsUpgradeModalOpen(true)}
-            className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[var(--color-bg)] border border-[var(--color-line)] hover:border-[var(--color-accent)] text-[11px] font-semibold text-[var(--color-accent)] transition-colors min-h-[34px]"
-          >
-            <Crown className="w-3 h-3 shrink-0 text-[var(--color-gold)]" />
-            <span>{isRTL ? 'إزالة الإعلانات' : 'Remove Ads'}</span>
-          </button>
-        </div>
-      )}
+      </div>
     </aside>
   );
 };

@@ -6,6 +6,8 @@
 import React from 'react';
 import { ArrowLeft, ArrowRight } from 'lucide-react';
 import { AppProvider, useApp } from './context/AppContext';
+import { useOrg } from './context/OrgContext';
+import { shouldShowAds } from './services/subscriptionHelpers';
 import { useModalBackHandler } from './hooks/useModalBackHandler';
 import { resetScrollToTop } from './hooks/useScrollToTop';
 import {
@@ -151,9 +153,18 @@ const MainLayout: React.FC = () => {
     creditsToast,
     dismissCreditsToast,
     isPro,
+    subscriptionSummary,
+    hasActiveAdFreePass,
     t,
     isRTL,
   } = useApp();
+  const { activeOrgSubscriptionState } = useOrg();
+
+  const allowAdsForUser = shouldShowAds(subscriptionSummary, {
+    isProFlag: isPro,
+    creditsAdFreeActive: hasActiveAdFreePass,
+    activeOrgSubscriptionState,
+  });
 
   const [hasConsentForAds, setHasConsentForAds] = React.useState<boolean>(() => hasAdSenseConsent());
   const [showFullLedger, setShowFullLedgerState] = React.useState<boolean>(() =>
@@ -191,20 +202,42 @@ const MainLayout: React.FC = () => {
   }, []);
 
   React.useEffect(() => {
-    const adSenseClient = import.meta.env.VITE_ADSENSE_CLIENT_ID?.trim() || '';
+    const adSenseClient =
+      import.meta.env.VITE_ADSENSE_CLIENT_ID?.trim() || 'ca-pub-7802456607447662';
     const scriptId = 'raseedi-adsense-script';
-    const existingScript =
-      document.getElementById(scriptId) ||
-      document.querySelector('script[src*="pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"]');
+    const adSenseScripts = Array.from(
+      document.querySelectorAll<HTMLScriptElement>(
+        `script#${scriptId}, script[src*="pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"]`
+      )
+    );
+    const win = window as unknown as {
+      adsbygoogle?: Array<unknown> & { pauseAdRequests?: number };
+    };
 
-    if (isPro || !hasConsentForAds) {
-      if (existingScript && existingScript.id === scriptId) {
-        existingScript.remove();
+    if (!allowAdsForUser || !hasConsentForAds) {
+      try {
+        win.adsbygoogle = win.adsbygoogle || [];
+        win.adsbygoogle.pauseAdRequests = 1;
+      } catch {
+        // Non-fatal
       }
+      adSenseScripts.forEach((node) => node.remove());
+      document
+        .querySelectorAll('ins.adsbygoogle, .google-auto-placed')
+        .forEach((node) => node.remove());
       return;
     }
 
-    if (!adSenseClient || existingScript) return;
+    try {
+      if (win.adsbygoogle && win.adsbygoogle.pauseAdRequests === 1) {
+        win.adsbygoogle.pauseAdRequests = 0;
+      }
+    } catch {
+      // Non-fatal
+    }
+
+    // Never duplicate the AdSense script if already present in <head>
+    if (!adSenseClient || adSenseScripts.length > 0) return;
 
     const script = document.createElement('script');
     script.id = scriptId;
@@ -212,7 +245,7 @@ const MainLayout: React.FC = () => {
     script.crossOrigin = 'anonymous';
     script.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(adSenseClient)}`;
     document.head.appendChild(script);
-  }, [isPro, hasConsentForAds]);
+  }, [allowAdsForUser, hasConsentForAds]);
 
   const isMainShellReady =
     !isLoading && !isAppLocked && (Boolean(user?.isLoggedIn) || isGuestMode) && hasCompletedOnboarding;

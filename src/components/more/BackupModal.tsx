@@ -87,8 +87,10 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
     user,
     isPro,
     isCloudSyncing,
+    isAutoBackupPending,
     cloudSyncStatus,
     cloudSyncError,
+    hasUnsyncedLocalChanges,
     cloudSkippedAttachmentsWarning,
     lastCloudBackupExists,
     cloudBackupHistory,
@@ -1407,43 +1409,64 @@ export const BackupModal: React.FC<BackupModalProps> = ({ isOpen, onClose }) => 
                       </button>
                     </div>
 
-                    <div className="flex items-center justify-between gap-2 text-[10px]">
-                      <span className="text-[var(--color-muted)]">
-                        {settings.lastCloudSyncAt
-                          ? isRTL
-                            ? `آخر مزامنة سحابية: ${new Date(settings.lastCloudSyncAt).toLocaleString('ar-EG')}`
-                            : `Last cloud sync: ${new Date(settings.lastCloudSyncAt).toLocaleString('en-US')}`
-                          : isRTL
-                          ? 'جاهز للمزامنة السحابية'
-                          : 'Ready for cloud sync'}
-                      </span>
-                      <span
-                        className={`px-1.5 py-0.5 rounded font-semibold shrink-0 ${
-                          cloudSyncStatus === 'error'
-                            ? 'bg-[var(--color-expense)]/15 text-[var(--color-expense)]'
-                            : cloudSyncStatus === 'syncing'
-                            ? 'bg-[var(--color-warning)]/15 text-[var(--color-warning-text)]'
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between gap-2 text-[10px]">
+                        <span
+                          className="text-[var(--color-muted)]"
+                          data-testid="backup-last-cloud-sync-time"
+                        >
+                          {settings.lastCloudSyncAt
+                            ? isRTL
+                              ? `آخر مزامنة سحابية: ${new Date(settings.lastCloudSyncAt).toLocaleString('ar-EG')}`
+                              : `Last cloud sync: ${new Date(settings.lastCloudSyncAt).toLocaleString('en-US')}`
+                            : isRTL
+                            ? 'جاهز للمزامنة السحابية التلقائية'
+                            : 'Ready for automatic cloud sync'}
+                        </span>
+                        <span
+                          data-testid="backup-cloud-sync-status-badge"
+                          className={`px-1.5 py-0.5 rounded font-semibold shrink-0 ${
+                            cloudSyncStatus === 'error'
+                              ? 'bg-[var(--color-expense)]/15 text-[var(--color-expense)]'
+                              : cloudSyncStatus === 'syncing' || isAutoBackupPending
+                              ? 'bg-[var(--color-warning)]/15 text-[var(--color-warning-text)]'
+                              : !isOnline && hasUnsyncedLocalChanges
+                              ? 'bg-[var(--color-gold)]/15 text-[var(--color-gold)]'
+                              : cloudSyncStatus === 'synced'
+                              ? 'bg-[var(--color-income)]/15 text-[var(--color-income)]'
+                              : 'bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-muted)]'
+                          }`}
+                        >
+                          {cloudSyncStatus === 'syncing'
+                            ? isRTL
+                              ? 'جاري المزامنة...'
+                              : 'Syncing...'
+                            : isAutoBackupPending
+                            ? isRTL
+                              ? 'نسخ تلقائي مجدول...'
+                              : 'Auto-backup queued...'
+                            : !isOnline && hasUnsyncedLocalChanges
+                            ? isRTL
+                              ? 'بانتظار الإنترنت'
+                              : 'Waiting for network'
+                            : cloudSyncStatus === 'error'
+                            ? isRTL
+                              ? 'خطأ في المزامنة'
+                              : 'Sync error'
                             : cloudSyncStatus === 'synced'
-                            ? 'bg-[var(--color-income)]/15 text-[var(--color-income)]'
-                            : 'bg-[var(--color-surface)] border border-[var(--color-line)] text-[var(--color-muted)]'
-                        }`}
-                      >
-                        {cloudSyncStatus === 'syncing'
-                          ? isRTL
-                            ? 'جاري المزامنة'
-                            : 'Syncing'
-                          : cloudSyncStatus === 'error'
-                          ? isRTL
-                            ? 'خطأ في المزامنة'
-                            : 'Sync error'
-                          : cloudSyncStatus === 'synced'
-                          ? isRTL
-                            ? 'تمت المزامنة'
-                            : 'Synced'
-                          : isRTL
-                          ? 'متصل'
-                          : 'Connected'}
-                      </span>
+                            ? isRTL
+                              ? 'تمت المزامنة'
+                              : 'Synced'
+                            : isRTL
+                            ? 'متصل'
+                            : 'Connected'}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-[var(--color-muted)] leading-relaxed">
+                        {isRTL
+                          ? 'يتم حفظ نسخة سحابية تلقائياً خلال ثوانٍ بعد كل إضافة أو تعديل أو حذف معاملة عند توفر الإنترنت.'
+                          : 'An automatic cloud backup is saved within seconds after every transaction add, edit, or delete while online.'}
+                      </p>
                     </div>
 
                     <div className="grid grid-cols-2 gap-2">

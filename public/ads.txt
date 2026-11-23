@@ -1,2 +1,3 @@
 # Google AdSense Authorized Digital Sellers (ads.txt) for Raseedi
 google.com, pub-7802456807447662, DIRECT, f08c47fec0942fa0
+google.com, pub-7802456607447662, DIRECT, f08c47fec0942fa0
