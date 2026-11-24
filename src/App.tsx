@@ -47,6 +47,7 @@ import {
 } from './components/common/AdConsentBanner';
 import { AuthGateScreen } from './components/auth/AuthGateScreen';
 import { LogoutConfirmationModal } from './components/more/LogoutConfirmationModal';
+import { TimedPeriodicAd } from './components/common/TimedPeriodicAd';
 
 const TransactionsTab = React.lazy(() =>
   import('./components/home/TransactionsTab').then((m) => ({ default: m.TransactionsTab }))
@@ -470,6 +471,28 @@ const MainLayout: React.FC = () => {
             clearScrollPositionInStorage(storage, TRANSACTIONS_LIMIT_STORAGE_KEY);
             setShowFullLedger(false);
           }}
+        />
+
+        {/* Disciplined Timed / Periodic Ad (Free users ONLY, 90s grace, 4.5m interval, max 3/session, suppressed during modals) */}
+        <TimedPeriodicAd
+          hasBlockingModalOpen={Boolean(
+            isAddModalOpen ||
+              isFilterOpen ||
+              isSettingsOpen ||
+              isBackupOpen ||
+              isUpgradeModalOpen ||
+              isLogoutModalOpen ||
+              isAdminCodeModalOpen ||
+              isOrgHubOpen ||
+              (isOrgMigrationModalOpen && legacyLocalOrgs.length > 0) ||
+              isCreditsModalOpen ||
+              isRewardedAdModalOpen ||
+              (currencyPickerOpen && Boolean(onCurrencySelectCallback))
+          )}
+          isBrowserOnline={isBrowserOnline}
+          hasConsentForAds={hasConsentForAds}
+          isMainShellReady={isMainShellReady}
+          isEntitlementResolved={isEntitlementResolved}
         />
 
         {/* Add/Edit Transaction Modal (lazy-loaded on demand) */}

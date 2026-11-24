@@ -583,7 +583,7 @@ interface AppContextType {
   showCreditsToast: (text: string) => void;
   claimRewardedAdCredits: (
     session: RewardedAdSession | null,
-    options?: { isOnline?: boolean }
+    options?: { isOnline?: boolean; monotonicNowMs?: number | null }
   ) => ClaimRewardedAdResult;
   redeemCreditOption: (redemptionId: CreditRewardRedemptionId) => RedeemCreditResult;
   consumeCreditExportPass: () => boolean;
@@ -1381,14 +1381,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const claimRewardedAdCredits = useCallback(
     (
       session: RewardedAdSession | null,
-      options?: { isOnline?: boolean }
+      options?: { isOnline?: boolean; monotonicNowMs?: number | null }
     ): ClaimRewardedAdResult => {
       const now = Date.now();
       setCreditsNowMs(now);
       const effectiveOnline =
         options?.isOnline ?? (typeof navigator !== 'undefined' ? navigator.onLine : true);
+      const effectiveMono =
+        options?.monotonicNowMs !== undefined
+          ? options.monotonicNowMs
+          : typeof performance !== 'undefined' && typeof performance.now === 'function'
+          ? performance.now()
+          : null;
       const result = claimRewardedAdReward(creditsState, session, now, {
         isOnline: effectiveOnline,
+        monotonicNowMs: effectiveMono,
       });
       if (result.ok) {
         setCreditsState(result.state);

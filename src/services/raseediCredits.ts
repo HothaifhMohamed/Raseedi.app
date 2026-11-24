@@ -597,6 +597,18 @@ export interface RewardedAdSession {
   sessionId: string;
   startedAtMs: number;
   readyAtMs: number;
+  /** Required verification duration in milliseconds (default 10_000ms). */
+  durationMs: number;
+  /** Monotonic high-resolution clock anchor (performance.now()) to resist forward OS clock tampering. */
+  startedMonotonicMs?: number | null;
+  /** Highest wall-clock timestamp observed inside this session (monotonic floor). */
+  lastSyncedAtMs: number;
+  /** Wall-clock timestamp when connectivity was lost during countdown (excluded from elapsed time). */
+  offlinePausedAtMs?: number | null;
+  /** Monotonic timestamp when connectivity was lost during countdown. */
+  offlinePausedMonotonicMs?: number | null;
+  /** Total milliseconds spent offline during this session (excluded from elapsed time). */
+  accumulatedOfflineMs: number;
   activeElapsedMs: number;
   openAttempted: boolean;
   openAttempts: number;
@@ -607,6 +619,20 @@ export interface RewardedAdSession {
 export interface StartRewardedAdOptions {
   isOnline?: boolean;
   openAttempted?: boolean;
+  monotonicNowMs?: number | null;
+  durationMs?: number;
+}
+
+function normalizeMonotonicMs(value?: number | null): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function getSessionDurationMs(session: RewardedAdSession): number {
+  return typeof session.durationMs === 'number' &&
+    Number.isFinite(session.durationMs) &&
+    session.durationMs > 0
+    ? session.durationMs
+    : CREDITS_AD_COUNTDOWN_MS;
 }
 
 export function startRewardedAdSession(
@@ -640,12 +666,26 @@ export function startRewardedAdSession(
   }
 
   const openAttempted = options?.openAttempted !== false;
+  const durationMs =
+    typeof options?.durationMs === 'number' &&
+    Number.isFinite(options.durationMs) &&
+    options.durationMs > 0
+      ? Math.floor(options.durationMs)
+      : CREDITS_AD_COUNTDOWN_MS;
+  const startedMonotonicMs = normalizeMonotonicMs(options?.monotonicNowMs);
+
   return {
     ok: true,
     session: {
       sessionId: `ad_${effectiveNowMs}_${Math.random().toString(36).slice(2, 9)}`,
       startedAtMs: effectiveNowMs,
-      readyAtMs: effectiveNowMs + CREDITS_AD_COUNTDOWN_MS,
+      readyAtMs: effectiveNowMs + durationMs,
+      durationMs,
+      startedMonotonicMs,
+      lastSyncedAtMs: effectiveNowMs,
+      offlinePausedAtMs: null,
+      offlinePausedMonotonicMs: null,
+      accumulatedOfflineMs: 0,
       activeElapsedMs: 0,
       openAttempted,
       openAttempts: openAttempted ? 1 : 0,
@@ -657,7 +697,12 @@ export function startRewardedAdSession(
 
 export function recordRewardedAdOpenAttempt(
   session: RewardedAdSession,
-  options: { succeeded: boolean; isOnline?: boolean }
+  options: {
+    succeeded: boolean;
+    isOnline?: boolean;
+    nowMs?: number;
+    monotonicNowMs?: number | null;
+  }
 ): RewardedAdSession {
   if (session.claimed) return session;
   if (options.isOnline === false) {
@@ -668,6 +713,35 @@ export function recordRewardedAdOpenAttempt(
   }
   const nextAttempts = session.openAttempts + 1;
   if (options.succeeded) {
+    // If this is the FIRST verified open attempt, anchor the real start timestamp now
+    // so time spent before opening the ad link cannot count toward the 10s requirement.
+    if (!session.openAttempted) {
+      const durationMs = getSessionDurationMs(session);
+      const anchorNowMs =
+        typeof options.nowMs === 'number' && Number.isFinite(options.nowMs)
+          ? Math.max(session.lastSyncedAtMs ?? session.startedAtMs, Math.floor(options.nowMs))
+          : Math.max(session.lastSyncedAtMs ?? session.startedAtMs, session.startedAtMs);
+      const anchorMonoMs =
+        options.monotonicNowMs !== undefined
+          ? normalizeMonotonicMs(options.monotonicNowMs)
+          : session.startedMonotonicMs ?? null;
+      return {
+        ...session,
+        startedAtMs: anchorNowMs,
+        readyAtMs: anchorNowMs + durationMs,
+        durationMs,
+        startedMonotonicMs: anchorMonoMs,
+        lastSyncedAtMs: anchorNowMs,
+        offlinePausedAtMs: null,
+        offlinePausedMonotonicMs: null,
+        accumulatedOfflineMs: 0,
+        activeElapsedMs: 0,
+        openAttempted: true,
+        openAttempts: nextAttempts,
+        pauseReason: 'none',
+      };
+    }
+
     return {
       ...session,
       openAttempted: true,
@@ -682,25 +756,155 @@ export function recordRewardedAdOpenAttempt(
   };
 }
 
-export interface AdvanceRewardedAdTick {
-  deltaMs: number;
-  isVisibleAndFocused: boolean;
+export interface SyncRewardedAdTimestampParams {
+  nowMs: number;
+  monotonicNowMs?: number | null;
   isOnline: boolean;
 }
 
 /**
- * Advances active foreground countdown time ONLY when:
- * 1) internet connection is online,
- * 2) Smartlink open attempt has been verified,
- * 3) app tab is visible AND focused.
- * Caps each tick to CREDITS_AD_MAX_TICK_DELTA_MS (1000ms) so background
- * timer throttling bursts cannot skip the 10-second verification window.
+ * Computes real elapsed verification time from `startedAtMs` (Timestamp-based)
+ * so switching to the external Monetag Direct Link tab or having the browser
+ * throttle background timers does NOT freeze or delay the 10-second countdown.
+ *
+ * Security & anti-tamper guarantees preserved:
+ * 1) Strictly requires verified ad-open attempt (`openAttempted === true`).
+ * 2) Excludes offline intervals — time spent offline never counts toward completion.
+ * 3) Resists forward OS system-clock jumps via monotonic `performance.now()` bounding
+ *    (`Math.min(wallElapsed, monoElapsed)`) whenever monotonic readings are available.
+ * 4) Resists backward OS system-clock rollbacks via `lastSyncedAtMs` monotonic floor.
+ */
+export function syncRewardedAdSessionByTimestamp(
+  session: RewardedAdSession,
+  params: SyncRewardedAdTimestampParams
+): RewardedAdSession {
+  if (session.claimed) return session;
+
+  const durationMs = getSessionDurationMs(session);
+  const prevLastSynced = Number.isFinite(session.lastSyncedAtMs)
+    ? session.lastSyncedAtMs
+    : session.startedAtMs;
+  const rawNowMs = Number.isFinite(params.nowMs) ? Math.floor(params.nowMs) : prevLastSynced;
+  const safeNowMs = Math.max(prevLastSynced, rawNowMs);
+  const currentMonoMs = normalizeMonotonicMs(params.monotonicNowMs);
+  const baseOfflineMs = Number.isFinite(session.accumulatedOfflineMs)
+    ? Math.max(0, session.accumulatedOfflineMs)
+    : 0;
+
+  if (!params.isOnline) {
+    const offlinePausedAtMs =
+      session.offlinePausedAtMs != null ? session.offlinePausedAtMs : safeNowMs;
+    const offlinePausedMonotonicMs =
+      session.offlinePausedMonotonicMs !== undefined && session.offlinePausedMonotonicMs !== null
+        ? session.offlinePausedMonotonicMs
+        : currentMonoMs;
+
+    if (
+      session.pauseReason === 'offline' &&
+      session.offlinePausedAtMs === offlinePausedAtMs &&
+      session.lastSyncedAtMs === safeNowMs
+    ) {
+      return session;
+    }
+
+    return {
+      ...session,
+      lastSyncedAtMs: safeNowMs,
+      offlinePausedAtMs,
+      offlinePausedMonotonicMs,
+      pauseReason: 'offline',
+    };
+  }
+
+  if (!session.openAttempted) {
+    return session.pauseReason === 'open_blocked' && session.lastSyncedAtMs === safeNowMs
+      ? session
+      : {
+          ...session,
+          lastSyncedAtMs: safeNowMs,
+          offlinePausedAtMs: null,
+          offlinePausedMonotonicMs: null,
+          pauseReason: 'open_blocked',
+        };
+  }
+
+  let nextAccumulatedOfflineMs = baseOfflineMs;
+  if (session.offlinePausedAtMs != null) {
+    const wallOfflineDelta = Math.max(0, safeNowMs - session.offlinePausedAtMs);
+    const monoOfflineDelta =
+      session.offlinePausedMonotonicMs != null && currentMonoMs != null
+        ? Math.max(0, currentMonoMs - session.offlinePausedMonotonicMs)
+        : 0;
+    nextAccumulatedOfflineMs += Math.max(wallOfflineDelta, monoOfflineDelta);
+  }
+
+  const wallElapsedMs = Math.max(0, safeNowMs - session.startedAtMs - nextAccumulatedOfflineMs);
+
+  let effectiveElapsedMs = wallElapsedMs;
+  if (session.startedMonotonicMs != null && currentMonoMs != null) {
+    const monoElapsedMs = Math.max(
+      0,
+      currentMonoMs - session.startedMonotonicMs - nextAccumulatedOfflineMs
+    );
+    effectiveElapsedMs = Math.min(wallElapsedMs, monoElapsedMs);
+  }
+
+  const nextElapsed = Math.min(
+    durationMs,
+    Math.max(Math.max(0, session.activeElapsedMs), Math.floor(effectiveElapsedMs))
+  );
+
+  if (
+    nextElapsed === session.activeElapsedMs &&
+    session.pauseReason === 'none' &&
+    session.offlinePausedAtMs == null &&
+    nextAccumulatedOfflineMs === baseOfflineMs &&
+    session.lastSyncedAtMs === safeNowMs
+  ) {
+    return session;
+  }
+
+  return {
+    ...session,
+    durationMs,
+    readyAtMs: session.startedAtMs + durationMs + nextAccumulatedOfflineMs,
+    lastSyncedAtMs: safeNowMs,
+    offlinePausedAtMs: null,
+    offlinePausedMonotonicMs: null,
+    accumulatedOfflineMs: nextAccumulatedOfflineMs,
+    activeElapsedMs: nextElapsed,
+    pauseReason: 'none',
+  };
+}
+
+export interface AdvanceRewardedAdTick {
+  deltaMs?: number;
+  nowMs?: number;
+  monotonicNowMs?: number | null;
+  isVisibleAndFocused?: boolean;
+  isOnline: boolean;
+}
+
+/**
+ * Advances rewarded ad countdown cleanly.
+ * - When `nowMs` is provided, delegates to `syncRewardedAdSessionByTimestamp` (real elapsed time,
+ *   including while the user is viewing the external ad page in another tab).
+ * - When only `deltaMs` is provided, advances smoothly while online and verified (without freezing
+ *   just because the user switched to the ad tab).
  */
 export function advanceRewardedAdSession(
   session: RewardedAdSession,
   tick: AdvanceRewardedAdTick
 ): RewardedAdSession {
   if (session.claimed) return session;
+
+  if (typeof tick.nowMs === 'number' && Number.isFinite(tick.nowMs)) {
+    return syncRewardedAdSessionByTimestamp(session, {
+      nowMs: tick.nowMs,
+      monotonicNowMs: tick.monotonicNowMs,
+      isOnline: tick.isOnline,
+    });
+  }
 
   if (!tick.isOnline) {
     return session.pauseReason === 'offline'
@@ -714,18 +918,13 @@ export function advanceRewardedAdSession(
       : { ...session, pauseReason: 'open_blocked' };
   }
 
-  if (!tick.isVisibleAndFocused) {
-    return session.pauseReason === 'background'
-      ? session
-      : { ...session, pauseReason: 'background' };
-  }
-
-  const rawDelta = Number.isFinite(tick.deltaMs) ? Math.floor(tick.deltaMs) : 0;
-  const safeDelta = Math.max(0, Math.min(CREDITS_AD_MAX_TICK_DELTA_MS, rawDelta));
-  const nextElapsed = Math.min(
-    CREDITS_AD_COUNTDOWN_MS,
-    Math.max(0, session.activeElapsedMs) + safeDelta
-  );
+  const durationMs = getSessionDurationMs(session);
+  const rawDelta =
+    typeof tick.deltaMs === 'number' && Number.isFinite(tick.deltaMs)
+      ? Math.floor(tick.deltaMs)
+      : 0;
+  const safeDelta = Math.max(0, rawDelta);
+  const nextElapsed = Math.min(durationMs, Math.max(0, session.activeElapsedMs) + safeDelta);
 
   if (nextElapsed === session.activeElapsedMs && session.pauseReason === 'none') {
     return session;
@@ -738,12 +937,25 @@ export function advanceRewardedAdSession(
   };
 }
 
-export function getRewardedAdRemainingMs(session: RewardedAdSession | null): number {
+export function getRewardedAdRemainingMs(
+  session: RewardedAdSession | null,
+  nowMs?: number,
+  options?: { monotonicNowMs?: number | null; isOnline?: boolean }
+): number {
   if (!session) return 0;
-  const elapsed = Number.isFinite(session.activeElapsedMs)
-    ? Math.max(0, session.activeElapsedMs)
+  const effectiveSession =
+    typeof nowMs === 'number' && Number.isFinite(nowMs)
+      ? syncRewardedAdSessionByTimestamp(session, {
+          nowMs,
+          monotonicNowMs: options?.monotonicNowMs,
+          isOnline: options?.isOnline !== false,
+        })
+      : session;
+  const durationMs = getSessionDurationMs(effectiveSession);
+  const elapsed = Number.isFinite(effectiveSession.activeElapsedMs)
+    ? Math.max(0, effectiveSession.activeElapsedMs)
     : 0;
-  return Math.max(0, CREDITS_AD_COUNTDOWN_MS - elapsed);
+  return Math.max(0, durationMs - elapsed);
 }
 
 export type ClaimRewardedAdResult =
@@ -762,6 +974,7 @@ export type ClaimRewardedAdResult =
 
 export interface ClaimRewardedAdOptions {
   isOnline?: boolean;
+  monotonicNowMs?: number | null;
 }
 
 export function claimRewardedAdReward(
@@ -783,7 +996,12 @@ export function claimRewardedAdReward(
   }
 
   const effectiveNowMs = resolveSafeNowMs(state, nowMs);
-  const remainingCountdownMs = getRewardedAdRemainingMs(session);
+  const syncedSession = syncRewardedAdSessionByTimestamp(session, {
+    nowMs: effectiveNowMs,
+    monotonicNowMs: options?.monotonicNowMs,
+    isOnline: true,
+  });
+  const remainingCountdownMs = getRewardedAdRemainingMs(syncedSession);
   if (remainingCountdownMs > 0) {
     return {
       ok: false,

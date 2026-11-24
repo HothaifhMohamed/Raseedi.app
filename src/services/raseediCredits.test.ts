@@ -39,6 +39,7 @@ import {
   saveCreditsStateToStorage,
   shouldShowRaseediCreditsUi,
   startRewardedAdSession,
+  syncRewardedAdSessionByTimestamp,
 } from './raseediCredits';
 import { shouldPreserveLocalStorageKeyOnLogout } from './db';
 import { THEME_PREF_STORAGE_KEY } from './workspaceSync';
@@ -182,7 +183,7 @@ test('Rewarded ad requires 10s countdown, awards +10, enforces 60s cooldown, 5/d
   assert.equal(tomorrowAvail.remainingToday, 5);
 });
 
-test('Rewarded ad countdown pauses on background/blur, clamps large tick bursts, blocks when offline, and requires verified Smartlink open attempt', () => {
+test('Rewarded ad countdown uses real elapsed timestamp across background tab switch, excludes offline intervals, blocks unverified opens, and resists forward/backward clock tampering', () => {
   const state = createInitialCreditsState(BASE_DAY_1);
 
   // 1. Offline start is strictly blocked
@@ -196,91 +197,192 @@ test('Rewarded ad countdown pauses on background/blur, clamps large tick bursts,
   const unverifiedStart = startRewardedAdSession(state, BASE_DAY_1, {
     isOnline: true,
     openAttempted: false,
+    monotonicNowMs: 1_000,
   });
   assert.equal(unverifiedStart.ok, true);
   if (!unverifiedStart.ok) return;
 
   let sess = unverifiedStart.session;
   assert.equal(sess.pauseReason, 'open_blocked');
-  sess = advanceRewardedAdSession(sess, {
-    deltaMs: 1000,
-    isVisibleAndFocused: true,
+  sess = syncRewardedAdSessionByTimestamp(sess, {
+    nowMs: BASE_DAY_1 + 12_000,
+    monotonicNowMs: 13_000,
     isOnline: true,
   });
   assert.equal(sess.activeElapsedMs, 0);
 
-  const blockedClaim = claimRewardedAdReward(state, sess, BASE_DAY_1 + 15_000, { isOnline: true });
+  const blockedClaim = claimRewardedAdReward(state, sess, BASE_DAY_1 + 15_000, {
+    isOnline: true,
+    monotonicNowMs: 16_000,
+  });
   assert.equal(blockedClaim.ok, false);
   if (!blockedClaim.ok) {
     assert.equal(blockedClaim.reason, 'open_not_verified');
   }
 
-  // Reopening link while online verifies open attempt
-  sess = recordRewardedAdOpenAttempt(sess, { succeeded: true, isOnline: true });
+  // Reopening link while online anchors real start timestamp NOW (prior unverified time does NOT count)
+  const reopenAt = BASE_DAY_1 + 15_000;
+  const reopenMono = 16_000;
+  sess = recordRewardedAdOpenAttempt(sess, {
+    succeeded: true,
+    isOnline: true,
+    nowMs: reopenAt,
+    monotonicNowMs: reopenMono,
+  });
   assert.equal(sess.openAttempted, true);
   assert.equal(sess.pauseReason, 'none');
+  assert.equal(sess.startedAtMs, reopenAt);
+  assert.equal(sess.activeElapsedMs, 0);
 
-  // 3. Background / blur pauses countdown and adds 0ms
-  sess = advanceRewardedAdSession(sess, {
-    deltaMs: 1000,
-    isVisibleAndFocused: true,
+  // 3. Forward OS clock tampering (+60s wall clock while monotonic clock only moved +1s) MUST NOT skip countdown!
+  const forwardTamper = syncRewardedAdSessionByTimestamp(sess, {
+    nowMs: reopenAt + 60_000,
+    monotonicNowMs: reopenMono + 1_000,
     isOnline: true,
   });
-  assert.equal(sess.activeElapsedMs, 1000);
-
-  sess = advanceRewardedAdSession(sess, {
-    deltaMs: 5000,
-    isVisibleAndFocused: false,
+  assert.equal(forwardTamper.activeElapsedMs, 1_000);
+  assert.equal(getRewardedAdRemainingMs(forwardTamper), 9_000);
+  const tamperClaim = claimRewardedAdReward(state, forwardTamper, reopenAt + 60_000, {
     isOnline: true,
+    monotonicNowMs: reopenMono + 1_000,
   });
-  assert.equal(sess.pauseReason, 'background');
-  assert.equal(sess.activeElapsedMs, 1000);
-
-  // 4. Returning with a huge throttled deltaMs (e.g. 30s) is clamped to CREDITS_AD_MAX_TICK_DELTA_MS (1000ms)
-  sess = advanceRewardedAdSession(sess, {
-    deltaMs: 30_000,
-    isVisibleAndFocused: true,
-    isOnline: true,
-  });
-  assert.equal(sess.pauseReason, 'none');
-  assert.equal(sess.activeElapsedMs, 1000 + CREDITS_AD_MAX_TICK_DELTA_MS);
-
-  // 5. Going offline during countdown pauses and adds 0ms
-  sess = advanceRewardedAdSession(sess, {
-    deltaMs: 1000,
-    isVisibleAndFocused: true,
-    isOnline: false,
-  });
-  assert.equal(sess.pauseReason, 'offline');
-  assert.equal(sess.activeElapsedMs, 2000);
-
-  // Finish remaining 8 active seconds while online & focused
-  for (let i = 0; i < 8; i++) {
-    sess = advanceRewardedAdSession(sess, {
-      deltaMs: 1000,
-      isVisibleAndFocused: true,
-      isOnline: true,
-    });
+  assert.equal(tamperClaim.ok, false);
+  if (!tamperClaim.ok) {
+    assert.equal(tamperClaim.reason, 'countdown_incomplete');
+    assert.equal(tamperClaim.remainingCountdownMs, 9_000);
   }
-  assert.equal(getRewardedAdRemainingMs(sess), 0);
 
-  // 6. Trying to claim while offline is strictly rejected even after 10s elapsed!
-  const offlineClaim = claimRewardedAdReward(state, sess, BASE_DAY_1 + 20_000, {
+  // 4. Going offline during countdown pauses progress & offline time is excluded once back online
+  let onlineSess = syncRewardedAdSessionByTimestamp(sess, {
+    nowMs: reopenAt + 3_000,
+    monotonicNowMs: reopenMono + 3_000,
+    isOnline: true,
+  });
+  assert.equal(onlineSess.activeElapsedMs, 3_000);
+
+  // Drop offline at +3s, stay offline for 15s (until +18s)
+  onlineSess = syncRewardedAdSessionByTimestamp(onlineSess, {
+    nowMs: reopenAt + 3_000,
+    monotonicNowMs: reopenMono + 3_000,
     isOnline: false,
+  });
+  assert.equal(onlineSess.pauseReason, 'offline');
+
+  onlineSess = syncRewardedAdSessionByTimestamp(onlineSess, {
+    nowMs: reopenAt + 18_000,
+    monotonicNowMs: reopenMono + 18_000,
+    isOnline: false,
+  });
+  assert.equal(onlineSess.activeElapsedMs, 3_000);
+
+  // Reconnect at +18s -> accumulatedOfflineMs = 15s, so activeElapsedMs is STILL 3s (7s left)
+  onlineSess = syncRewardedAdSessionByTimestamp(onlineSess, {
+    nowMs: reopenAt + 18_000,
+    monotonicNowMs: reopenMono + 18_000,
+    isOnline: true,
+  });
+  assert.equal(onlineSess.pauseReason, 'none');
+  assert.equal(onlineSess.activeElapsedMs, 3_000);
+  assert.equal(getRewardedAdRemainingMs(onlineSess), 7_000);
+
+  // Complete remaining 7 real online seconds -> countdown reaches 0
+  onlineSess = syncRewardedAdSessionByTimestamp(onlineSess, {
+    nowMs: reopenAt + 25_000,
+    monotonicNowMs: reopenMono + 25_000,
+    isOnline: true,
+  });
+  assert.equal(getRewardedAdRemainingMs(onlineSess), 0);
+
+  // 5. Trying to claim while offline is strictly rejected even after 10s elapsed!
+  const offlineClaim = claimRewardedAdReward(state, onlineSess, reopenAt + 25_000, {
+    isOnline: false,
+    monotonicNowMs: reopenMono + 25_000,
   });
   assert.equal(offlineClaim.ok, false);
   if (!offlineClaim.ok) {
     assert.equal(offlineClaim.reason, 'offline');
   }
 
-  // 7. Claiming online with verified open attempt + 10s active countdown succeeds
-  const onlineClaim = claimRewardedAdReward(state, sess, BASE_DAY_1 + 21_000, {
+  // 6. Claiming online with verified open attempt + 10s real online elapsed time succeeds
+  const onlineClaim = claimRewardedAdReward(state, onlineSess, reopenAt + 25_500, {
     isOnline: true,
+    monotonicNowMs: reopenMono + 25_500,
   });
   assert.equal(onlineClaim.ok, true);
   if (onlineClaim.ok) {
     assert.equal(onlineClaim.state.balance, 25);
   }
+});
+
+test('Background tab visit to external Monetag ad page counts real elapsed time and enables immediate claim upon return', () => {
+  const state = createInitialCreditsState(BASE_DAY_1);
+  const startNow = BASE_DAY_1;
+  const startMono = 5_000;
+
+  // User taps "Watch Ad" -> opens https://uplcm.com/4/12339410 in a new tab
+  const started = startRewardedAdSession(state, startNow, {
+    isOnline: true,
+    openAttempted: true,
+    monotonicNowMs: startMono,
+  });
+  assert.equal(started.ok, true);
+  if (!started.ok) return;
+
+  // Case A: User returns after 6 real seconds on the external ad tab (browser throttled intervals to 0 ticks)
+  const partialReturn = syncRewardedAdSessionByTimestamp(started.session, {
+    nowMs: startNow + 6_000,
+    monotonicNowMs: startMono + 6_000,
+    isOnline: true,
+  });
+  assert.equal(partialReturn.pauseReason, 'none');
+  assert.equal(partialReturn.activeElapsedMs, 6_000);
+  assert.equal(getRewardedAdRemainingMs(partialReturn), 4_000);
+
+  // Still cannot claim early at 6s
+  const earlyClaim = claimRewardedAdReward(state, partialReturn, startNow + 6_000, {
+    isOnline: true,
+    monotonicNowMs: startMono + 6_000,
+  });
+  assert.equal(earlyClaim.ok, false);
+  if (!earlyClaim.ok) {
+    assert.equal(earlyClaim.reason, 'countdown_incomplete');
+    assert.equal(earlyClaim.remainingCountdownMs, 4_000);
+  }
+
+  // Case B: User switches back to the ad tab and returns after 12 total real seconds (no background ticks fired)
+  const fullReturn = syncRewardedAdSessionByTimestamp(started.session, {
+    nowMs: startNow + 12_000,
+    monotonicNowMs: startMono + 12_000,
+    isOnline: true,
+  });
+  assert.equal(fullReturn.pauseReason, 'none');
+  assert.equal(fullReturn.activeElapsedMs, CREDITS_AD_COUNTDOWN_MS);
+  assert.equal(getRewardedAdRemainingMs(fullReturn), 0);
+
+  // Immediately claimable on return without restarting 10s from zero!
+  const claim = claimRewardedAdReward(state, fullReturn, startNow + 12_000, {
+    isOnline: true,
+    monotonicNowMs: startMono + 12_000,
+  });
+  assert.equal(claim.ok, true);
+  if (claim.ok) {
+    assert.equal(claim.awarded, CREDITS_AD_REWARD);
+    assert.equal(claim.state.balance, CREDITS_WELCOME_BONUS + CREDITS_AD_REWARD);
+    assert.equal(claim.state.adsWatchedToday, 1);
+  }
+
+  // Verify RewardedAdModal wires visibilitychange + focus + syncRewardedAdSessionByTimestamp
+  const rewardedModalSrc = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/rewards/RewardedAdModal.tsx'),
+    'utf8'
+  );
+  assert.ok(rewardedModalSrc.includes('syncRewardedAdSessionByTimestamp'));
+  assert.ok(rewardedModalSrc.includes("document.addEventListener('visibilitychange'"));
+  assert.ok(rewardedModalSrc.includes("window.addEventListener('focus'"));
+  assert.ok(
+    !rewardedModalSrc.includes('العدّاد متوقف مؤقتاً — عد للتطبيق'),
+    'Stale background-freeze pause banner must be removed'
+  );
 });
 
 test('Daily consecutive login streak awards +5 on Day 3 and +15 on Day 7 without double-claiming, and resets on missed day', () => {

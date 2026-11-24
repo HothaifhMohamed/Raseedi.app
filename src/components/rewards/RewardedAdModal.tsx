@@ -8,7 +8,6 @@ import {
   Coins,
   AlertCircle,
   WifiOff,
-  PauseCircle,
   RotateCcw,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
@@ -19,25 +18,26 @@ import {
   CREDITS_AD_REWARD,
   CREDITS_DAILY_AD_LIMIT,
   RewardedAdSession,
-  advanceRewardedAdSession,
   getRewardedAdAvailability,
   getRewardedAdRemainingMs,
   recordRewardedAdOpenAttempt,
   shouldShowRaseediCreditsUi,
   startRewardedAdSession,
+  syncRewardedAdSessionByTimestamp,
 } from '../../services/raseediCredits';
 import { useModalBackHandler } from '../../hooks/useModalBackHandler';
-
-function readInitialWindowFocus(): boolean {
-  if (typeof document === 'undefined') return true;
-  const visible = !document.hidden;
-  const focused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
-  return visible && focused;
-}
 
 function readIsOnline(): boolean {
   if (typeof navigator === 'undefined') return true;
   return navigator.onLine;
+}
+
+function readMonotonicNowMs(): number | null {
+  if (typeof performance === 'undefined' || typeof performance.now !== 'function') {
+    return null;
+  }
+  const value = performance.now();
+  return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 export const RewardedAdModal: React.FC = () => {
@@ -58,22 +58,12 @@ export const RewardedAdModal: React.FC = () => {
   const [session, setSession] = useState<RewardedAdSession | null>(null);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [isOnline, setIsOnline] = useState<boolean>(() => readIsOnline());
-  const [isVisibleAndFocused, setIsVisibleAndFocused] = useState<boolean>(() =>
-    readInitialWindowFocus()
-  );
   const [showReopenHint, setShowReopenHint] = useState(false);
   const [claimSuccess, setClaimSuccess] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
 
-  const isWindowFocusedRef = useRef<boolean>(readInitialWindowFocus());
-  const lastTickAtRef = useRef<number>(Date.now());
   const tabLeftAfterOpenRef = useRef<boolean>(false);
   const openHintTimerRef = useRef<number | null>(null);
-
-  const readCurrentForegroundActive = () => {
-    const visible = typeof document === 'undefined' ? true : !document.hidden;
-    return visible && isWindowFocusedRef.current;
-  };
 
   useModalBackHandler(
     isRewardedAdModalOpen,
@@ -81,96 +71,65 @@ export const RewardedAdModal: React.FC = () => {
     'rewarded-ad-modal'
   );
 
-  // Track visibility, focus, and network connectivity in real time
+  // Immediately re-sync countdown from real timestamps on tab return (visibilitychange / focus)
+  // and network state changes so background throttling while viewing the external ad never stalls progress.
   useEffect(() => {
     if (!isRewardedAdModalOpen) return;
 
-    const syncVisibilityChange = () => {
+    const syncSessionNow = (onlineOverride?: boolean) => {
+      const currentNow = Date.now();
+      const monoNow = readMonotonicNowMs();
+      const onlineNow = onlineOverride ?? readIsOnline();
+      setNowMs(currentNow);
+      setIsOnline(onlineNow);
+      setSession((prev) => {
+        if (!prev || prev.claimed) return prev;
+        return syncRewardedAdSessionByTimestamp(prev, {
+          nowMs: currentNow,
+          monotonicNowMs: monoNow,
+          isOnline: onlineNow,
+        });
+      });
+    };
+
+    const handleVisibilityChange = () => {
       const visible = typeof document === 'undefined' ? true : !document.hidden;
       if (!visible) {
         tabLeftAfterOpenRef.current = true;
         setShowReopenHint(false);
       } else {
-        // Returning to a visible tab resumes cleanly
-        isWindowFocusedRef.current = true;
-        lastTickAtRef.current = Date.now();
+        // User returned to the app: immediately calculate real elapsed time from startedAtMs
+        syncSessionNow();
       }
-      const active = visible && isWindowFocusedRef.current;
-      setIsVisibleAndFocused(active);
-      setSession((prev) => {
-        if (!prev || prev.claimed) return prev;
-        return advanceRewardedAdSession(prev, {
-          deltaMs: 0,
-          isVisibleAndFocused: active,
-          isOnline: readIsOnline(),
-        });
-      });
     };
 
     const handleBlur = () => {
-      isWindowFocusedRef.current = false;
       tabLeftAfterOpenRef.current = true;
       setShowReopenHint(false);
-      setIsVisibleAndFocused(false);
-      setSession((prev) => {
-        if (!prev || prev.claimed) return prev;
-        return advanceRewardedAdSession(prev, {
-          deltaMs: 0,
-          isVisibleAndFocused: false,
-          isOnline: readIsOnline(),
-        });
-      });
     };
 
     const handleFocus = () => {
-      isWindowFocusedRef.current = true;
-      const visible = typeof document === 'undefined' ? true : !document.hidden;
-      lastTickAtRef.current = Date.now();
-      setIsVisibleAndFocused(visible);
-      setSession((prev) => {
-        if (!prev || prev.claimed) return prev;
-        return advanceRewardedAdSession(prev, {
-          deltaMs: 0,
-          isVisibleAndFocused: visible,
-          isOnline: readIsOnline(),
-        });
-      });
+      // Returning focus to the app immediately syncs elapsed timestamp & unlocks claiming if 10s passed
+      syncSessionNow();
     };
 
     const handleOnline = () => {
-      lastTickAtRef.current = Date.now();
-      setIsOnline(true);
       setStatusError((prev) => (prev ? null : prev));
-      setSession((prev) => {
-        if (!prev || prev.claimed) return prev;
-        return advanceRewardedAdSession(prev, {
-          deltaMs: 0,
-          isVisibleAndFocused: readCurrentForegroundActive(),
-          isOnline: true,
-        });
-      });
+      syncSessionNow(true);
     };
 
     const handleOffline = () => {
-      setIsOnline(false);
-      setSession((prev) => {
-        if (!prev || prev.claimed) return prev;
-        return advanceRewardedAdSession(prev, {
-          deltaMs: 0,
-          isVisibleAndFocused: readCurrentForegroundActive(),
-          isOnline: false,
-        });
-      });
+      syncSessionNow(false);
     };
 
-    document.addEventListener('visibilitychange', syncVisibilityChange);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('blur', handleBlur);
     window.addEventListener('focus', handleFocus);
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
     return () => {
-      document.removeEventListener('visibilitychange', syncVisibilityChange);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('blur', handleBlur);
       window.removeEventListener('focus', handleFocus);
       window.removeEventListener('online', handleOnline);
@@ -186,9 +145,6 @@ export const RewardedAdModal: React.FC = () => {
     }
     if (isRewardedAdModalOpen) {
       const now = Date.now();
-      const initialActive = readInitialWindowFocus();
-      isWindowFocusedRef.current = initialActive;
-      lastTickAtRef.current = now;
       tabLeftAfterOpenRef.current = false;
       setNowMs(now);
       setSession(null);
@@ -196,7 +152,6 @@ export const RewardedAdModal: React.FC = () => {
       setStatusError(null);
       setShowReopenHint(false);
       setIsOnline(readIsOnline());
-      setIsVisibleAndFocused(initialActive);
     }
   }, [isRewardedAdModalOpen]);
 
@@ -205,28 +160,23 @@ export const RewardedAdModal: React.FC = () => {
   const isCountingDown = Boolean(session && !session.claimed && remainingCountdownMs > 0);
   const isCoolingDown = !session && !availability.canWatch && availability.reason === 'cooldown';
 
-  // Active-only 250ms tick (automatically pauses while hidden, unfocused, or offline)
+  // Real-timestamp 250ms UI refresh tick (auto-pauses ONLY when offline or openAttempted is false)
   useEffect(() => {
     if (!isRewardedAdModalOpen) return;
     if (!isCountingDown && !isCoolingDown) return;
 
-    lastTickAtRef.current = Date.now();
     const timer = window.setInterval(() => {
       const currentNow = Date.now();
-      const deltaMs = Math.max(0, currentNow - lastTickAtRef.current);
-      lastTickAtRef.current = currentNow;
-      setNowMs(currentNow);
-
+      const monoNow = readMonotonicNowMs();
       const onlineNow = readIsOnline();
-      const activeNow = readCurrentForegroundActive();
+      setNowMs(currentNow);
       setIsOnline(onlineNow);
-      setIsVisibleAndFocused(activeNow);
 
       setSession((prev) => {
         if (!prev || prev.claimed) return prev;
-        return advanceRewardedAdSession(prev, {
-          deltaMs,
-          isVisibleAndFocused: activeNow,
+        return syncRewardedAdSessionByTimestamp(prev, {
+          nowMs: currentNow,
+          monotonicNowMs: monoNow,
           isOnline: onlineNow,
         });
       });
@@ -254,9 +204,9 @@ export const RewardedAdModal: React.FC = () => {
     ? 'offline'
     : session && !session.openAttempted
     ? 'open_blocked'
-    : session && (!isVisibleAndFocused || session.pauseReason === 'background') && remainingCountdownMs > 0
-    ? 'background'
-    : session?.pauseReason ?? 'none';
+    : session?.pauseReason === 'offline' || session?.pauseReason === 'open_blocked'
+    ? session.pauseReason
+    : 'none';
 
   const isReadyToClaim = Boolean(
     session &&
@@ -296,11 +246,12 @@ export const RewardedAdModal: React.FC = () => {
     }
 
     const currentNow = Date.now();
-    lastTickAtRef.current = currentNow;
+    const monoNow = readMonotonicNowMs();
     setNowMs(currentNow);
     const started = startRewardedAdSession(creditsState, currentNow, {
       isOnline: onlineNow,
       openAttempted: true,
+      monotonicNowMs: monoNow,
     });
     if (started.ok === false) {
       e.preventDefault();
@@ -343,9 +294,18 @@ export const RewardedAdModal: React.FC = () => {
       return;
     }
     setStatusError(null);
-    lastTickAtRef.current = Date.now();
+    const currentNow = Date.now();
+    const monoNow = readMonotonicNowMs();
+    setNowMs(currentNow);
     setSession((prev) =>
-      prev ? recordRewardedAdOpenAttempt(prev, { succeeded: true, isOnline: true }) : prev
+      prev
+        ? recordRewardedAdOpenAttempt(prev, {
+            succeeded: true,
+            isOnline: true,
+            nowMs: currentNow,
+            monotonicNowMs: monoNow,
+          })
+        : prev
     );
     scheduleReopenFallbackHint();
   };
@@ -354,8 +314,12 @@ export const RewardedAdModal: React.FC = () => {
     if (!session || session.claimed) return;
     const onlineNow = readIsOnline();
     setIsOnline(onlineNow);
+    const monoNow = readMonotonicNowMs();
 
-    const result = claimRewardedAdCredits(session, { isOnline: onlineNow });
+    const result = claimRewardedAdCredits(session, {
+      isOnline: onlineNow,
+      monotonicNowMs: monoNow,
+    });
     if (result.ok === true) {
       setSession({ ...session, claimed: true });
       setClaimSuccess(true);
@@ -376,8 +340,8 @@ export const RewardedAdModal: React.FC = () => {
     } else if (result.reason === 'countdown_incomplete') {
       setStatusError(
         isRTL
-          ? 'يرجى البقاء في التطبيق حتى اكتمال العدّاد (10 ثوانٍ).'
-          : 'Please stay in the app until the 10-second countdown completes.'
+          ? 'يرجى إكمال مدة التحقق (10 ثوانٍ) قبل استلام النقاط.'
+          : 'Please wait until the 10-second verification completes.'
       );
     } else if (result.reason === 'daily_limit') {
       setStatusError(
@@ -481,22 +445,6 @@ export const RewardedAdModal: React.FC = () => {
             </div>
           ) : session ? (
             <div className="space-y-3.5">
-              {/* Background / Blur Pause Banner */}
-              {effectivePauseReason === 'background' && remainingCountdownMs > 0 && (
-                <div
-                  role="status"
-                  data-testid="rewarded-ad-paused-banner"
-                  className="p-3 rounded-xl bg-[var(--color-gold-soft)] border border-[var(--color-gold)]/45 text-[var(--color-ink)] text-xs flex items-center gap-2.5"
-                >
-                  <PauseCircle className="w-4 h-4 text-[var(--color-gold-text)] shrink-0" />
-                  <span className="font-semibold">
-                    {isRTL
-                      ? 'العدّاد متوقف مؤقتاً — عد للتطبيق لإكمال التحقق'
-                      : 'Countdown paused — return to the app to complete verification'}
-                  </span>
-                </div>
-              )}
-
               {/* Countdown card */}
               <div
                 data-testid="rewarded-ad-countdown-card"
@@ -506,8 +454,6 @@ export const RewardedAdModal: React.FC = () => {
                 <div className="flex items-center justify-center gap-2 text-xs font-bold text-[var(--color-ink)]">
                   {effectivePauseReason === 'offline' ? (
                     <WifiOff className="w-4 h-4 text-[var(--color-expense)] shrink-0" />
-                  ) : effectivePauseReason === 'background' ? (
-                    <PauseCircle className="w-4 h-4 text-[var(--color-gold-text)] shrink-0" />
                   ) : (
                     <Clock className="w-4 h-4 text-[var(--color-gold-text)] shrink-0" />
                   )}
@@ -516,21 +462,17 @@ export const RewardedAdModal: React.FC = () => {
                       ? isRTL
                         ? 'العدّاد متوقف مؤقتاً — بانتظار عودة الإنترنت'
                         : 'Paused — waiting for internet connection'
-                      : effectivePauseReason === 'background' && remainingCountdownMs > 0
-                      ? isRTL
-                        ? 'عد للتطبيق لإكمال التحقق'
-                        : 'Return to the app to complete verification'
                       : effectivePauseReason === 'open_blocked'
                       ? isRTL
                         ? 'افتح رابط الإعلان أولاً لبدء التحقق'
                         : 'Open the ad link first to start verification'
                       : isReadyToClaim
                       ? isRTL
-                        ? 'اكتمل العدّاد! يمكنك استلام مكافأتك الآن'
-                        : 'Countdown complete! Claim your reward now'
+                        ? 'اكتمل التحقق! يمكنك استلام مكافأتك الآن'
+                        : 'Verification complete! Claim your reward now'
                       : isRTL
-                      ? `جارٍ التحقق... انتظر ${remainingSeconds} ثانية`
-                      : `Verifying view... ${remainingSeconds}s remaining`}
+                      ? `جارٍ التحقق في الوقت الحقيقي... المتبقي ${remainingSeconds} ثانية`
+                      : `Verifying in real time... ${remainingSeconds}s remaining`}
                   </span>
                 </div>
 
@@ -548,7 +490,7 @@ export const RewardedAdModal: React.FC = () => {
 
                 <div className="flex items-center justify-between text-[11px] text-[var(--color-muted)]">
                   <span>
-                    {isRTL ? 'المدة المطلوبة داخل التطبيق: 10 ثوانٍ' : 'Active in-app time: 10s'}
+                    {isRTL ? 'مدة المشاهدة المطلوبة: 10 ثوانٍ' : 'Required view time: 10s'}
                   </span>
                   <span
                     data-testid="rewarded-ad-remaining-seconds"
@@ -559,7 +501,7 @@ export const RewardedAdModal: React.FC = () => {
                 </div>
               </div>
 
-              {/* Claim button (strictly disabled until 10s active countdown + openAttempted + online) */}
+              {/* Claim button (strictly disabled until 10s real online elapsed time + openAttempted + online) */}
               <button
                 type="button"
                 disabled={!isReadyToClaim}
@@ -645,8 +587,8 @@ export const RewardedAdModal: React.FC = () => {
                   </li>
                   <li>
                     {isRTL
-                      ? 'عُد إلى «رصيدي» ليكتمل عدّاد 10 ثوانٍ بوجود اتصال بالإنترنت، ثم استلم +10 نقاط فوراً.'
-                      : 'Return to Raseedi so the 10-second online timer completes, then claim +10 credits instantly.'}
+                      ? 'يُحتسب عدّاد 10 ثوانٍ بالزمن الحقيقي أثناء مشاهدتك للإعلان — وعند عودتك إلى «رصيدي» بعد انقضائها يمكنك استلام +10 نقاط فوراً.'
+                      : 'The 10-second timer runs in real time while you view the ad — return to Raseedi once elapsed to claim +10 credits immediately.'}
                   </li>
                   <li>
                     {isRTL
