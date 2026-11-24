@@ -36,6 +36,13 @@ function resolveDocumentTheme(themeSetting?: string): AdBannerTheme {
   return 'light';
 }
 
+/**
+ * Embedded Adsterra 320x50 banner is intentionally disabled while Monetag
+ * In-Page Push (`zone="12339417"`) is the active Free-tier unit so multiple
+ * external ad formats never stack over the interface.
+ */
+export const EMBEDDED_BANNER_ENABLED = false;
+
 export const AdBanner: React.FC<AdBannerProps> = ({
   variant = 'banner',
   className = '',
@@ -50,11 +57,13 @@ export const AdBanner: React.FC<AdBannerProps> = ({
   } = useApp();
   const { activeOrgSubscriptionState } = useOrg();
 
-  const showAds = shouldShowAds(subscriptionSummary, {
-    isProFlag: isPro,
-    creditsAdFreeActive: hasActiveAdFreePass,
-    activeOrgSubscriptionState,
-  });
+  const showAds =
+    EMBEDDED_BANNER_ENABLED &&
+    shouldShowAds(subscriptionSummary, {
+      isProFlag: isPro,
+      creditsAdFreeActive: hasActiveAdFreePass,
+      activeOrgSubscriptionState,
+    });
 
   const slotHostRef = useRef<HTMLDivElement | null>(null);
   const [isOnline, setIsOnline] = useState<boolean>(
@@ -74,6 +83,10 @@ export const AdBanner: React.FC<AdBannerProps> = ({
   const shouldMountIframe = visibility === 'loading-hidden' || visibility === 'visible';
 
   useEffect(() => {
+    if (!EMBEDDED_BANNER_ENABLED) {
+      teardownAdsterraBanner320x50();
+      return;
+    }
     const handleOnline = () => {
       setIsOnline(true);
       setLoadState('loading');
@@ -93,16 +106,14 @@ export const AdBanner: React.FC<AdBannerProps> = ({
     };
   }, []);
 
-  // Ensure zero lingering ad iframes when hidden (PRO/Business/Admin/Active Org/No-Fill/Offline)
+  // Ensure zero lingering ad iframes when hidden (Disabled/PRO/Business/Admin/Active Org/No-Fill/Offline)
   useEffect(() => {
     if (!shouldMountIframe) {
       teardownAdsterraBanner320x50();
     }
   }, [shouldMountIframe]);
 
-  // Mount isolated 320x50 Adsterra banner iframe strictly once per active view.
-  // Stays collapsed (0px, opacity-0) until Adsterra confirms an actual creative
-  // filled; collapses completely on No-Fill, timeout, or script error.
+  // Mount isolated 320x50 Adsterra banner iframe strictly once per active view when enabled.
   useEffect(() => {
     if (!shouldMountIframe || !slotHostRef.current) return;
     return mountAdsterraBanner320x50(slotHostRef.current, {

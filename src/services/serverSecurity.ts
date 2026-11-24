@@ -618,6 +618,8 @@ const ADSTERRA_CSP_HOSTS = [
 const MONETAG_CSP_HOSTS = [
   'https://nap5k.com',
   'https://*.nap5k.com',
+  'https://uplcm.com',
+  'https://*.uplcm.com',
 ];
 
 export function buildCspDirectives(options: {
@@ -692,6 +694,7 @@ export function buildCspDirectives(options: {
       'https://bauval.org',
       'https://araplhn.org',
       'https://nap5k.com',
+      'https://uplcm.com',
       'https:',
     ],
     connectSrc,

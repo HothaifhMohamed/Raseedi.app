@@ -90,17 +90,20 @@ function createFakeDom(): {
   const matchesSelector = (el: FakeElement, selector: string): boolean => {
     const parts = selector.split(',').map((s) => s.trim());
     return parts.some((part) => {
-      if (part === `script#${MONETAG_SCRIPT_ID}`) {
-        return el.tagName === 'script' && el.id === MONETAG_SCRIPT_ID;
+      const idMatch = part.match(/^script#(.+)$/);
+      if (idMatch) {
+        return el.tagName === 'script' && el.id === idMatch[1];
       }
       if (part === 'script[src*="nap5k.com/tag.min.js"]') {
         return el.tagName === 'script' && (el.getAttribute('src') || '').includes('nap5k.com/tag.min.js');
       }
-      if (part === `script[data-zone="${MONETAG_ZONE_ID}"]`) {
-        return el.tagName === 'script' && el.getAttribute('data-zone') === MONETAG_ZONE_ID;
+      const scriptZoneMatch = part.match(/^script\[data-zone="(.+)"\]$/);
+      if (scriptZoneMatch) {
+        return el.tagName === 'script' && el.getAttribute('data-zone') === scriptZoneMatch[1];
       }
-      if (part === `[data-monetag-zone="${MONETAG_ZONE_ID}"]`) {
-        return el.getAttribute('data-monetag-zone') === MONETAG_ZONE_ID;
+      const artifactZoneMatch = part.match(/^\[data-monetag-zone="(.+)"\]$/);
+      if (artifactZoneMatch) {
+        return el.getAttribute('data-monetag-zone') === artifactZoneMatch[1];
       }
       if (part === 'iframe[src*="nap5k.com"]') {
         return el.tagName === 'iframe' && (el.getAttribute('src') || '').includes('nap5k.com');
@@ -193,20 +196,31 @@ test('shouldLoadMonetagZone allows Free users only and strictly blocks PRO, Busi
   assert.equal(shouldLoadMonetagZone({ ...eligibleFreeBase, isEntitlementResolved: false }), false);
 });
 
-test('syncMonetagZoneScript injects zone 12336201 once without duplication and tears down cleanly when disabled', () => {
+test('syncMonetagZoneScript injects In-Page Push zone 12339417 once, replaces legacy zone 12336201, and tears down cleanly when disabled', () => {
+  assert.equal(MONETAG_ZONE_ID, '12339417');
+  assert.equal(MONETAG_SCRIPT_SRC, 'https://nap5k.com/tag.min.js');
+  assert.equal(MONETAG_SCRIPT_ID, 'raseedi-monetag-zone-12339417');
+
   const { doc, head, body, metaTag } = createFakeDom();
 
   // Disabled initially -> does nothing
   assert.equal(syncMonetagZoneScript(false, doc), 'idle');
   assert.equal(body.children.length, 0);
 
-  // Enable for eligible free user -> injects single script with exact zone & src
+  // If a legacy zone 12336201 script existed, enabling replaces it with 12339417 cleanly
+  const legacyScript = doc.createElement('script') as FakeElement;
+  legacyScript.setAttribute('id', 'raseedi-monetag-zone-12336201');
+  legacyScript.setAttribute('src', 'https://nap5k.com/tag.min.js');
+  legacyScript.setAttribute('data-zone', '12336201');
+  body.appendChild(legacyScript);
+
+  // Enable for eligible free user -> replaces legacy with single 12339417 script
   assert.equal(syncMonetagZoneScript(true, doc), 'injected');
   assert.equal(body.children.length, 1);
   const injected = body.children[0];
-  assert.equal(injected.id, MONETAG_SCRIPT_ID);
-  assert.equal(injected.getAttribute('src'), MONETAG_SCRIPT_SRC);
-  assert.equal(injected.getAttribute('data-zone'), MONETAG_ZONE_ID);
+  assert.equal(injected.id, 'raseedi-monetag-zone-12339417');
+  assert.equal(injected.getAttribute('src'), 'https://nap5k.com/tag.min.js');
+  assert.equal(injected.getAttribute('data-zone'), '12339417');
   assert.equal(injected.getAttribute('data-cfasync'), 'false');
   assert.equal(injected.async, true);
 
@@ -216,7 +230,7 @@ test('syncMonetagZoneScript injects zone 12336201 once without duplication and t
 
   // Simulate an injected Monetag iframe/container artifact
   const iframe = doc.createElement('iframe');
-  iframe.setAttribute?.('src', 'https://nap5k.com/frame?zone=12336201');
+  iframe.setAttribute?.('src', 'https://nap5k.com/frame?zone=12339417');
   body.appendChild(iframe as FakeElement);
   assert.equal(body.children.length, 2);
 
@@ -227,15 +241,20 @@ test('syncMonetagZoneScript injects zone 12336201 once without duplication and t
   assert.equal(metaTag.getAttribute('content'), MONETAG_META_VERIFICATION);
 });
 
-test('CSP in serverSecurity.ts, server.ts, vercel.json, index.html, and App.tsx allow nap5k.com safely for Free users only', () => {
+test('CSP in serverSecurity.ts, server.ts, vercel.json, index.html, AdBanner.tsx, and App.tsx allow nap5k.com + uplcm.com and prevent banner stacking', () => {
   const prod = buildCspDirectives({ isProduction: true, allowPreviewFraming: false });
-  assert.ok(prod.scriptSrc.includes('https://nap5k.com'));
-  assert.ok(prod.scriptSrc.includes('https://*.nap5k.com'));
-  assert.ok(prod.connectSrc.includes('https://nap5k.com'));
-  assert.ok(prod.connectSrc.includes('https://*.nap5k.com'));
-  assert.ok(prod.frameSrc.includes('https://nap5k.com'));
-  assert.ok(prod.frameSrc.includes('https://*.nap5k.com'));
+  for (const host of [
+    'https://nap5k.com',
+    'https://*.nap5k.com',
+    'https://uplcm.com',
+    'https://*.uplcm.com',
+  ]) {
+    assert.ok(prod.scriptSrc.includes(host), `scriptSrc must include ${host}`);
+    assert.ok(prod.connectSrc.includes(host), `connectSrc must include ${host}`);
+    assert.ok(prod.frameSrc.includes(host), `frameSrc must include ${host}`);
+  }
   assert.ok(prod.imgSrc.includes('https://nap5k.com'));
+  assert.ok(prod.imgSrc.includes('https://uplcm.com'));
   assert.deepEqual(prod.frameAncestors, ["'self'"]);
   // Existing domains remain intact
   assert.ok(prod.scriptSrc.includes('https://pagead2.googlesyndication.com'));
@@ -251,6 +270,8 @@ test('CSP in serverSecurity.ts, server.ts, vercel.json, index.html, and App.tsx 
   assert.ok(cspHeader);
   assert.ok(cspHeader.value.includes('https://nap5k.com'));
   assert.ok(cspHeader.value.includes('https://*.nap5k.com'));
+  assert.ok(cspHeader.value.includes('https://uplcm.com'));
+  assert.ok(cspHeader.value.includes('https://*.uplcm.com'));
   assert.ok(cspHeader.value.includes("frame-ancestors 'self'"));
   assert.ok(cspHeader.value.includes('https://pagead2.googlesyndication.com'));
   assert.ok(cspHeader.value.includes('https://bauval.org'));
@@ -266,6 +287,13 @@ test('CSP in serverSecurity.ts, server.ts, vercel.json, index.html, and App.tsx 
     [];
   assert.equal(metaMatches.length, 1);
   assert.equal(indexHtml.includes('nap5k.com/tag.min.js'), false);
+
+  // AdBanner.tsx disables the legacy embedded 320x50 banner so external ads never stack over the UI
+  const adBannerSrc = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/common/AdBanner.tsx'),
+    'utf8'
+  );
+  assert.ok(adBannerSrc.includes('EMBEDDED_BANNER_ENABLED = false'));
 
   // App.tsx dynamically gates Monetag via shouldLoadMonetagZone + syncMonetagZoneScript
   const appSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf8');

@@ -5,7 +5,8 @@ import {
   type UserSubscriptionSummary,
 } from './subscriptionHelpers';
 
-export const MONETAG_ZONE_ID = '12336201';
+export const MONETAG_ZONE_ID = '12339417';
+export const MONETAG_LEGACY_ZONE_IDS = ['12336201'] as const;
 export const MONETAG_SCRIPT_SRC = 'https://nap5k.com/tag.min.js';
 export const MONETAG_SCRIPT_ID = `raseedi-monetag-zone-${MONETAG_ZONE_ID}`;
 export const MONETAG_META_VERIFICATION = '28dce08c56e1ff333a8ef6b51ff91fe0';
@@ -81,8 +82,19 @@ export interface MinimalDocumentLike {
   querySelectorAll(selector: string): ArrayLike<MinimalDomNode>;
 }
 
-const MONETAG_SCRIPT_SELECTOR = `script#${MONETAG_SCRIPT_ID}, script[src*="nap5k.com/tag.min.js"], script[data-zone="${MONETAG_ZONE_ID}"]`;
-const MONETAG_ARTIFACT_SELECTOR = `[data-monetag-zone="${MONETAG_ZONE_ID}"], iframe[src*="nap5k.com"]`;
+const MONETAG_SCRIPT_SELECTOR = [
+  `script#${MONETAG_SCRIPT_ID}`,
+  ...MONETAG_LEGACY_ZONE_IDS.map((z) => `script#raseedi-monetag-zone-${z}`),
+  'script[src*="nap5k.com/tag.min.js"]',
+  `script[data-zone="${MONETAG_ZONE_ID}"]`,
+  ...MONETAG_LEGACY_ZONE_IDS.map((z) => `script[data-zone="${z}"]`),
+].join(', ');
+
+const MONETAG_ARTIFACT_SELECTOR = [
+  `[data-monetag-zone="${MONETAG_ZONE_ID}"]`,
+  ...MONETAG_LEGACY_ZONE_IDS.map((z) => `[data-monetag-zone="${z}"]`),
+  'iframe[src*="nap5k.com"]',
+].join(', ');
 
 function removeDomNode(node: MinimalDomNode): void {
   if (typeof node.remove === 'function') {
@@ -93,9 +105,10 @@ function removeDomNode(node: MinimalDomNode): void {
 }
 
 /**
- * Idempotently injects or tears down the Monetag zone `12336201` script.
- * - Guarantees at most ONE `<script data-zone="12336201" src="https://nap5k.com/tag.min.js">`
- *   in the document (never duplicates across tab switches or re-renders).
+ * Idempotently injects or tears down the Monetag In-Page Push zone `12339417` script.
+ * - Guarantees at most ONE `<script data-zone="12339417" src="https://nap5k.com/tag.min.js">`
+ *   in the document (never duplicates across tab switches or re-renders, and automatically
+ *   cleans up any legacy Monetag zone tag).
  * - Immediately removes the script and any Monetag iframe/zone container whenever
  *   `enabled` transitions to `false` (PRO/Business/Admin/Org/Ad-Free/Logout/Offline),
  *   without touching the `<meta name="monetag">` verification tag.

@@ -14,7 +14,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { useOrg } from '../../context/OrgContext';
 import {
-  ADSTERRA_SMARTLINK_URL,
+  REWARDED_AD_LINK_URL,
   CREDITS_AD_COUNTDOWN_MS,
   CREDITS_AD_REWARD,
   CREDITS_DAILY_AD_LIMIT,
@@ -599,7 +599,7 @@ export const RewardedAdModal: React.FC = () => {
                       : 'Ad tab blocked or failed to open? Tap below to reopen the ad link.'}
                   </p>
                   <a
-                    href={ADSTERRA_SMARTLINK_URL}
+                    href={REWARDED_AD_LINK_URL}
                     target="_blank"
                     rel="noopener noreferrer"
                     onClick={handleReopenSmartlink}
@@ -614,7 +614,7 @@ export const RewardedAdModal: React.FC = () => {
               ) : (
                 <div className="text-center">
                   <a
-                    href={ADSTERRA_SMARTLINK_URL}
+                    href={REWARDED_AD_LINK_URL}
                     target="_blank"
                     rel="noopener noreferrer"
                     onClick={handleReopenSmartlink}
@@ -658,7 +658,7 @@ export const RewardedAdModal: React.FC = () => {
 
               {availability.canWatch ? (
                 <a
-                  href={ADSTERRA_SMARTLINK_URL}
+                  href={REWARDED_AD_LINK_URL}
                   target="_blank"
                   rel="noopener noreferrer"
                   onClick={handleStartWatch}

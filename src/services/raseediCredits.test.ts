@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  ACTIVE_REWARDED_AD_PROVIDER,
   ADSTERRA_SMARTLINK_URL,
+  REWARDED_AD_LINK_URL,
+  REWARDED_AD_PROVIDERS,
   CREDITS_24H_MS,
   CREDITS_AD_COOLDOWN_MS,
   CREDITS_AD_COUNTDOWN_MS,
@@ -44,11 +47,17 @@ import { buildCspDirectives } from './serverSecurity';
 
 const BASE_DAY_1 = new Date(2026, 10, 22, 10, 0, 0).getTime(); // 2026-11-22 10:00 local
 
-test('Smartlink URL and initial welcome bonus (15 credits once) match exact specification', () => {
-  assert.equal(
-    ADSTERRA_SMARTLINK_URL,
-    'https://araplhn.org/4/68b50cb65897ac345cf0ff99a6ac732a'
+test('Monetag Direct Link URL (swappable config) and initial welcome bonus (15 credits once) match exact specification', () => {
+  assert.equal(ACTIVE_REWARDED_AD_PROVIDER, 'monetagDirectLink');
+  assert.equal(REWARDED_AD_PROVIDERS.monetagDirectLink, 'https://uplcm.com/4/12339410');
+  assert.equal(REWARDED_AD_LINK_URL, 'https://uplcm.com/4/12339410');
+  assert.equal(ADSTERRA_SMARTLINK_URL, 'https://uplcm.com/4/12339410');
+
+  const rewardedModalSrc = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/rewards/RewardedAdModal.tsx'),
+    'utf8'
   );
+  assert.ok(rewardedModalSrc.includes('href={REWARDED_AD_LINK_URL}'));
 
   const initial = createInitialCreditsState(BASE_DAY_1);
   assert.equal(initial.balance, CREDITS_WELCOME_BONUS);
@@ -446,8 +455,12 @@ test('mergeRaseediCreditsStates preserves monotonic high-water mark and latest a
   assert.equal(merged.maxObservedNowMs, BASE_DAY_1 + 250_000);
 });
 
-test('CSP directives in serverSecurity.ts and vercel.json allow https://araplhn.org safely without weakening frame-ancestors', () => {
+test('CSP directives in serverSecurity.ts and vercel.json allow https://uplcm.com and https://araplhn.org safely without weakening frame-ancestors', () => {
   const prod = buildCspDirectives({ isProduction: true, allowPreviewFraming: false });
+  assert.equal(prod.scriptSrc.includes('https://uplcm.com'), true);
+  assert.equal(prod.connectSrc.includes('https://uplcm.com'), true);
+  assert.equal(prod.frameSrc.includes('https://uplcm.com'), true);
+  assert.equal(prod.imgSrc.includes('https://uplcm.com'), true);
   assert.equal(prod.scriptSrc.includes('https://araplhn.org'), true);
   assert.equal(prod.connectSrc.includes('https://araplhn.org'), true);
   assert.equal(prod.frameSrc.includes('https://araplhn.org'), true);
@@ -465,6 +478,8 @@ test('CSP directives in serverSecurity.ts and vercel.json allow https://araplhn.
 
   assert.ok(cspHeader);
   assert.ok(cspHeader.value.includes("frame-ancestors 'self'"));
+  assert.ok(cspHeader.value.includes('https://uplcm.com'));
+  assert.ok(cspHeader.value.includes('https://*.uplcm.com'));
   assert.ok(cspHeader.value.includes('https://araplhn.org'));
   assert.ok(cspHeader.value.includes('https://*.araplhn.org'));
 });

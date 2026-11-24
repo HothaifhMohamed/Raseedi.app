@@ -1,8 +1,23 @@
 import type { PlanTier } from '../types';
 import type { UserSubscriptionSummary } from './subscriptionHelpers';
 
-export const ADSTERRA_SMARTLINK_URL =
-  'https://araplhn.org/4/68b50cb65897ac345cf0ff99a6ac732a';
+/**
+ * Centralized Rewarded Ad link configuration for Raseedi Credits ("نقاط رصيدي").
+ * Structured so the active provider/URL can be swapped or reverted in one line.
+ */
+export const REWARDED_AD_PROVIDERS = {
+  monetagDirectLink: 'https://uplcm.com/4/12339410',
+  adsterraSmartlinkFallback: 'https://araplhn.org/4/68b50cb65897ac345cf0ff99a6ac732a',
+} as const;
+
+export const ACTIVE_REWARDED_AD_PROVIDER: keyof typeof REWARDED_AD_PROVIDERS =
+  'monetagDirectLink';
+
+export const REWARDED_AD_LINK_URL: string =
+  REWARDED_AD_PROVIDERS[ACTIVE_REWARDED_AD_PROVIDER];
+
+/** Backwards-compatible alias referencing the active rewarded ad link URL. */
+export const ADSTERRA_SMARTLINK_URL: string = REWARDED_AD_LINK_URL;
 
 export const CREDITS_STORAGE_KEY_PREFIX = 'raseedi_credits_state_v1';
 export const CREDITS_WELCOME_BONUS = 15;
