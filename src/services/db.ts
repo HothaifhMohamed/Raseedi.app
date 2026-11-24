@@ -22,7 +22,15 @@ import {
   CostCenter,
 } from '../types';
 import { SUPPORT_CONFIG } from '../constants/support';
-import { removeOrgFromWorkspacesMap } from './workspaceCleanup';
+import {
+  DELETED_ORG_IDS_STORAGE_KEY,
+  filterDeletedOrgRefs,
+  filterDeletedOrgWorkspaces,
+  loadDeletedOrgIds,
+  recordDeletedOrgId,
+  removeOrgFromWorkspacesMap,
+  resolveSafeActiveWorkspace,
+} from './workspaceCleanup';
 import { normalizeThemePreference, THEME_PREF_STORAGE_KEY } from './workspaceSync';
 import { isCreditsStorageKey } from './raseediCredits';
 
@@ -711,9 +719,10 @@ export function loadCachedOrgRefs(): OrgRef[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
+    const valid = parsed.filter(
       (r): r is OrgRef => Boolean(r && typeof r === 'object' && typeof r.orgId === 'string' && r.orgId.trim().length > 0)
     );
+    return filterDeletedOrgRefs(valid, loadDeletedOrgIds());
   } catch {
     return [];
   }
@@ -788,9 +797,12 @@ export async function loadOrgWorkspaces(): Promise<{
         const res = req.result?.data as
           | { activeWorkspace?: string; workspaces?: Record<string, OrgWorkspaceData> }
           | undefined;
+        const deletedIds = loadDeletedOrgIds();
+        const filteredWorkspaces = filterDeletedOrgWorkspaces(res?.workspaces || {}, deletedIds);
+        const safeActive = resolveSafeActiveWorkspace(res?.activeWorkspace || 'personal', deletedIds);
         resolve({
-          activeWorkspace: res?.activeWorkspace || 'personal',
-          workspaces: res?.workspaces || {},
+          activeWorkspace: safeActive,
+          workspaces: filteredWorkspaces,
         });
       };
       req.onerror = () => resolve({ activeWorkspace: 'personal', workspaces: {} });
@@ -806,12 +818,15 @@ export async function saveOrgWorkspaces(
 ): Promise<void> {
   const db = await openDB();
   if (!db) return;
+  const deletedIds = loadDeletedOrgIds();
+  const safeWorkspaces = filterDeletedOrgWorkspaces(workspaces, deletedIds);
+  const safeActive = resolveSafeActiveWorkspace(activeWorkspace, deletedIds);
   return new Promise((resolve) => {
     try {
       const tx = db.transaction('app_data', 'readwrite');
       tx.objectStore('app_data').put({
         key: 'org_workspaces_v1',
-        data: { activeWorkspace, workspaces },
+        data: { activeWorkspace: safeActive, workspaces: safeWorkspaces },
         updatedAt: Date.now(),
       });
       tx.oncomplete = () => resolve();
@@ -827,6 +842,9 @@ export async function deleteLocalOrgWorkspaceStorage(
   nextActiveWorkspace = 'personal'
 ): Promise<Record<string, OrgWorkspaceData>> {
   const cleanOrgId = (orgId || '').trim();
+  if (cleanOrgId && cleanOrgId !== 'personal') {
+    recordDeletedOrgId(cleanOrgId);
+  }
   const stored = await loadOrgWorkspaces();
   const nextWorkspaces = removeOrgFromWorkspacesMap(stored.workspaces, cleanOrgId);
   const resolvedActive =
@@ -841,11 +859,28 @@ export async function deleteLocalOrgWorkspaceStorage(
       if (localStorage.getItem('raseedi_active_workspace_v1') === cleanOrgId) {
         localStorage.setItem('raseedi_active_workspace_v1', resolvedActive);
       }
+
+      // Immediately purge deleted org from cached orgRefs so refreshes never resurrect it
+      const cachedRefs = loadCachedOrgRefs();
+      const filteredRefs = cachedRefs.filter((r) => r.orgId !== cleanOrgId);
+      saveCachedOrgRefs(filteredRefs);
+
+      // Immediately purge active org snapshot if it belongs to the deleted org (or active switched to personal)
+      const cachedSnap = cleanOrgId ? loadCachedActiveOrgSnapshot(cleanOrgId) : null;
+      if (cachedSnap || resolvedActive === 'personal') {
+        saveCachedActiveOrgSnapshot(null);
+      }
+
       if (cleanOrgId) {
         const keysToRemove: string[] = [];
         for (let i = 0; i < localStorage.length; i++) {
           const k = localStorage.key(i);
-          if (k && k.startsWith('raseedi_') && k.includes(cleanOrgId)) {
+          if (
+            k &&
+            k !== DELETED_ORG_IDS_STORAGE_KEY &&
+            k.startsWith('raseedi_') &&
+            k.includes(cleanOrgId)
+          ) {
             keysToRemove.push(k);
           }
         }
@@ -925,7 +960,11 @@ export function saveUnsyncedDirtyFlag(dirty: boolean): void {
  *   while remaining strictly isolated per user ID.
  */
 export function shouldPreserveLocalStorageKeyOnLogout(key: string): boolean {
-  return key === THEME_PREF_STORAGE_KEY || isCreditsStorageKey(key);
+  return (
+    key === THEME_PREF_STORAGE_KEY ||
+    key === DELETED_ORG_IDS_STORAGE_KEY ||
+    isCreditsStorageKey(key)
+  );
 }
 
 export async function clearLocalAppStorageAndDb(): Promise<void> {

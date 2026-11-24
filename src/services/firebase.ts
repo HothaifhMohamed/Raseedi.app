@@ -98,6 +98,11 @@ import {
   prepareCloudBackupChunks,
   resolveSafeCloudBackupWrite,
 } from './backupMerge';
+import {
+  filterDeletedOrgWorkspaces,
+  loadDeletedOrgIds,
+  resolveSafeActiveWorkspace,
+} from './workspaceCleanup';
 import { sortTransactionsDescending } from './orgTransactionQuery';
 import {
   isPrimarySystemAdminEmail,
@@ -2411,24 +2416,29 @@ export async function saveCloudBackup(
   );
   const updatedAtMs = Date.now();
 
+  const deletedOrgIds = loadDeletedOrgIds();
+  const filteredEffectiveOrgs =
+    effectiveData.orgWorkspaces !== undefined
+      ? filterDeletedOrgWorkspaces(effectiveData.orgWorkspaces, deletedOrgIds)
+      : undefined;
   const rawOrgEntries =
-    effectiveData.orgWorkspaces &&
-    typeof effectiveData.orgWorkspaces === 'object' &&
-    !Array.isArray(effectiveData.orgWorkspaces)
-      ? Object.entries(effectiveData.orgWorkspaces).slice(0, 50)
+    filteredEffectiveOrgs &&
+    typeof filteredEffectiveOrgs === 'object' &&
+    !Array.isArray(filteredEffectiveOrgs)
+      ? Object.entries(filteredEffectiveOrgs).slice(0, 50)
       : [];
   const hasOrgWorkspaces = rawOrgEntries.length > 0;
   const cleanActiveWorkspace =
     typeof effectiveData.activeWorkspace === 'string' &&
     effectiveData.activeWorkspace.trim().length > 0
-      ? effectiveData.activeWorkspace.trim().slice(0, 128)
+      ? resolveSafeActiveWorkspace(effectiveData.activeWorkspace.trim(), deletedOrgIds).slice(0, 128)
       : undefined;
 
   const hasExplicitOrgWorkspacesMap =
-    effectiveData.orgWorkspaces !== undefined &&
-    effectiveData.orgWorkspaces !== null &&
-    typeof effectiveData.orgWorkspaces === 'object' &&
-    !Array.isArray(effectiveData.orgWorkspaces);
+    filteredEffectiveOrgs !== undefined &&
+    filteredEffectiveOrgs !== null &&
+    typeof filteredEffectiveOrgs === 'object' &&
+    !Array.isArray(filteredEffectiveOrgs);
 
   let orgWorkspacesToSave = hasOrgWorkspaces
     ? stripUndefinedDeep(
@@ -2535,14 +2545,24 @@ export async function saveCloudBackup(
       });
     }
 
-    // Commit backup metadata and prune any stale chunks after chunks are durably written
+    // Commit backup metadata and prune any stale chunks after chunks are durably written.
+    // CRITICAL: When meta already exists, use `batch.update` (NOT `set(..., { merge: true })`)
+    // so top-level map fields like `orgWorkspaces` are REPLACED completely rather than deep-merged
+    // (which would otherwise keep deleted organization keys alive in Firestore forever).
     const metaBatch = writeBatch(db);
-    const metaWritePayload = {
-      ...metaFields,
-      ...(!metaExists ? { createdAt: serverTimestamp() } : {}),
-      updatedAt: serverTimestamp(),
-    };
-    metaBatch.set(metaRef, metaWritePayload, { merge: true });
+    if (metaExists) {
+      const { uid: _ignoredUid, ...updatableMetaFields } = metaFields;
+      metaBatch.update(metaRef, {
+        ...updatableMetaFields,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      metaBatch.set(metaRef, {
+        ...metaFields,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
 
     for (let idx = chunks.length; idx < previousChunkCount; idx++) {
       const staleRef = doc(db, 'users', uid, 'backupChunks', `chunk_${idx}`);
@@ -3183,42 +3203,78 @@ export async function removeOrgWorkspaceFromBackupMeta(
   try {
     const metaRef = doc(db, 'users', safeUid, 'backup', 'meta');
     const metaSnap = await getDoc(metaRef);
-    if (!metaSnap.exists()) return;
-    const raw = metaSnap.data() as Record<string, unknown>;
-    const existingOrgs =
-      raw.orgWorkspaces &&
-      typeof raw.orgWorkspaces === 'object' &&
-      !Array.isArray(raw.orgWorkspaces)
-        ? (raw.orgWorkspaces as Record<string, OrgWorkspaceData>)
-        : null;
+    if (metaSnap.exists()) {
+      const raw = metaSnap.data() as Record<string, unknown>;
+      const existingOrgs =
+        raw.orgWorkspaces &&
+        typeof raw.orgWorkspaces === 'object' &&
+        !Array.isArray(raw.orgWorkspaces)
+          ? (raw.orgWorkspaces as Record<string, OrgWorkspaceData>)
+          : null;
 
-    let changed = false;
-    const nextOrgs: Record<string, OrgWorkspaceData> = {};
-    if (existingOrgs) {
-      for (const [k, ws] of Object.entries(existingOrgs)) {
-        if (k === cleanOrgId || ws?.organization?.id === cleanOrgId) {
-          changed = true;
-          continue;
+      let changed = false;
+      const nextOrgs: Record<string, OrgWorkspaceData> = {};
+      if (existingOrgs) {
+        for (const [k, ws] of Object.entries(existingOrgs)) {
+          if (k === cleanOrgId || ws?.organization?.id === cleanOrgId) {
+            changed = true;
+            continue;
+          }
+          nextOrgs[k] = ws;
         }
-        nextOrgs[k] = ws;
+      }
+
+      const activeWasDeleted = raw.activeWorkspace === cleanOrgId;
+      if (changed || activeWasDeleted) {
+        // CRITICAL: Must use `updateDoc` (NOT `setDoc(..., { merge: true })`) so Firestore
+        // replaces the top-level `orgWorkspaces` map instead of deep-merging deleted keys back.
+        await updateDoc(metaRef, {
+          ...(changed ? { orgWorkspaces: stripUndefinedDeep(nextOrgs) } : {}),
+          ...(activeWasDeleted ? { activeWorkspace: 'personal' } : {}),
+          updatedAtMs: Date.now(),
+          updatedAt: serverTimestamp(),
+        });
       }
     }
-
-    const activeWasDeleted = raw.activeWorkspace === cleanOrgId;
-    if (!changed && !activeWasDeleted) return;
-
-    await setDoc(
-      metaRef,
-      {
-        ...(changed ? { orgWorkspaces: stripUndefinedDeep(nextOrgs) } : {}),
-        ...(activeWasDeleted ? { activeWorkspace: 'personal' } : {}),
-        updatedAtMs: Date.now(),
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
   } catch (error) {
     console.warn(`[removeOrgWorkspaceFromBackupMeta] (${cleanOrgId}) warning:`, error);
+  }
+
+  // Also scrub any legacy `users/{uid}/backups/latest` fallback doc so it can never resurrect the org
+  try {
+    const legacyRef = doc(db, 'users', safeUid, 'backups', 'latest');
+    const legacySnap = await getDoc(legacyRef);
+    if (legacySnap.exists()) {
+      const raw = legacySnap.data() as Record<string, unknown>;
+      const existingOrgs =
+        raw.orgWorkspaces &&
+        typeof raw.orgWorkspaces === 'object' &&
+        !Array.isArray(raw.orgWorkspaces)
+          ? (raw.orgWorkspaces as Record<string, OrgWorkspaceData>)
+          : null;
+      let changed = false;
+      const nextOrgs: Record<string, OrgWorkspaceData> = {};
+      if (existingOrgs) {
+        for (const [k, ws] of Object.entries(existingOrgs)) {
+          if (k === cleanOrgId || ws?.organization?.id === cleanOrgId) {
+            changed = true;
+            continue;
+          }
+          nextOrgs[k] = ws;
+        }
+      }
+      const activeWasDeleted = raw.activeWorkspace === cleanOrgId;
+      if (changed || activeWasDeleted) {
+        await updateDoc(legacyRef, {
+          ...(changed ? { orgWorkspaces: stripUndefinedDeep(nextOrgs) } : {}),
+          ...(activeWasDeleted ? { activeWorkspace: 'personal' } : {}),
+          updatedAtMs: Date.now(),
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+      }
+    }
+  } catch {
+    // Legacy doc is optional / may not exist
   }
 }
 

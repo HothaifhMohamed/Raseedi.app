@@ -9,6 +9,11 @@ import {
   mergeSettingsPreservingTheme,
   readStoredThemePreference,
 } from './workspaceSync';
+import {
+  filterDeletedOrgWorkspaces,
+  loadDeletedOrgIds,
+  resolveSafeActiveWorkspace,
+} from './workspaceCleanup';
 
 export interface CloudStartupCheckInput {
   localTransactionsCount: number;
@@ -58,13 +63,16 @@ export interface MergeCloudAndLocalInput {
     activeWorkspace?: string;
   };
   preferCloud?: boolean;
+  deletedOrgIds?: Iterable<string>;
 }
 
 export function mergeCloudAndLocalState(params: MergeCloudAndLocalInput): Omit<AppDatabaseData, 'user'> & {
   orgWorkspaces?: Record<string, OrgWorkspaceData>;
   activeWorkspace?: string;
 } {
-  const { localData, cloudData, preferCloud = true } = params;
+  const { localData, cloudData, preferCloud = true, deletedOrgIds } = params;
+  const effectiveDeletedIds =
+    deletedOrgIds !== undefined ? Array.from(deletedOrgIds) : loadDeletedOrgIds();
   const cloudTxs = Array.isArray(cloudData.transactions) ? cloudData.transactions : [];
   const localTxs = Array.isArray(localData.transactions) ? localData.transactions : [];
 
@@ -84,6 +92,14 @@ export function mergeCloudAndLocalState(params: MergeCloudAndLocalInput): Omit<A
     ? mergeArrayById(cloudCategories, localCategories)
     : mergeArrayById(localCategories, cloudCategories);
 
+  const mergedOrgWorkspaces = filterDeletedOrgWorkspaces(
+    {
+      ...(localData.orgWorkspaces || {}),
+      ...(cloudData.orgWorkspaces || {}),
+    },
+    effectiveDeletedIds
+  );
+
   return {
     transactions: sortTransactionsDescending(mergedTransactions),
     wallets: mergedWallets,
@@ -93,11 +109,11 @@ export function mergeCloudAndLocalState(params: MergeCloudAndLocalInput): Omit<A
     goals: mergeArrayById(cloudData.goals || [], localData.goals || []),
     templates: mergeArrayById(cloudData.templates || [], localData.templates || []),
     moneyCircles: mergeArrayById(cloudData.moneyCircles || [], localData.moneyCircles || []),
-    orgWorkspaces: {
-      ...(localData.orgWorkspaces || {}),
-      ...(cloudData.orgWorkspaces || {}),
-    },
-    activeWorkspace: cloudData.activeWorkspace || localData.activeWorkspace,
+    orgWorkspaces: mergedOrgWorkspaces,
+    activeWorkspace: resolveSafeActiveWorkspace(
+      cloudData.activeWorkspace || localData.activeWorkspace,
+      effectiveDeletedIds
+    ),
     settings: mergeSettingsPreservingTheme(
       localData.settings,
       cloudData.settings,

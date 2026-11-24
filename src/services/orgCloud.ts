@@ -4,6 +4,7 @@
  */
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocFromServer,
@@ -63,6 +64,10 @@ import {
   isFirestoreMissingIndexError,
   sortTransactionsDescending,
 } from './orgTransactionQuery';
+import {
+  isServerConfirmedOrgMissingError,
+  shouldFallbackDirectOrgDelete,
+} from './workspaceCleanup';
 import {
   checkOrgSeatAvailability,
   computeEmailLookupHash,
@@ -2230,44 +2235,67 @@ export async function deleteOrganizationWorkspaceCloud(params: {
       await deleteOrgOnServer(cleanOrgId, params.orgName);
       deletedViaServer = true;
     } catch (err) {
-      const isAlreadyMissing =
-        err instanceof ServerApiError &&
-        (err.status === 404 || err.code === 'ORG_NOT_FOUND');
-      const isServerUnavailable =
-        err instanceof ServerApiError &&
-        (err.code === 'CLOUD_ADMIN_UNAVAILABLE' || err.status === 501 || err.status === 503 || err.status === 0);
-      if (isAlreadyMissing) {
+      if (isServerConfirmedOrgMissingError(err)) {
+        // Backend explicitly confirmed the organization no longer exists in Firestore.
         deletedViaServer = true;
-      } else if (!isServerUnavailable) {
+      } else if (!shouldFallbackDirectOrgDelete(err)) {
+        // Real authorization / confirmation rejection (e.g. 403 FORBIDDEN, 400 CONFIRM_NAME_MISMATCH)
         throw err;
       }
+      // Otherwise (static host 404, 501/503/CLOUD_ADMIN_UNAVAILABLE, network error) fall through
+      // to direct atomic Firestore owner deletion below.
     }
 
     if (!deletedViaServer && params.uid && auth.currentUser?.uid === params.uid) {
       const uid = params.uid;
-      await runTransaction(db, async (tx) => {
-        const orgDocRef = doc(db, 'organizations', cleanOrgId);
-        const ownerMemberRef = doc(db, 'organizations', cleanOrgId, 'members', uid);
-        const ownerOrgRef = doc(db, 'users', uid, 'orgRefs', cleanOrgId);
-        const [orgSnap, memberSnap, userRefSnap] = await Promise.all([
-          tx.get(orgDocRef),
-          tx.get(ownerMemberRef),
-          tx.get(ownerOrgRef),
-        ]);
-        if (orgSnap.exists()) {
-          tx.delete(orgDocRef);
+      const orgDocRef = doc(db, 'organizations', cleanOrgId);
+      const ownerMemberRef = doc(db, 'organizations', cleanOrgId, 'members', uid);
+      const ownerOrgRef = doc(db, 'users', uid, 'orgRefs', cleanOrgId);
+      try {
+        await runTransaction(db, async (tx) => {
+          const [orgSnap, memberSnap, userRefSnap] = await Promise.all([
+            tx.get(orgDocRef),
+            tx.get(ownerMemberRef),
+            tx.get(ownerOrgRef),
+          ]);
+          if (orgSnap.exists()) {
+            tx.delete(orgDocRef);
+          }
+          if (memberSnap.exists()) {
+            tx.delete(ownerMemberRef);
+          }
+          if (userRefSnap.exists()) {
+            tx.delete(ownerOrgRef);
+          }
+        });
+      } catch (txErr) {
+        // If the org/member document was already removed, reading organizations/{orgId} inside
+        // runTransaction fails with permission-denied because isOrgMemberActive() is false.
+        // Firestore rules explicitly allow deleting an orphan users/{uid}/orgRefs/{orgId} when
+        // !exists(/databases/.../organizations/{orgId}). Try that cleanup before failing.
+        try {
+          await deleteDoc(ownerOrgRef);
+        } catch {
+          throw txErr;
         }
-        if (memberSnap.exists()) {
-          tx.delete(ownerMemberRef);
-        }
-        if (userRefSnap.exists()) {
-          tx.delete(ownerOrgRef);
-        }
-      });
+      }
     }
   }
 
   if (params.uid) {
+    // Also clean up any stray orphan orgRef even when hasCloudOrgRef was false or ORG_NOT_FOUND
+    if (auth.currentUser?.uid === params.uid) {
+      try {
+        const strayOrgRef = doc(db, 'users', params.uid, 'orgRefs', cleanOrgId);
+        const straySnap = await getDoc(strayOrgRef);
+        if (straySnap.exists()) {
+          await deleteDoc(strayOrgRef);
+        }
+      } catch {
+        // Ignore if already deleted or not removable directly
+      }
+    }
+
     await Promise.all([
       deleteWorkspaceTransactionsCloud(params.uid, cleanOrgId),
       removeOrgWorkspaceFromBackupMeta(params.uid, cleanOrgId),

@@ -221,7 +221,13 @@ import {
   writeStoredThemePreference,
 } from '../services/workspaceSync';
 import {
+  clearDeletedOrgId,
+  filterDeletedOrgRefs,
+  filterDeletedOrgWorkspaces,
+  loadDeletedOrgIds,
+  recordDeletedOrgId,
   resolveFallbackWorkspaceAfterDelete,
+  resolveSafeActiveWorkspace,
   resolveWorkspaceOrgPermissions,
 } from '../services/workspaceCleanup';
 import type { BackupHistorySummary } from '../services/backupHistory';
@@ -759,7 +765,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   } | null>(null);
   if (syncBootstrapRef.current === null) {
     const bootData = loadSyncBootstrapData();
-    const initialWorkspace = loadActiveWorkspacePref();
+    const initialDeletedOrgIds = loadDeletedOrgIds();
+    const initialWorkspace = resolveSafeActiveWorkspace(loadActiveWorkspacePref(), initialDeletedOrgIds);
     const initialGuestMode = loadGuestModePref();
     const initialOrgSnapshot =
       initialWorkspace !== 'personal' ? loadCachedActiveOrgSnapshot(initialWorkspace) : null;
@@ -890,6 +897,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Local-first Organization Workspaces + Legacy Migration State
   const [localOrgWorkspaces, setLocalOrgWorkspaces] = useState<Record<string, OrgWorkspaceData>>({});
   const latestLocalOrgWorkspacesRef = React.useRef<Record<string, OrgWorkspaceData>>({});
+  const deletedOrgIdsRef = React.useRef<Set<string>>(new Set(loadDeletedOrgIds()));
   const activeWorkspaceRef = React.useRef<string>(boot.initialWorkspace);
   activeWorkspaceRef.current = activeWorkspace;
   const [legacyLocalOrgs, setLegacyLocalOrgs] = useState<OrgWorkspaceData[]>([]);
@@ -2278,17 +2286,28 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setHasUnsyncedLocalChanges(preservedLocalOverEmptyCloud);
 
       if (backup.orgWorkspaces && typeof backup.orgWorkspaces === 'object' && !Array.isArray(backup.orgWorkspaces)) {
-        const validEntries = Object.entries(backup.orgWorkspaces).filter(
+        const sanitizedCloudOrgWorkspaces = filterDeletedOrgWorkspaces(
+          backup.orgWorkspaces,
+          deletedOrgIdsRef.current
+        );
+        const validEntries = Object.entries(sanitizedCloudOrgWorkspaces).filter(
           ([, w]) => Boolean(w && w.organization && w.organization.id)
         );
         if (validEntries.length > 0) {
-          const mergedMap = {
-            ...latestLocalOrgWorkspacesRef.current,
-            ...Object.fromEntries(validEntries),
-          };
+          const mergedMap = filterDeletedOrgWorkspaces(
+            {
+              ...latestLocalOrgWorkspacesRef.current,
+              ...Object.fromEntries(validEntries),
+            },
+            deletedOrgIdsRef.current
+          );
           latestLocalOrgWorkspacesRef.current = mergedMap;
           setLocalOrgWorkspaces(mergedMap);
-          void saveOrgWorkspaces(backup.activeWorkspace || activeWorkspaceRef.current || 'personal', mergedMap);
+          const safeActiveWs = resolveSafeActiveWorkspace(
+            backup.activeWorkspace || activeWorkspaceRef.current || 'personal',
+            deletedOrgIdsRef.current
+          );
+          void saveOrgWorkspaces(safeActiveWs, mergedMap);
 
           const unmigratedList = Object.values(mergedMap).filter(
             (w): w is OrgWorkspaceData =>
@@ -2629,7 +2648,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       };
       applyThemeToDocument(resolvedSettings.theme);
 
-      const loadedOrgMap = orgData.workspaces || {};
+      deletedOrgIdsRef.current = new Set(loadDeletedOrgIds());
+      const loadedOrgMap = filterDeletedOrgWorkspaces(
+        orgData.workspaces || {},
+        deletedOrgIdsRef.current
+      );
       latestLocalOrgWorkspacesRef.current = loadedOrgMap;
       hasLoadedLocalOrgWorkspacesRef.current = true;
 
@@ -2648,9 +2671,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setLocalOrgWorkspacesLoaded(true);
 
       const savedWsPref = loadActiveWorkspacePref();
-      const resolvedSavedWs = savedWsPref !== 'personal' ? savedWsPref : orgData.activeWorkspace;
-      if (resolvedSavedWs && resolvedSavedWs !== 'personal' && resolvedSavedWs !== activeWorkspaceRef.current) {
-        setActiveWorkspace(resolvedSavedWs);
+      const rawResolvedSavedWs = savedWsPref !== 'personal' ? savedWsPref : orgData.activeWorkspace;
+      const resolvedSavedWs = resolveSafeActiveWorkspace(rawResolvedSavedWs, deletedOrgIdsRef.current);
+      if (resolvedSavedWs !== activeWorkspaceRef.current) {
+        if (resolvedSavedWs !== 'personal') {
+          activeWorkspaceRef.current = resolvedSavedWs;
+          setActiveWorkspace(resolvedSavedWs);
+        } else if (activeWorkspaceRef.current !== 'personal') {
+          activeWorkspaceRef.current = 'personal';
+          setActiveWorkspace('personal');
+          saveActiveWorkspacePref('personal');
+          saveCachedActiveOrgSnapshot(null);
+        }
       }
 
       const legacyList = Object.values(loadedOrgMap).filter(
@@ -3649,8 +3681,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const unsub = subscribeUserOrgRefs(
       user.id,
       (refs) => {
-        setOrgRefs(refs);
-        saveCachedOrgRefs(refs);
+        const safeRefs = filterDeletedOrgRefs(refs, deletedOrgIdsRef.current);
+        setOrgRefs(safeRefs);
+        saveCachedOrgRefs(safeRefs);
         setOrgRefsLoaded(true);
       },
       (err) => {
@@ -4622,20 +4655,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setLastCloudBackupExists(Boolean(cloudBackup || recoveredForWorkspace.length > 0));
         } else {
           recoveredOrgCount = recoveredForWorkspace.length;
-          const targetWs =
-            latestLocalOrgWorkspacesRef.current[currentWsId] ||
-            cloudBackup?.orgWorkspaces?.[currentWsId];
-          if (targetWs) {
-            const nextMap: Record<string, OrgWorkspaceData> = {
-              ...latestLocalOrgWorkspacesRef.current,
-              [currentWsId]: {
-                ...targetWs,
-                transactions: recoveredForWorkspace,
-              },
-            };
-            latestLocalOrgWorkspacesRef.current = nextMap;
-            setLocalOrgWorkspaces(nextMap);
-            void saveOrgWorkspaces(activeWorkspaceRef.current, nextMap);
+          if (!deletedOrgIdsRef.current.has(currentWsId)) {
+            const targetWs =
+              latestLocalOrgWorkspacesRef.current[currentWsId] ||
+              cloudBackup?.orgWorkspaces?.[currentWsId];
+            if (targetWs) {
+              const nextMap: Record<string, OrgWorkspaceData> = {
+                ...latestLocalOrgWorkspacesRef.current,
+                [currentWsId]: {
+                  ...targetWs,
+                  transactions: recoveredForWorkspace,
+                },
+              };
+              latestLocalOrgWorkspacesRef.current = nextMap;
+              setLocalOrgWorkspaces(nextMap);
+              void saveOrgWorkspaces(activeWorkspaceRef.current, nextMap);
+            }
           }
           setLastCloudBackupExists(Boolean(cloudBackup || recoveredForWorkspace.length > 0));
         }
@@ -5281,12 +5316,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   );
 
   const queueLegacyOrgsForMigration = useCallback((workspaces: Record<string, OrgWorkspaceData>) => {
-    const list = Object.values(workspaces || {}).filter(
+    const sanitizedWorkspaces = filterDeletedOrgWorkspaces(workspaces || {}, deletedOrgIdsRef.current);
+    const list = Object.values(sanitizedWorkspaces).filter(
       (w): w is OrgWorkspaceData =>
         Boolean(w && w.organization && w.organization.id && !isRetainedExtrasOnlyWorkspace(w))
     );
     if (list.length === 0) return;
-    const mergedMap = { ...latestLocalOrgWorkspacesRef.current, ...workspaces };
+    const mergedMap = { ...latestLocalOrgWorkspacesRef.current, ...sanitizedWorkspaces };
     latestLocalOrgWorkspacesRef.current = mergedMap;
     setLocalOrgWorkspaces(mergedMap);
     void saveOrgWorkspaces(activeWorkspaceRef.current || 'personal', mergedMap);
@@ -5372,12 +5408,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
           if (createdCloud) {
             const { orgId, organization, orgRef } = createdCloud;
+            deletedOrgIdsRef.current.delete(orgId);
+            clearDeletedOrgId(orgId);
             // Optimistically register Cloud OrgRef so isCloudOrg is true immediately
-            setOrgRefs((prev) =>
-              prev.some((r) => r.orgId === orgId)
+            setOrgRefs((prev) => {
+              const nextRefs = prev.some((r) => r.orgId === orgId)
                 ? prev.map((r) => (r.orgId === orgId ? orgRef : r))
-                : [...prev, orgRef]
-            );
+                : [...prev, orgRef];
+              saveCachedOrgRefs(nextRefs);
+              return nextRefs;
+            });
             setActiveCloudOrg(organization);
 
             // Ensure no stale local-only shadow exists for the same ID
@@ -5417,6 +5457,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       });
 
       const orgId = localWs.organization.id;
+      deletedOrgIdsRef.current.delete(orgId);
+      clearDeletedOrgId(orgId);
       const nextMap: Record<string, OrgWorkspaceData> = {
         ...latestLocalOrgWorkspacesRef.current,
         [orgId]: localWs,
@@ -5571,6 +5613,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
       try {
         const res = await joinOrgByInviteCode(normalized);
+        deletedOrgIdsRef.current.delete(res.orgId);
+        clearDeletedOrgId(res.orgId);
+        activeWorkspaceRef.current = res.orgId;
         setActiveWorkspace(res.orgId);
         saveActiveWorkspacePref(res.orgId);
         setHasCompletedOnboarding(true);
@@ -6432,12 +6477,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         ? user.id || auth.currentUser?.uid || null
         : auth.currentUser?.uid || null;
 
-      await deleteOrganizationWorkspaceCloud({
-        orgId: orgIdToDelete,
-        orgName: confirmName.trim() || targetOrgName.trim(),
-        uid: uidForCloud,
-        hasCloudOrgRef: Boolean(cloudRef),
-      });
+      // Guard in-flight snapshot listeners against resurrecting the org during cloud deletion
+      deletedOrgIdsRef.current.add(orgIdToDelete);
+      try {
+        await deleteOrganizationWorkspaceCloud({
+          orgId: orgIdToDelete,
+          orgName: confirmName.trim() || targetOrgName.trim(),
+          uid: uidForCloud,
+          hasCloudOrgRef: Boolean(cloudRef),
+        });
+      } catch (err) {
+        deletedOrgIdsRef.current.delete(orgIdToDelete);
+        throw err;
+      }
+
+      // Persist tombstone so stale cloud backups / caches / reloads can never resurrect this org
+      recordDeletedOrgId(orgIdToDelete);
 
       const nextWorkspace = resolveFallbackWorkspaceAfterDelete(
         activeWorkspaceRef.current,
@@ -6446,13 +6501,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const nextMap = await deleteLocalOrgWorkspaceStorage(orgIdToDelete, nextWorkspace);
       latestLocalOrgWorkspacesRef.current = nextMap;
       setLocalOrgWorkspaces(nextMap);
-      setOrgRefs((prev) => prev.filter((r) => r.orgId !== orgIdToDelete));
+      setOrgRefs((prev) => {
+        const filtered = prev.filter((r) => r.orgId !== orgIdToDelete);
+        saveCachedOrgRefs(filtered);
+        return filtered;
+      });
       setLegacyLocalOrgs((prev) => prev.filter((w) => w.organization.id !== orgIdToDelete));
+
+      // Clear any cached active org snapshot that referenced the deleted org
+      if (loadCachedActiveOrgSnapshot(orgIdToDelete)) {
+        saveCachedActiveOrgSnapshot(null);
+      }
 
       if (nextWorkspace !== activeWorkspaceRef.current) {
         syncRequestIdRef.current += 1;
-        setActiveWorkspace('personal');
-        saveActiveWorkspacePref('personal');
+        activeWorkspaceRef.current = nextWorkspace;
+        setActiveWorkspace(nextWorkspace);
+        saveActiveWorkspacePref(nextWorkspace);
+        saveCachedActiveOrgSnapshot(null);
+        setOrgActionError(null);
         setActiveWalletId(null);
         setSelectedTransactionIds([]);
         resetFilters();

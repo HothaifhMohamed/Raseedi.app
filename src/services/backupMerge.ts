@@ -1,6 +1,11 @@
 import { OrgWorkspaceData, Transaction } from '../types';
 import { AppDatabaseData } from './db';
 import { mergeTransactionsById } from './orgTransactionQuery';
+import {
+  filterDeletedOrgWorkspaces,
+  loadDeletedOrgIds,
+  resolveSafeActiveWorkspace,
+} from './workspaceCleanup';
 
 export interface CloudBackupWriteCandidate {
   transactions: Transaction[];
@@ -43,16 +48,39 @@ function mergeById<T extends { id: string; updatedAt?: number }>(localList: T[],
 
 /**
  * Prevents auto-sync or stale/empty localStorage from overwriting non-empty cloud data
- * with an empty array, and merges existing cloud records safely when needed.
+ * with an empty array, and merges existing cloud records safely when needed while
+ * strictly stripping any deleted organizations so they can never be resurrected.
  */
 export function resolveSafeCloudBackupWrite(params: {
   localData: CloudBackupWriteCandidate;
   existingCloud: ExistingCloudSnapshotSummary | null;
   source?: 'auto' | 'manual';
   allowEmptyOverwrite?: boolean;
+  deletedOrgIds?: Iterable<string>;
 }): SafeCloudBackupDecision {
-  const { localData, existingCloud, source = 'auto', allowEmptyOverwrite = false } = params;
-  const localTxCount = (localData.transactions || []).length;
+  const {
+    localData,
+    existingCloud,
+    source = 'auto',
+    allowEmptyOverwrite = false,
+    deletedOrgIds,
+  } = params;
+  const effectiveDeletedIds =
+    deletedOrgIds !== undefined ? Array.from(deletedOrgIds) : loadDeletedOrgIds();
+  const sanitizedLocalOrgs =
+    localData.orgWorkspaces !== undefined
+      ? filterDeletedOrgWorkspaces(localData.orgWorkspaces, effectiveDeletedIds)
+      : undefined;
+  const sanitizedLocalActive = localData.activeWorkspace
+    ? resolveSafeActiveWorkspace(localData.activeWorkspace, effectiveDeletedIds)
+    : undefined;
+  const cleanLocalData: CloudBackupWriteCandidate = {
+    ...localData,
+    ...(sanitizedLocalOrgs !== undefined ? { orgWorkspaces: sanitizedLocalOrgs } : {}),
+    ...(sanitizedLocalActive !== undefined ? { activeWorkspace: sanitizedLocalActive } : {}),
+  };
+
+  const localTxCount = (cleanLocalData.transactions || []).length;
   const cloudTotalTx = Number(
     existingCloud?.totalTransactions ?? existingCloud?.data?.transactions?.length ?? 0
   );
@@ -65,30 +93,37 @@ export function resolveSafeCloudBackupWrite(params: {
 
     const cloud = existingCloud?.data;
     if (cloud && Array.isArray(cloud.transactions) && cloud.transactions.length > 0) {
+      const mergedOrgs = filterDeletedOrgWorkspaces(
+        {
+          ...(cloud.orgWorkspaces || {}),
+          ...(cleanLocalData.orgWorkspaces || {}),
+        },
+        effectiveDeletedIds
+      );
       return {
         action: 'write',
         preservedFromCloud: true,
         mergedData: {
-          ...localData,
-          transactions: mergeTransactionsById(localData.transactions || [], cloud.transactions),
+          ...cleanLocalData,
+          transactions: mergeTransactionsById(cleanLocalData.transactions || [], cloud.transactions),
           wallets:
-            (localData.wallets || []).length > 0
-              ? mergeById(localData.wallets || [], cloud.wallets || [])
+            (cleanLocalData.wallets || []).length > 0
+              ? mergeById(cleanLocalData.wallets || [], cloud.wallets || [])
               : cloud.wallets || [],
           categories:
-            (localData.categories || []).length > 0
-              ? mergeById(localData.categories || [], cloud.categories || [])
+            (cleanLocalData.categories || []).length > 0
+              ? mergeById(cleanLocalData.categories || [], cloud.categories || [])
               : cloud.categories || [],
-          budgets: mergeById(localData.budgets || [], cloud.budgets || []),
-          debts: mergeById(localData.debts || [], cloud.debts || []),
-          goals: mergeById(localData.goals || [], cloud.goals || []),
-          templates: mergeById(localData.templates || [], cloud.templates || []),
-          moneyCircles: mergeById(localData.moneyCircles || [], cloud.moneyCircles || []),
-          orgWorkspaces: {
-            ...(cloud.orgWorkspaces || {}),
-            ...(localData.orgWorkspaces || {}),
-          },
-          activeWorkspace: localData.activeWorkspace || cloud.activeWorkspace,
+          budgets: mergeById(cleanLocalData.budgets || [], cloud.budgets || []),
+          debts: mergeById(cleanLocalData.debts || [], cloud.debts || []),
+          goals: mergeById(cleanLocalData.goals || [], cloud.goals || []),
+          templates: mergeById(cleanLocalData.templates || [], cloud.templates || []),
+          moneyCircles: mergeById(cleanLocalData.moneyCircles || [], cloud.moneyCircles || []),
+          orgWorkspaces: mergedOrgs,
+          activeWorkspace: resolveSafeActiveWorkspace(
+            cleanLocalData.activeWorkspace || cloud.activeWorkspace,
+            effectiveDeletedIds
+          ),
         },
       };
     }
@@ -99,7 +134,7 @@ export function resolveSafeCloudBackupWrite(params: {
   return {
     action: 'write',
     preservedFromCloud: false,
-    mergedData: localData,
+    mergedData: cleanLocalData,
   };
 }
 
